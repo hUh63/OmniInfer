@@ -13,6 +13,7 @@ pub mod model_load;
 pub mod paths;
 pub mod public_models;
 pub mod request_normalization;
+pub mod resource_ledger;
 pub mod runtime_plan;
 pub mod runtime_process;
 pub mod serve_state;
