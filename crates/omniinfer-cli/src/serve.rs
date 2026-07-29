@@ -301,6 +301,11 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
     reject_embedded_serve_backend(args)?;
     let public_config = config.clone();
     ensure_serve_port_available(&public_config)?;
+    let cloudflared = if args.cloudflare {
+        Some(resolve_cloudflared(args.cloudflared_path.as_deref())?)
+    } else {
+        None
+    };
     let log_path = paths::local_logs_dir().join(format!("serve-{}.log", public_config.port));
     println!("Starting OmniInfer service on port {}...", config.port);
     println!("Log: {}", log_path.display());
@@ -319,8 +324,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
     }
     let mut cloudflared_child = None;
     let mut public_url = None;
-    if args.cloudflare {
-        let cloudflared = resolve_cloudflared(args.cloudflared_path.as_deref())?;
+    if let Some(cloudflared) = cloudflared {
         let local_url = format!("http://127.0.0.1:{}", config.port);
         let (child, url) =
             match start_cloudflare_quick_tunnel(&cloudflared, &local_url, &log_path, args.detach) {
