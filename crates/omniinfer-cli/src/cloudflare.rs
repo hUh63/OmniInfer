@@ -18,9 +18,10 @@ use crate::{detach_child_process, hide_child_window};
 const CLOUDFLARED_VERSION: &str = "2026.5.0";
 const CLOUDFLARED_RELEASE_BASE_URL: &str =
     "https://github.com/cloudflare/cloudflared/releases/download/2026.5.0";
-const CLOUDFLARED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const CLOUDFLARED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_CLOUDFLARED_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CLOUDFLARED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+const DOWNLOAD_PROGRESS_INTERVAL_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CloudflaredAsset {
@@ -256,18 +257,19 @@ where
 
 fn download_cloudflared_asset(url: &str) -> Result<Vec<u8>> {
     let mut last_error = String::new();
-    for attempt in 1..=3 {
+    for attempt in 1..=2 {
         match download_cloudflared_asset_once(url) {
             Ok(bytes) => return Ok(bytes),
             Err(error) => {
                 last_error = error.to_string();
-                if attempt < 3 {
+                if attempt < 2 {
+                    println!("cloudflared download failed; retrying once: {last_error}");
                     thread::sleep(Duration::from_secs(attempt));
                 }
             }
         }
     }
-    anyhow::bail!("failed to download {url} after 3 attempts: {last_error}")
+    anyhow::bail!("failed to download {url} after 2 attempts: {last_error}")
 }
 
 fn download_cloudflared_asset_once(url: &str) -> Result<Vec<u8>> {
@@ -281,18 +283,51 @@ fn download_cloudflared_asset_once(url: &str) -> Result<Vec<u8>> {
         .header("User-Agent", "OmniInfer-cloudflared-installer")
         .call()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if response
-        .body()
-        .content_length()
-        .is_some_and(|size| size > MAX_CLOUDFLARED_ASSET_BYTES)
-    {
+    let total = response.body().content_length();
+    if total.is_some_and(|size| size > MAX_CLOUDFLARED_ASSET_BYTES) {
         anyhow::bail!("cloudflared asset exceeds the 128 MiB limit");
     }
-    read_bounded(
+    read_bounded_with_progress(
         response.body_mut().as_reader(),
         MAX_CLOUDFLARED_ASSET_BYTES,
-        "cloudflared asset",
+        total,
     )
+}
+
+fn read_bounded_with_progress(
+    mut reader: impl Read,
+    limit: u64,
+    total: Option<u64>,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(total.unwrap_or_default().min(32 * 1024 * 1024) as usize);
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut next_report = DOWNLOAD_PROGRESS_INTERVAL_BYTES;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() as u64 + count as u64 > limit {
+            anyhow::bail!("cloudflared asset exceeds the 128 MiB limit");
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if bytes.len() as u64 >= next_report {
+            print_download_progress(bytes.len() as u64, total);
+            next_report = bytes.len() as u64 + DOWNLOAD_PROGRESS_INTERVAL_BYTES;
+        }
+    }
+    print_download_progress(bytes.len() as u64, total);
+    Ok(bytes)
+}
+
+fn print_download_progress(downloaded: u64, total: Option<u64>) {
+    let downloaded_mib = downloaded as f64 / (1024.0 * 1024.0);
+    if let Some(total) = total {
+        let total_mib = total as f64 / (1024.0 * 1024.0);
+        println!("Downloading cloudflared: {downloaded_mib:.1}/{total_mib:.1} MiB");
+    } else {
+        println!("Downloading cloudflared: {downloaded_mib:.1} MiB");
+    }
 }
 
 fn extract_cloudflared_binary(asset_name: &str, archive: &[u8]) -> Result<Vec<u8>> {
