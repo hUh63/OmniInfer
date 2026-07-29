@@ -481,12 +481,11 @@ pub(crate) fn start_cloudflare_quick_tunnel(
     let output = OpenOptions::new()
         .create(true)
         .append(true)
-        .read(true)
         .open(log_path)?;
     let initial_log_length = output.metadata()?.len();
     let stdout = output.try_clone()?;
-    let stderr = output.try_clone()?;
-    let mut reader = BufReader::new(output);
+    let stderr = output;
+    let mut reader = BufReader::new(OpenOptions::new().read(true).open(log_path)?);
     reader.seek(SeekFrom::Start(initial_log_length))?;
     let mut command = ProcessCommand::new(cloudflared);
     command
