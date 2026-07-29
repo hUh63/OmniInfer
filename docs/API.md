@@ -89,7 +89,7 @@ For temporary remote access without router port forwarding or a public IP addres
 ./omniinfer serve --cloudflare
 ```
 
-This keeps the gateway bound to `127.0.0.1`, downloads or updates a managed `cloudflared` binary under `.local/tools/cloudflared`, starts `cloudflared tunnel --url http://127.0.0.1:<port>`, prints a temporary `https://*.trycloudflare.com` URL, and requires an OmniInfer API key for requests arriving through Cloudflare. When combined with `--lan`, the gateway binds to `0.0.0.0` for LAN clients and the tunnel still targets `127.0.0.1`. `/omni/*` management endpoints remain local-only.
+This keeps the gateway bound to `127.0.0.1`, resolves an existing `cloudflared` helper or downloads a verified managed copy under `.local/tools/cloudflared`, starts `cloudflared tunnel --url http://127.0.0.1:<port>`, prints a temporary `https://*.trycloudflare.com` URL, and requires an OmniInfer API key for requests arriving through Cloudflare. When combined with `--lan`, the gateway binds to `0.0.0.0` for LAN clients and the tunnel still targets `127.0.0.1`. `/omni/*` management endpoints remain local-only.
 
 Quick Tunnel is intended for demos and short-lived testing. For best compatibility, use non-streaming requests. See [Remote Access](remote-access.md) for setup, security notes, and examples.
 

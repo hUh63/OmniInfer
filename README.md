@@ -54,6 +54,11 @@ You can also run `omniinfer` with no arguments to open the TUI; when a compatibl
 
 macOS arm64 and Windows x64 CLI-only archives are available from [GitHub Releases](https://github.com/omnimind-ai/OmniInfer/releases). Homebrew, Scoop, npm, and platform-native one-line installers are planned.
 
+`omniinfer serve --cloudflare` automatically downloads and verifies a pinned
+`cloudflared` helper when neither a managed copy nor a system installation is
+available. On macOS, the manual fallback is `brew install cloudflared`; retry
+the command afterward or pass `--cloudflared-path "$(command -v cloudflared)"`.
+
 ### Source And Backend Setup
 
 Use the source installer when you want a repository checkout plus backend runtime setup, source builds, and optional model setup.
