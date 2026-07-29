@@ -501,13 +501,8 @@ pub(crate) fn start_cloudflare_quick_tunnel(
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut tail = Vec::new();
+    let mut public_url = None;
     while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            anyhow::bail!(
-                "cloudflared exited before creating a Quick Tunnel with status {status}.{}",
-                format_log_tail(&tail)
-            );
-        }
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line)? == 0 {
@@ -518,11 +513,24 @@ pub(crate) fn start_cloudflare_quick_tunnel(
                 tail.remove(0);
             }
             tail.push(line.clone());
-            if let Some(url) = parse_trycloudflare_url(&line) {
-                return Ok((child, url));
+            if public_url.is_none()
+                && let Some(url) = parse_trycloudflare_url(&line)
+            {
+                public_url = Some((url, Instant::now()));
             }
         }
-        thread::sleep(Duration::from_millis(200));
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                "cloudflared exited before creating a Quick Tunnel with status {status}.{}",
+                format_log_tail(&tail)
+            );
+        }
+        if let Some((url, observed_at)) = public_url.as_ref()
+            && observed_at.elapsed() >= Duration::from_millis(200)
+        {
+            return Ok((child, url.clone()));
+        }
+        thread::sleep(Duration::from_millis(50));
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -634,6 +642,38 @@ mod tests {
 
         fs::write(&path, b"tampered").expect("tamper binary");
         assert!(!managed_cloudflared_matches(&path, asset));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_helper_that_exits_after_printing_tunnel_url() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_local_dir("exited-helper");
+        fs::create_dir_all(&root).expect("create test directory");
+        let helper = root.join("cloudflared");
+        let log_path = root.join("cloudflared.log");
+        fs::write(
+            &helper,
+            "#!/bin/sh\n\
+             echo 'https://exited-helper.trycloudflare.com'\n\
+             echo 'fatal: tunnel registration failed' >&2\n\
+             exit 9\n",
+        )
+        .expect("write fake helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))
+            .expect("make fake helper executable");
+
+        let error =
+            start_cloudflare_quick_tunnel(&helper, "http://127.0.0.1:8080", &log_path, false)
+                .expect_err("exited helper must not be accepted");
+        let message = error.to_string();
+        assert!(message.contains("status exit status: 9"), "{message}");
+        assert!(
+            message.contains("fatal: tunnel registration failed"),
+            "{message}"
+        );
         fs::remove_dir_all(root).ok();
     }
 
