@@ -416,7 +416,7 @@ Windows:
 .\omniinfer.ps1 serve --cloudflare
 ```
 
-Cloudflare mode uses the same launcher in an interactive terminal when no `--model` is supplied, keeps OmniInfer bound to `127.0.0.1`, downloads or updates a managed `cloudflared` binary under `.local/tools/cloudflared`, prints a temporary `https://*.trycloudflare.com` URL, and requires an API key for remote inference requests. Quick Tunnel is intended for testing and short-lived access; use non-streaming requests for the most reliable behavior. See [Remote Access](remote-access.md).
+Cloudflare mode uses the same launcher in an interactive terminal when no `--model` is supplied, keeps OmniInfer bound to `127.0.0.1`, resolves or downloads a verified `cloudflared` helper, prints a temporary `https://*.trycloudflare.com` URL, and requires an API key for remote inference requests. Helper resolution completes before the gateway starts, so a dependency failure does not leave a local-only gateway running. Quick Tunnel is intended for testing and short-lived access; use non-streaming requests for the most reliable behavior. See [Remote Access](remote-access.md).
 
 Detached services can be checked or stopped without remembering process IDs:
 

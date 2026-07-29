@@ -251,7 +251,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-python3 - "$port" <<'PY'
+exec python3 - "$port" <<'PY'
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -319,7 +319,7 @@ pub(super) fn fake_cloudflared_launcher_unix(
     fs::write(
         &launcher,
         format!(
-            "#!/usr/bin/env bash\nprintf '%s ' \"$@\" > '{}'\necho 'Your quick Tunnel has been created! Visit it at {}'\nsleep 30\n",
+            "#!/usr/bin/env bash\nprintf '%s ' \"$@\" > '{}'\necho 'Your quick Tunnel has been created! Visit it at {}'\nwhile true; do echo 'cloudflared heartbeat'; sleep 0.1; done\n",
             output.display(),
             url
         ),

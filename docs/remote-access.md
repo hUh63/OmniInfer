@@ -143,15 +143,31 @@ curl -sS -H 'Authorization: Bearer oi_inference_key' \
 
 ## Managed cloudflared
 
-OmniInfer uses its own managed `cloudflared` binary by default instead of relying on a system-wide install. This avoids old system versions and keeps Cloudflare mode self-contained.
+OmniInfer resolves `cloudflared` in this order:
 
-On first `--cloudflare` use, OmniInfer selects the asset for the current operating system and CPU architecture from a pinned Cloudflare release, downloads it to:
+1. the path supplied with `--cloudflared-path`
+2. a valid managed helper under `.local/tools/cloudflared/`
+3. an executable `cloudflared` already in `PATH`
+4. an automatically downloaded helper from the pinned Cloudflare release
+
+Helper resolution completes before the gateway starts. A missing helper,
+unsupported platform, download failure, or checksum failure therefore exits
+without leaving a local gateway process behind.
+
+For automatic installation, OmniInfer selects the asset for the current
+operating system and CPU architecture and writes it to:
 
 ```text
 .local/tools/cloudflared/
 ```
 
-The download uses a static GitHub release URL instead of the anonymous GitHub releases API. OmniInfer verifies the asset SHA-256 digest, records the installed version and asset metadata in `.local/tools/cloudflared/manifest.json`, and reuses the managed binary on later Cloudflare starts when it matches the pinned release.
+The download uses a static GitHub release URL instead of the anonymous GitHub
+releases API. OmniInfer reports progress every MiB, enforces a 128 MiB limit,
+verifies the archive SHA-256 digest, safely extracts only the regular
+`cloudflared` file from macOS tgz assets, and installs the helper atomically.
+The manifest records both archive and installed-binary SHA-256 digests. Later
+starts reuse the helper only when its platform, pinned release, executable bit,
+manifest, and binary digest still match.
 
 Supported automatic assets include:
 
@@ -167,13 +183,35 @@ Supported automatic assets include:
 | Windows | x64 / amd64 | `cloudflared-windows-amd64.exe` |
 | Windows | x86 / 386 | `cloudflared-windows-386.exe` |
 
-Advanced users can override the managed binary:
+Advanced users can override helper discovery:
 
 Example:
 
 ```sh
 ./omniinfer serve --cloudflare --cloudflared-path /usr/local/bin/cloudflared
 ```
+
+If automatic installation fails, the CLI prints the pinned asset URL and
+expected SHA-256 digest. It also prints the platform fallback. For macOS:
+
+```sh
+brew install cloudflared
+./omniinfer serve \
+  --cloudflare \
+  --cloudflared-path "$(command -v cloudflared)"
+```
+
+For Windows PowerShell:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+.\omniinfer.exe serve `
+  --cloudflare `
+  --cloudflared-path (Get-Command cloudflared).Source
+```
+
+Linux packages and standalone binaries are documented in the official
+[cloudflared downloads guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
 
 If a default `~/.cloudflared/config.yaml` exists, Quick Tunnel may fail because account-managed tunnel configuration can conflict with account-less Quick Tunnel usage. OmniInfer warns about this but does not modify user Cloudflare files.
 

@@ -943,6 +943,45 @@ fn failed_smoke_test_releases_gateway_port_for_retry() {
     }
 }
 
+#[test]
+fn missing_explicit_cloudflared_does_not_start_gateway() {
+    let port = free_port();
+    let source_root = temp_repo_root("serve-cloudflare-missing-helper-source");
+    let state_root = temp_repo_root("serve-cloudflare-missing-helper-state");
+    let missing = state_root.join("missing-cloudflared");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(&state_root).expect("create state root");
+
+    let mut cmd = Command::cargo_bin("omniinfer").expect("binary exists");
+    cmd.env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .args(["serve", "--detach", "--cloudflare", "--cloudflared-path"])
+        .arg(&missing)
+        .args(["--api-key", "test-key", "--port"])
+        .arg(port.to_string())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cloudflared was not found or is not executable at",
+        ));
+
+    assert!(
+        wait_for_port_closed(port),
+        "missing helper must fail before the gateway starts"
+    );
+    assert!(
+        !state_root
+            .join(".local")
+            .join("run")
+            .join(format!("serve-{port}.json"))
+            .exists(),
+        "failed startup must not publish a serve state file"
+    );
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+}
+
 #[cfg(unix)]
 #[test]
 fn serve_detach_starts_cloudflare_tunnel() {
@@ -998,7 +1037,17 @@ fn serve_detach_starts_cloudflare_tunnel() {
         state["openai_base_url"],
         "https://example-test.trycloudflare.com/v1"
     );
-    assert!(state["cloudflared_pid"].as_u64().unwrap() > 0);
+    let cloudflared_pid = state["cloudflared_pid"].as_u64().unwrap();
+    assert!(cloudflared_pid > 0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        StdCommand::new("kill")
+            .args(["-0", &cloudflared_pid.to_string()])
+            .status()
+            .expect("check cloudflared process")
+            .success(),
+        "detached cloudflared must survive continued log writes"
+    );
     stop_rust_serve(&source_root, &state_root, port);
     fs::remove_dir_all(source_root).ok();
     fs::remove_dir_all(state_root).ok();
