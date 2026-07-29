@@ -251,7 +251,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-python3 - "$port" <<'PY'
+exec python3 - "$port" <<'PY'
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
