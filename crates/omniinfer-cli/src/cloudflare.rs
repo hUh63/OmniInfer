@@ -1,9 +1,8 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -479,37 +478,27 @@ pub(crate) fn start_cloudflare_quick_tunnel(
     log_path: &Path,
     detach: bool,
 ) -> Result<(std::process::Child, String)> {
-    let stdout = OpenOptions::new()
+    let output = OpenOptions::new()
         .create(true)
         .append(true)
+        .read(true)
         .open(log_path)?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
+    let initial_log_length = output.metadata()?.len();
+    let stdout = output.try_clone()?;
+    let stderr = output.try_clone()?;
+    let mut reader = BufReader::new(output);
+    reader.seek(SeekFrom::Start(initial_log_length))?;
     let mut command = ProcessCommand::new(cloudflared);
     command
         .args(["tunnel", "--url", local_url])
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
     hide_child_window(&mut command);
     if detach {
         detach_child_process(&mut command);
     }
     let mut child = command.spawn()?;
-
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture cloudflared stdout"))?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture cloudflared stderr"))?;
-    let (line_tx, line_rx) = mpsc::channel();
-    spawn_cloudflared_reader(stdout_pipe, stdout, line_tx.clone());
-    spawn_cloudflared_reader(stderr_pipe, stderr, line_tx);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut tail = Vec::new();
@@ -520,19 +509,21 @@ pub(crate) fn start_cloudflare_quick_tunnel(
                 format_log_tail(&tail)
             );
         }
-        match line_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => {
-                if tail.len() == 10 {
-                    tail.remove(0);
-                }
-                tail.push(line.clone());
-                if let Some(url) = parse_trycloudflare_url(&line) {
-                    return Ok((child, url));
-                }
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                break;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            let line = line.trim_end().to_string();
+            if tail.len() == 10 {
+                tail.remove(0);
+            }
+            tail.push(line.clone());
+            if let Some(url) = parse_trycloudflare_url(&line) {
+                return Ok((child, url));
+            }
         }
+        thread::sleep(Duration::from_millis(200));
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -540,22 +531,6 @@ pub(crate) fn start_cloudflare_quick_tunnel(
         "Timed out waiting for Cloudflare Quick Tunnel URL.{}",
         format_log_tail(&tail)
     )
-}
-
-fn spawn_cloudflared_reader<R: std::io::Read + Send + 'static>(
-    stream: R,
-    mut log: std::fs::File,
-    line_tx: mpsc::Sender<String>,
-) {
-    thread::spawn(move || {
-        let reader = BufReader::new(stream);
-        for line in reader.lines().map_while(Result::ok) {
-            use std::io::Write;
-            let _ = writeln!(log, "{line}");
-            let _ = log.flush();
-            let _ = line_tx.send(line);
-        }
-    });
 }
 
 fn parse_trycloudflare_url(line: &str) -> Option<String> {

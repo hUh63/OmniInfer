@@ -1037,7 +1037,17 @@ fn serve_detach_starts_cloudflare_tunnel() {
         state["openai_base_url"],
         "https://example-test.trycloudflare.com/v1"
     );
-    assert!(state["cloudflared_pid"].as_u64().unwrap() > 0);
+    let cloudflared_pid = state["cloudflared_pid"].as_u64().unwrap();
+    assert!(cloudflared_pid > 0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        StdCommand::new("kill")
+            .args(["-0", &cloudflared_pid.to_string()])
+            .status()
+            .expect("check cloudflared process")
+            .success(),
+        "detached cloudflared must survive continued log writes"
+    );
     stop_rust_serve(&source_root, &state_root, port);
     fs::remove_dir_all(source_root).ok();
     fs::remove_dir_all(state_root).ok();
