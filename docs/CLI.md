@@ -7,7 +7,7 @@ Android and iOS use the embedded modules under `android/` and `ios/`.
 
 If you are running OmniInfer from a source checkout, prepare at least one local runtime backend before using the CLI.
 
-- Windows: build or install one of `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, or `llama.cpp-hip`; managed `vllm-wsl2-cuda` is also available on WSL2-capable NVIDIA systems. See [Build Guide: Windows](build.md#windows).
+- Windows: build or install one of `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, or `llama.cpp-hip`; managed `vllm-wsl2-cuda` and `vllm-wsl2-rocm` are available for supported WSL2-capable NVIDIA and AMD systems. See [Build Guide: Windows](build.md#windows).
 - Linux: build one of `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, or `vllm-linux-cuda` first. See [Build Guide: Linux](build.md#linux).
 - macOS: build `llama.cpp-mac`, `llama.cpp-mac-intel`, `turboquant-mac`, or `mlx-mac` first. See [Build Guide: macOS](build.md#macos).
 
@@ -89,19 +89,21 @@ Windows:
 .\omniinfer.ps1 backend install llama.cpp-cpu
 .\omniinfer.ps1 backend install llama.cpp-cuda
 .\omniinfer.ps1 backend install vllm-wsl2-cuda --wsl-distro Ubuntu
+.\omniinfer.ps1 backend install vllm-wsl2-rocm --wsl-distro Ubuntu-24.04
 ```
 
 The Windows CUDA entry installs both the llama.cpp CUDA package and its matching CUDA runtime companion package. A system CUDA Toolkit is not required; the NVIDIA driver is still required.
 
 #### Windows vLLM through WSL2
 
-Upstream vLLM does not support native Windows. `vllm-wsl2-cuda` is therefore an OmniInfer-managed WSL2 backend: the Windows CLI owns installation and lifecycle, while the pinned official vLLM Linux wheel, PyTorch, and CUDA user-space libraries live inside a user Linux distribution.
+Upstream vLLM does not support native Windows. `vllm-wsl2-cuda` and `vllm-wsl2-rocm` are therefore OmniInfer-managed WSL2 backends: the Windows CLI owns installation and lifecycle, while pinned official vLLM Linux wheels and their accelerator runtimes live inside a user Linux distribution.
 
 Prerequisites:
 
 - Windows x64 with WSL2 enabled
-- A user distribution such as Ubuntu; `docker-desktop` and `*-data` distributions are intentionally rejected
-- An NVIDIA GPU exposed to WSL2 and Windows NVIDIA driver 576.02 or newer
+- A user Ubuntu distribution; `docker-desktop` and `*-data` distributions are intentionally rejected
+- For `vllm-wsl2-cuda`: an NVIDIA GPU exposed to WSL2 and Windows NVIDIA driver 576.02 or newer
+- For `vllm-wsl2-rocm`: Ubuntu 24.04, AMD Ryzen AI MAX/AI 300 `gfx1151` or `gfx1150`, and AMD Software 26.2.2 or newer with Ryzen WSL support
 - Several GB of download and Linux-disk capacity; the exact size changes with the pinned vLLM/PyTorch dependency set
 
 Install and initialize Ubuntu first if needed:
@@ -110,11 +112,15 @@ Install and initialize Ubuntu first if needed:
 wsl --install -d Ubuntu
 wsl --distribution Ubuntu
 .\omniinfer.exe backend install vllm-wsl2-cuda --wsl-distro Ubuntu
+
+wsl --install -d Ubuntu-24.04
+wsl --distribution Ubuntu-24.04
+.\omniinfer.exe backend install vllm-wsl2-rocm --wsl-distro Ubuntu-24.04
 ```
 
-If exactly one eligible user WSL2 distribution exists, `--wsl-distro` may be omitted. When several exist, it is required. The installer downloads a pinned `uv`, verifies its SHA256, creates a uv-managed Python 3.12 environment, installs the pinned vLLM CUDA wheel with its SHA256, runs dependency checks, and executes a real CUDA tensor probe before activation. Installation is transactional and rerunning the same command is idempotent.
+If exactly one eligible user WSL2 distribution exists, `--wsl-distro` may be omitted. When several exist, it is required. Both installers verify pinned `uv` and vLLM wheel SHA256 values, create a managed Python 3.12 environment, run dependency checks, and execute a real accelerator tensor probe before activation. The ROCm path additionally verifies and installs pinned minimal ROCm 7.2.3 packages plus ROCDXG 1.2.0 into Ubuntu as WSL root, then requires `rocminfo` to expose `gfx1151` or `gfx1150`. It does not install WSL, Ubuntu, or the Windows display driver. Managed Python activation is transactional, and rerunning the same command is idempotent.
 
-`--runtime-root` contains the small Windows launcher manifest, installer tool cache, and logs for this backend. The large Python environment is stored in the selected distribution under `~/.local/share/omniinfer/runtimes/vllm-wsl2-cuda/<runtime-key>/current`. Keep both locations intact. Normal model unload, backend stop, gateway shutdown, and smoke-test cleanup target only the managed vLLM process group; OmniInfer does not terminate the WSL distribution or unrelated Linux workloads.
+`--runtime-root` contains the small Windows launcher manifest, installer tool cache, and logs for these backends. The large Python environment is stored in the selected distribution under `~/.local/share/omniinfer/runtimes/<backend>/<runtime-key>/current`. Keep both locations intact. Normal model unload, backend stop, gateway shutdown, and smoke-test cleanup target only the managed vLLM process group; OmniInfer does not terminate the WSL distribution or unrelated Linux workloads.
 
 Desktop applications can isolate OmniInfer from the package directory with the public global root options. Global options may appear before or after the subcommands:
 
@@ -170,7 +176,7 @@ Examples:
 
 - Linux: `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, or `vllm-linux-cuda`
 - macOS: `llama.cpp-mac`, `llama.cpp-mac-intel`, `turboquant-mac`, or `mlx-mac`
-- Windows: `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, `llama.cpp-hip`, or managed `vllm-wsl2-cuda`
+- Windows: `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, `llama.cpp-hip`, or managed `vllm-wsl2-cuda` / `vllm-wsl2-rocm`
 
 When you select a desktop backend, OmniInfer also creates a backend-specific JSON config template under:
 
@@ -261,7 +267,7 @@ For `llama.cpp-*`, OmniInfer accepts either a model file or a model directory. I
 - the optional `mmproj` GGUF
 
 For `mlx-mac`, OmniInfer passes the model directory directly to the embedded backend.
-For `vllm-linux-cuda` and `vllm-wsl2-cuda`, OmniInfer passes HuggingFace model IDs and other non-path references directly to `vllm serve`. On Windows, an absolute drive path such as `D:\models\Qwen` is translated to the selected distribution's automount path such as `/mnt/d/models/Qwen`. UNC paths are rejected; copy or download the model into a local Windows drive or the selected WSL2 filesystem.
+For `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm`, OmniInfer passes HuggingFace model IDs and other non-path references directly to `vllm serve`. On Windows, an absolute drive path such as `D:\models\Qwen` is translated to the selected distribution's automount path such as `/mnt/d/models/Qwen`. UNC paths are rejected; copy or download the model into a local Windows drive or the selected WSL2 filesystem.
 
 Explicit file path:
 
@@ -299,7 +305,7 @@ For `mlx-mac`, use a vision-capable model directory instead of a `.gguf` file or
 ```
 
 The backend config JSON is where advanced users should put backend-native launch parameters such as `-ngl`, `--threads`, and other backend-specific options.
-For `vllm-linux-cuda` and `vllm-wsl2-cuda`, use `--max-model-len` or the stable OmniInfer `ctx_size` option for context length; OmniInfer maps it to vLLM's `--max-model-len`.
+For `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm`, use `--max-model-len` or the stable OmniInfer `ctx_size` option for context length; OmniInfer maps it to vLLM's `--max-model-len`.
 
 You can also skip `--config` entirely and pass backend-native extra args directly after the stable OmniInfer args. OmniInfer parses those extra args according to the currently selected backend.
 
@@ -323,6 +329,8 @@ Windows WSL2 vLLM example:
 .\omniinfer.exe backend select vllm-wsl2-cuda
 .\omniinfer.exe load -m Qwen/Qwen3.5-4B-Instruct -- --max-model-len 8192 --gpu-memory-utilization 0.85
 ```
+
+Use `vllm-wsl2-rocm` instead on a supported Ryzen AI AMD system.
 
 ### 4. Chat
 

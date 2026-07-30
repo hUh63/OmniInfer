@@ -1,16 +1,18 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "mirrors": [
     "https://ghfast.top/"
   ],
   "sources": {
     "ggml-org/llama.cpp": {
       "tag": "b9500",
+      "submodule_tag": "b9548",
       "submodule_path": "framework/llama.cpp",
-      "submodule_commit": "3d1998634e62b3a9920ea549c920bfc356ac599e"
+      "submodule_commit": "8a091c47abe67e0a03b85bc7c9eee8bdb9b14b05"
     },
     "vllm-project/vllm": {
-      "tag": "v0.24.0",
+      "tag": "v0.22.0",
+      "submodule_tag": "v0.22.0",
       "submodule_path": "framework/vllm",
       "submodule_commit": "0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
     }
@@ -33,11 +35,60 @@
         "variants": {
           "x86_64": {
             "version": "0.24.0+cu129",
-            "cuda": "12.9",
+            "accelerator": "cuda",
+            "runtime_version": "12.9",
             "torch_backend": "cu129",
             "minimum_driver": "576.02",
             "url": "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl",
             "sha256": "597949743f2a00c0539d9e2ff0f67b32c608a378e973f99e7529fd6fa9445f70"
+          }
+        }
+      },
+      "vllm-wsl2-rocm": {
+        "source": "vllm-project/vllm",
+        "tag": "v0.26.0",
+        "package": "vllm",
+        "python": "3.12",
+        "launcher": "vllm",
+        "uv": {
+          "x86_64": {
+            "version": "0.11.16",
+            "url": "https://github.com/astral-sh/uv/releases/download/0.11.16/uv-x86_64-unknown-linux-gnu.tar.gz",
+            "sha256": "74947fe2c03315cf07e82ab3acc703eddef01aba4d5232a98e4c6825ec116131"
+          }
+        },
+        "variants": {
+          "x86_64": {
+            "version": "0.26.0+rocm723",
+            "accelerator": "rocm",
+            "runtime_version": "7.2.3",
+            "torch_backend": "rocm723",
+            "build_commit": "f2654939e69b4069b13977e9aef3e31d4dcaf051",
+            "index_url": "https://wheels.vllm.ai/rocm/f2654939e69b4069b13977e9aef3e31d4dcaf051/rocm723",
+            "url": "https://wheels.vllm.ai/rocm/f2654939e69b4069b13977e9aef3e31d4dcaf051/vllm-0.26.0%2Brocm723-cp312-cp312-manylinux_2_34_x86_64.whl",
+            "sha256": "4975c5913cf88ae3eae85e0eaf013ac140700d927754ddcba74bf73282899f9c",
+            "rocm_system": {
+              "apt_repository": "https://repo.radeon.com/rocm/apt/7.2.3 noble main",
+              "repository_key": {
+                "version": "7.2.3",
+                "url": "https://repo.radeon.com/rocm/rocm.gpg.key",
+                "sha256": "2de99e2354646a90d9903e2a669fc4e36b02c1bbff7075c481e12d7edab2c88b"
+              },
+              "packages": {
+                "rocm-hip-runtime": "7.2.3.70203-90~24.04",
+                "rocminfo": "1.0.0.70203-90~24.04"
+              },
+              "rocdxg": {
+                "version": "1.2.0",
+                "url": "https://github.com/ROCm/librocdxg/releases/download/v1.2.0/rocdxg-roct_1.2.0_amd64.deb",
+                "sha256": "3ed9526719290cd8f590150dad8ea0f234fa779bea6a4c9a8449d7ae6b8cfb6e"
+              },
+              "required_gfx": [
+                "gfx1151",
+                "gfx1150"
+              ],
+              "minimum_windows_release": "26.2.2"
+            }
           }
         }
       }

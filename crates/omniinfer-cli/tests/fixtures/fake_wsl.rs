@@ -35,7 +35,24 @@ fn main() {
         "wslpath" => handle_wslpath(command),
         "uname" => println!("x86_64"),
         "nvidia-smi" => println!("NVIDIA GeForce RTX 3060 Laptop GPU, 581.57"),
+        "env" => handle_env(command),
+        "install" | "apt-get" | "dpkg" | "ldconfig" => {}
+        "dpkg-query" => {
+            println!("rocm-hip-runtime=7.2.3.70203-90~24.04");
+            println!("rocminfo=1.0.0.70203-90~24.04");
+            println!("rocdxg-roct=1.2.0");
+        }
+        "sha256sum" => {
+            let path = command.get(1).expect("sha256sum path");
+            let digest = Path::new(path)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.rsplit('-').next())
+                .expect("digest in staged filename");
+            println!("{digest}  {path}");
+        }
         "mkdir" => handle_mkdir(command),
+        "dd" => handle_dd(command),
         "rm" => handle_rm(command),
         "cp" => handle_cp(command),
         "chmod" => {}
@@ -61,6 +78,10 @@ fn handle_sh(command: &[String]) {
     let script = command.get(2).map(String::as_str).unwrap_or_default();
     if script.contains("printf %s \"$HOME\"") {
         print!("/home/test");
+        return;
+    }
+    if script.contains("/etc/os-release") {
+        print!("ubuntu 24.04");
         return;
     }
     if script.contains("test -d \"$staging\"") {
@@ -89,6 +110,34 @@ fn handle_sh(command: &[String]) {
     fail("unsupported fake WSL shell script");
 }
 
+fn handle_env(command: &[String]) {
+    if command.iter().any(|arg| arg == "apt-get") {
+        return;
+    }
+    if command
+        .iter()
+        .any(|arg| arg == "/opt/rocm/bin/rocminfo")
+    {
+        println!("  Name:                    gfx1151");
+        return;
+    }
+    if command
+        .iter()
+        .any(|arg| arg.ends_with("/venv/bin/python"))
+    {
+        if env::var_os("OMNIINFER_FAKE_WSL_FAIL_CURRENT_PROBE").is_some()
+            && command.iter().any(|arg| arg.contains("/current/"))
+        {
+            fail("injected current runtime probe failure");
+        }
+        println!(
+            r#"{{"vllm_version":"0.26.0+rocm723","torch_version":"2.11.0+rocm7.2.3","torch_cuda":null,"torch_hip":"7.2.3","device":"Fake AMD Radeon 8060S","value":1.0}}"#
+        );
+        return;
+    }
+    fail("unsupported fake WSL env command");
+}
+
 fn handle_wslpath(command: &[String]) {
     let input = command.last().expect("wslpath input").replace('\\', "/");
     if input.eq_ignore_ascii_case("C:/") {
@@ -108,6 +157,20 @@ fn handle_mkdir(command: &[String]) {
     for path in command.iter().skip(1).filter(|arg| *arg != "-p") {
         fs::create_dir_all(map_linux(path)).expect("create fake WSL directory");
     }
+}
+
+fn handle_dd(command: &[String]) {
+    let output = command
+        .iter()
+        .find_map(|arg| arg.strip_prefix("of="))
+        .expect("dd output path");
+    let path = map_linux(output);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create dd parent");
+    }
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes).expect("read dd stdin");
+    fs::write(path, bytes).expect("write fake WSL dd output");
 }
 
 fn handle_rm(command: &[String]) {

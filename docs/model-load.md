@@ -25,7 +25,7 @@ This document defines the stable gateway contract for loading a model through
 
 | Field | Type | Scope | Reloads runtime | Notes |
 |---|---:|---|---:|---|
-| `model` | string | load | yes | Required. Relative paths resolve under the selected backend model root for file/directory backends. Reference backends such as `vllm-linux-cuda` and `vllm-wsl2-cuda` pass model references directly to the backend. |
+| `model` | string | load | yes | Required. Relative paths resolve under the selected backend model root for file/directory backends. Reference backends such as `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm` pass model references directly to the backend. |
 | `backend` | string | load | maybe | Optional. If omitted, OmniInfer uses selected or automatic backend logic. |
 | `mmproj` | string | load | yes | Optional multimodal projector override. |
 | `ctx_size` / `ctx-size` | integer | load | yes | Optional context length override. |
@@ -129,7 +129,7 @@ For configuration screens that must reject unsupported settings, send
 
 ## Backend-Specific Notes
 
-`vllm-linux-cuda` and Windows `vllm-wsl2-cuda` run the official vLLM
+`vllm-linux-cuda` and Windows `vllm-wsl2-cuda` / `vllm-wsl2-rocm` run the official vLLM
 OpenAI-compatible server. OmniInfer starts the Linux backend as:
 
 ```text

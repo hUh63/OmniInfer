@@ -182,6 +182,110 @@ fn backend_install_vllm_wsl2_is_transactional_and_idempotent() {
     fs::remove_dir_all(root).ok();
 }
 
+#[cfg(windows)]
+#[test]
+fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
+    let root = temp_repo_root("backend-install-vllm-wsl2-rocm");
+    let runtime_root = root.join("runtime");
+    let fake_root = root.join("fake-wsl-state");
+    fs::create_dir_all(root.join("config")).expect("create config dir");
+    fs::write(root.join("config").join("omniinfer.json"), r#"{"port":1}"#).expect("write config");
+    let fake_wsl = compile_fake_wsl(&root.join("tools"));
+    let catalog = write_wsl_rocm_runtime_fixture(&root);
+
+    let run_install = |fail_current_probe: bool| {
+        let mut cmd = Command::cargo_bin("omniinfer").expect("binary exists");
+        cmd.env("OMNIINFER_RUST_STRICT", "1")
+            .env("OMNIINFER_RUST_REPO_ROOT", &root)
+            .env("OMNIINFER_PREBUILT_CATALOG", &catalog)
+            .env("OMNIINFER_WSL_EXE", &fake_wsl)
+            .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+            .args([
+                "backend",
+                "install",
+                "vllm-wsl2-rocm",
+                "--wsl-distro",
+                "Ubuntu-24.04",
+                "--runtime-root",
+            ])
+            .arg(&runtime_root)
+            .arg("--json");
+        if fail_current_probe {
+            cmd.env("OMNIINFER_FAKE_WSL_FAIL_CURRENT_PROBE", "1");
+        }
+        cmd.assert()
+    };
+
+    let output = run_install(false).success().get_output().stdout.clone();
+    let events = String::from_utf8(output)
+        .expect("UTF-8 JSONL")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON event"))
+        .collect::<Vec<_>>();
+    for event in [
+        "compatibility_selected",
+        "checksum_verified",
+        "system_runtime_verified",
+        "validation_passed",
+        "completed",
+    ] {
+        assert!(
+            events.iter().any(|row| row["event"] == event),
+            "missing event {event}"
+        );
+    }
+    let manifest_path = runtime_root
+        .join("vllm-wsl2-rocm")
+        .join("bin")
+        .join("vllm-wsl2.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("launcher manifest"))
+            .expect("launcher manifest JSON");
+    assert_eq!(manifest["backend"], "vllm-wsl2-rocm");
+    assert_eq!(manifest["accelerator"], "rocm");
+    assert_eq!(manifest["runtime_version"], "7.2.3");
+    let manifest_before_failure = fs::read(&manifest_path).expect("read launcher manifest");
+
+    let invocations =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("fake WSL invocations");
+    assert!(invocations.contains("--user\troot\t--exec\tapt-get\tupdate"));
+    assert!(invocations.contains("rocm-hip-runtime=7.2.3.70203-90~24.04"));
+    assert!(invocations.contains("rocminfo=1.0.0.70203-90~24.04"));
+    assert!(invocations.contains("HSA_ENABLE_DXG_DETECTION=1"));
+    assert!(invocations.contains("--extra-index-url"));
+    assert!(!invocations.contains("--torch-backend\trocm723"));
+    let apt_updates_before = invocations
+        .lines()
+        .filter(|line| line.contains("--exec\tapt-get\tupdate"))
+        .count();
+
+    run_install(false)
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"already_installed\""));
+    let after_idempotent =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("fake WSL invocations");
+    assert_eq!(
+        after_idempotent
+            .lines()
+            .filter(|line| line.contains("--exec\tapt-get\tupdate"))
+            .count(),
+        apt_updates_before,
+        "idempotent install must not refresh or reinstall system packages"
+    );
+    run_install(true).failure().stderr(predicate::str::contains(
+        "post-activation WSL runtime validation failed",
+    ));
+    assert_eq!(
+        fs::read(&manifest_path).expect("launcher manifest after failed reinstall"),
+        manifest_before_failure,
+        "failed ROCm reinstall must preserve the active launcher manifest"
+    );
+    run_install(false)
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"already_installed\""));
+    fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn backend_install_public_roots_emit_jsonl_progress() {
     let source_root = temp_repo_root("backend-install-json-source");

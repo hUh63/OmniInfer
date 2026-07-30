@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_CATALOG: &str = include_str!("../../../scripts/prebuilt_backends.json");
 
@@ -32,26 +32,41 @@ pub(crate) struct PythonRuntimeEntry {
     pub(crate) variants: BTreeMap<String, PythonRuntimeVariant>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ToolAsset {
     pub(crate) version: String,
     pub(crate) url: String,
     pub(crate) sha256: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct PythonRuntimeVariant {
     pub(crate) version: String,
-    pub(crate) cuda: String,
-    pub(crate) torch_backend: String,
-    pub(crate) minimum_driver: String,
+    pub(crate) accelerator: String,
+    pub(crate) runtime_version: String,
+    pub(crate) torch_backend: Option<String>,
+    pub(crate) minimum_driver: Option<String>,
+    pub(crate) build_commit: Option<String>,
+    pub(crate) index_url: Option<String>,
+    pub(crate) rocm_system: Option<RocmSystemRuntime>,
     pub(crate) url: String,
     pub(crate) sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RocmSystemRuntime {
+    pub(crate) apt_repository: String,
+    pub(crate) repository_key: ToolAsset,
+    pub(crate) packages: BTreeMap<String, String>,
+    pub(crate) rocdxg: ToolAsset,
+    pub(crate) required_gfx: Vec<String>,
+    pub(crate) minimum_windows_release: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SourceMetadata {
     pub(crate) tag: Option<String>,
+    pub(crate) submodule_tag: Option<String>,
     pub(crate) submodule_path: Option<String>,
     pub(crate) submodule_commit: Option<String>,
 }
@@ -185,6 +200,11 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
             .as_deref()
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("catalog source {source_name} has no tag"))?;
+        let submodule_tag = source
+            .submodule_tag
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("catalog source {source_name} has no submodule tag"))?;
         if source
             .submodule_path
             .as_deref()
@@ -203,8 +223,8 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
         {
             anyhow::bail!("catalog source {source_name} has an invalid commit");
         }
-        if tag.contains('/') {
-            anyhow::bail!("catalog source {source_name} has an invalid tag");
+        if tag.contains('/') || submodule_tag.contains('/') {
+            anyhow::bail!("catalog source {source_name} has an invalid runtime or submodule tag");
         }
     }
     for (platform, entries) in &catalog.platforms {
@@ -240,18 +260,12 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
             if entry.tag.trim().is_empty() || entry.tag.contains('/') {
                 anyhow::bail!("{platform}/{backend} Python runtime has an invalid tag");
             }
-            let source = catalog.sources.get(&entry.source).ok_or_else(|| {
+            catalog.sources.get(&entry.source).ok_or_else(|| {
                 anyhow::anyhow!(
                     "{platform}/{backend} Python runtime references unknown source {}",
                     entry.source
                 )
             })?;
-            if source.tag.as_deref() != Some(entry.tag.as_str()) {
-                anyhow::bail!(
-                    "{platform}/{backend} Python runtime tag does not match source {}",
-                    entry.source
-                );
-            }
             if entry.variants.is_empty() || entry.uv.is_empty() {
                 anyhow::bail!(
                     "{platform}/{backend} Python runtime has no architecture variants or managed uv assets"
@@ -260,18 +274,107 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
             for (architecture, variant) in &entry.variants {
                 let role = format!("Python wheel ({architecture})");
                 validate_sha256(Some(&variant.sha256), platform, backend, &role)?;
-                validate_asset_url(&variant.url, platform, backend, &role, &entry.tag)?;
+                validate_python_asset_url(
+                    &variant.url,
+                    variant.build_commit.as_deref(),
+                    platform,
+                    backend,
+                    &role,
+                    &entry.tag,
+                )?;
                 if variant.version.trim().is_empty()
                     || !variant
                         .version
                         .starts_with(entry.tag.trim_start_matches('v'))
-                    || !variant.torch_backend.starts_with("cu")
-                    || variant.cuda.trim().is_empty()
-                    || parse_version_triplet(&variant.minimum_driver).is_none()
+                    || variant.runtime_version.trim().is_empty()
                 {
                     anyhow::bail!(
-                        "{platform}/{backend} {architecture} has invalid CUDA compatibility metadata"
+                        "{platform}/{backend} {architecture} has invalid accelerator compatibility metadata"
                     );
+                }
+                match variant.accelerator.as_str() {
+                    "cuda" => {
+                        if variant
+                            .torch_backend
+                            .as_deref()
+                            .is_none_or(|value| !value.starts_with("cu"))
+                            || variant
+                                .minimum_driver
+                                .as_deref()
+                                .and_then(parse_version_triplet)
+                                .is_none()
+                            || variant.rocm_system.is_some()
+                        {
+                            anyhow::bail!(
+                                "{platform}/{backend} {architecture} has invalid CUDA compatibility metadata"
+                            );
+                        }
+                    }
+                    "rocm" => {
+                        let system = variant.rocm_system.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{platform}/{backend} {architecture} has no ROCm system metadata"
+                            )
+                        })?;
+                        if variant
+                            .torch_backend
+                            .as_deref()
+                            .is_none_or(|value| !value.starts_with("rocm"))
+                            || variant.index_url.as_deref().is_none_or(|value| {
+                                !value.starts_with("https://wheels.vllm.ai/rocm/")
+                            })
+                            || system.apt_repository.trim().is_empty()
+                            || system.packages.len() != 2
+                            || !system.packages.contains_key("rocm-hip-runtime")
+                            || !system.packages.contains_key("rocminfo")
+                            || system.required_gfx.is_empty()
+                            || system.minimum_windows_release.trim().is_empty()
+                        {
+                            anyhow::bail!(
+                                "{platform}/{backend} {architecture} has invalid ROCm compatibility metadata"
+                            );
+                        }
+                        validate_sha256(
+                            Some(&system.repository_key.sha256),
+                            platform,
+                            backend,
+                            "ROCm repository key",
+                        )?;
+                        validate_sha256(
+                            Some(&system.rocdxg.sha256),
+                            platform,
+                            backend,
+                            "ROCDXG runtime",
+                        )?;
+                        if !system
+                            .repository_key
+                            .url
+                            .starts_with("https://repo.radeon.com/")
+                            || !system
+                                .rocdxg
+                                .url
+                                .starts_with("https://github.com/ROCm/librocdxg/")
+                            || !system
+                                .apt_repository
+                                .starts_with("https://repo.radeon.com/rocm/apt/")
+                            || !system.apt_repository.ends_with(" noble main")
+                            || system.repository_key.version != variant.runtime_version
+                            || system.rocdxg.version.trim().is_empty()
+                            || variant.index_url.as_deref().is_none_or(|url| {
+                                variant
+                                    .build_commit
+                                    .as_deref()
+                                    .is_none_or(|commit| !url.contains(commit))
+                            })
+                        {
+                            anyhow::bail!(
+                                "{platform}/{backend} {architecture} has non-canonical ROCm system assets"
+                            );
+                        }
+                    }
+                    other => anyhow::bail!(
+                        "{platform}/{backend} {architecture} has unsupported accelerator {other}"
+                    ),
                 }
                 let uv = entry.uv.get(architecture).ok_or_else(|| {
                     anyhow::anyhow!("{platform}/{backend} {architecture} has no managed uv asset")
@@ -318,6 +421,32 @@ fn validate_asset_url(
     Ok(())
 }
 
+fn validate_python_asset_url(
+    url: &str,
+    build_commit: Option<&str>,
+    platform: &str,
+    backend: &str,
+    role: &str,
+    tag: &str,
+) -> Result<()> {
+    if url.starts_with("https://github.com/") {
+        return validate_asset_url(url, platform, backend, role, tag);
+    }
+    let Some(commit) = build_commit else {
+        anyhow::bail!("{platform}/{backend} {role} non-release asset has no build commit");
+    };
+    if commit.len() != 40
+        || !commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !url.starts_with("https://wheels.vllm.ai/rocm/")
+        || !url.contains(commit)
+    {
+        anyhow::bail!("{platform}/{backend} {role} has invalid wheel provenance");
+    }
+    Ok(())
+}
+
 fn validate_sha256(value: Option<&str>, platform: &str, backend: &str, role: &str) -> Result<()> {
     let Some(value) = value else {
         anyhow::bail!("{platform}/{backend} {role} asset has no pinned SHA256");
@@ -340,6 +469,11 @@ mod tests {
         assert!(
             catalog
                 .python_runtime("windows", "vllm-wsl2-cuda")
+                .is_some()
+        );
+        assert!(
+            catalog
+                .python_runtime("windows", "vllm-wsl2-rocm")
                 .is_some()
         );
     }

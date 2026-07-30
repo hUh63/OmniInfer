@@ -53,7 +53,7 @@ Windows and macOS clients share the same architecture: OmniStudio bundles a plat
 
 ### Windows vLLM Integration
 
-Official vLLM does not support native Windows. OmniStudio must use OmniInfer's managed `vllm-wsl2-cuda` backend, which runs the pinned official Linux CUDA runtime inside a user WSL2 distribution. Do not bundle a community native-Windows vLLM fork.
+Official vLLM does not support native Windows. OmniStudio must use OmniInfer's managed `vllm-wsl2-cuda` backend for NVIDIA or `vllm-wsl2-rocm` for supported AMD Ryzen AI systems. Both run pinned official Linux runtimes inside a user WSL2 distribution. Do not bundle a community native-Windows vLLM fork.
 
 The client should first let the user install and initialize Ubuntu (`wsl --install -d Ubuntu`), then run:
 
@@ -63,11 +63,18 @@ omniinfer.exe backend install vllm-wsl2-cuda `
   --state-root <state> `
   --runtime-root <runtimes> `
   --json
+
+# AMD Ryzen AI MAX/AI 300 requires Ubuntu 24.04 and AMD Software 26.2.2+
+omniinfer.exe backend install vllm-wsl2-rocm `
+  --wsl-distro Ubuntu-24.04 `
+  --state-root <state> `
+  --runtime-root <runtimes> `
+  --json
 ```
 
-Parse stdout as JSONL using the same forward-compatible install contract as other backends. vLLM installation additionally emits `compatibility_selected`, `command_started`, `command_completed`, and `validation_passed`. It may download and consume several GB. A non-zero exit or final `error` event is a failed install even if earlier phases succeeded.
+Parse stdout as JSONL using the same forward-compatible install contract as other backends. vLLM installation additionally emits `compatibility_selected`, `command_started`, `command_completed`, and `validation_passed`; ROCm also emits `system_runtime_verified`. It may download and consume several GB. A non-zero exit or final `error` event is a failed install even if earlier phases succeeded. The client must not claim success before the final `completed` event.
 
-`<runtimes>\vllm-wsl2-cuda` stores the Windows launcher manifest, installer tool cache, and logs; the large Python environment remains in the selected WSL2 filesystem. Use the same explicit roots for `serve` and all lifecycle commands. HuggingFace model IDs can be sent directly. Absolute local drive paths are translated into WSL automount paths; UNC model paths are unsupported. Unload/shutdown stops only OmniInfer's vLLM process group and must not terminate the whole distribution.
+`<runtimes>\<backend>` stores the Windows launcher manifest, installer tool cache, and logs; the large Python environment remains in the selected WSL2 filesystem. Use the same explicit roots for `serve` and all lifecycle commands. HuggingFace model IDs can be sent directly. Absolute local drive paths are translated into WSL automount paths; UNC model paths are unsupported. Unload/shutdown stops only OmniInfer's vLLM process group and must not terminate the whole distribution.
 
 ### Step 1: Load a Model
 
@@ -223,6 +230,7 @@ Backends vary by platform. OmniStudio automatically selects the best available b
 | `llama.cpp-cuda` | NVIDIA GPU | CUDA runtime |
 | `llama.cpp-vulkan` | GPU (vendor-agnostic) | Vulkan driver |
 | `vllm-wsl2-cuda` | NVIDIA GPU | WSL2 user distribution, NVIDIA driver 576.02+ |
+| `vllm-wsl2-rocm` | AMD Ryzen AI GPU | Ubuntu 24.04 WSL2, Ryzen AI MAX/AI 300 (`gfx1151`/`gfx1150`), AMD Software 26.2.2+ |
 
 **macOS:**
 

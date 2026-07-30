@@ -53,7 +53,7 @@ Windows 和 macOS 客户端架构一致：OmniStudio 内置对应平台的 OmniI
 
 ### Windows vLLM 接入
 
-官方 vLLM 不支持原生 Windows。OmniStudio 必须使用 OmniInfer 托管的 `vllm-wsl2-cuda` 后端，在用户 WSL2 发行版内运行固定版本的官方 Linux CUDA runtime；不要捆绑社区原生 Windows vLLM fork。
+官方 vLLM 不支持原生 Windows。OmniStudio 在 NVIDIA 机器上必须使用 OmniInfer 托管的 `vllm-wsl2-cuda`，在受支持的 AMD Ryzen AI 机器上使用 `vllm-wsl2-rocm`。两者都在用户 WSL2 发行版内运行固定并校验的官方 Linux runtime；不要捆绑社区原生 Windows vLLM fork。
 
 客户端应先引导用户安装并初始化 Ubuntu（`wsl --install -d Ubuntu`），然后执行：
 
@@ -63,11 +63,18 @@ omniinfer.exe backend install vllm-wsl2-cuda `
   --state-root <state> `
   --runtime-root <runtimes> `
   --json
+
+# AMD Ryzen AI MAX/AI 300 要求 Ubuntu 24.04 和 AMD Software 26.2.2+
+omniinfer.exe backend install vllm-wsl2-rocm `
+  --wsl-distro Ubuntu-24.04 `
+  --state-root <state> `
+  --runtime-root <runtimes> `
+  --json
 ```
 
-stdout 按与其他后端相同的前向兼容 JSONL 安装契约解析。vLLM 安装还会发出 `compatibility_selected`、`command_started`、`command_completed` 和 `validation_passed`。下载量和磁盘占用可能达到数 GB。命令非零退出或最后收到 `error` 事件都表示安装失败，即使前面的阶段已经成功。
+stdout 按与其他后端相同的前向兼容 JSONL 安装契约解析。vLLM 安装还会发出 `compatibility_selected`、`command_started`、`command_completed` 和 `validation_passed`；ROCm 还会发出 `system_runtime_verified`。下载量和磁盘占用可能达到数 GB。命令非零退出或最后收到 `error` 事件都表示安装失败，即使前面的阶段已经成功；客户端只能在收到最终 `completed` 事件后显示安装成功。
 
-`<runtimes>\vllm-wsl2-cuda` 保存 Windows launcher manifest、安装器工具缓存和日志；体积较大的 Python 环境保留在所选 WSL2 文件系统中。`serve` 与所有生命周期命令必须继续使用相同的显式 roots。HuggingFace 模型 ID 可直接传入；本地盘符绝对路径会转换为 WSL automount 路径，UNC 模型路径不支持。卸载模型或关闭服务只停止 OmniInfer 管理的 vLLM 进程组，不得终止整个发行版。
+`<runtimes>\<backend>` 保存 Windows launcher manifest、安装器工具缓存和日志；体积较大的 Python 环境保留在所选 WSL2 文件系统中。`serve` 与所有生命周期命令必须继续使用相同的显式 roots。HuggingFace 模型 ID 可直接传入；本地盘符绝对路径会转换为 WSL automount 路径，UNC 模型路径不支持。卸载模型或关闭服务只停止 OmniInfer 管理的 vLLM 进程组，不得终止整个发行版。
 
 ### 第一步：加载模型
 
@@ -223,6 +230,7 @@ console.log(data.choices[0].message.content);
 | `llama.cpp-cuda` | NVIDIA GPU | CUDA 运行时 |
 | `llama.cpp-vulkan` | GPU（跨厂商） | Vulkan 驱动 |
 | `vllm-wsl2-cuda` | NVIDIA GPU | WSL2 用户发行版、NVIDIA 576.02+ 驱动 |
+| `vllm-wsl2-rocm` | AMD Ryzen AI GPU | Ubuntu 24.04 WSL2、Ryzen AI MAX/AI 300（`gfx1151`/`gfx1150`）、AMD Software 26.2.2+ |
 
 **macOS：**
 

@@ -50,7 +50,7 @@ omniinfer backend install llama.cpp-linux
 
 Desktop integrations can add `--state-root <path>` and `--runtime-root <path>` to isolate managed files, and `backend install ... --json` emits streaming JSONL progress. See [CLI Usage](docs/CLI.md#2-install-a-backend-runtime) for the stable integration contract.
 
-On Windows, official vLLM is available as the managed `vllm-wsl2-cuda` backend. It runs the upstream Linux CUDA wheel inside a user WSL2 distribution; vLLM does not support native Windows. See the [Windows vLLM setup](docs/CLI.md#windows-vllm-through-wsl2).
+On Windows, official vLLM is available through the managed `vllm-wsl2-cuda` and `vllm-wsl2-rocm` backends. They run pinned upstream Linux wheels inside a user WSL2 distribution for NVIDIA CUDA or supported AMD Ryzen AI GPUs; vLLM does not support native Windows. See the [Windows vLLM setup](docs/CLI.md#windows-vllm-through-wsl2).
 
 You can also run `omniinfer` with no arguments to open the TUI; when a compatible backend is missing, the TUI can install the prebuilt runtime before model loading.
 
