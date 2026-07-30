@@ -275,8 +275,10 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
         "hipsparselt=0.2.6.70203-90~24.04",
         "hsa-rocr=1.18.0.70203-90~24.04",
         "libopenmpi3t64=4.1.6-7ubuntu2",
+        "libpython3.12-dev=3.12.3-1ubuntu0.15",
         "miopen-hip=3.5.1.70203-90~24.04",
         "openmp-extras-runtime=20.70.0.70203-90~24.04",
+        "python3.12-dev=3.12.3-1ubuntu0.15",
         "rccl=2.27.7.70203-90~24.04",
         "rocblas=5.2.0.70203-90~24.04",
         "rocfft=1.0.36.70203-90~24.04",
@@ -319,6 +321,55 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
         apt_updates_before,
         "idempotent install must not refresh or reinstall system packages"
     );
+    fs::remove_file(fake_root.join("python-dev-installed"))
+        .expect("simulate an older runtime without Python development headers");
+    for filename in [
+        "libpython3.12-dev_3.12.3-1ubuntu0.15_amd64.deb",
+        "python3.12-dev_3.12.3-1ubuntu0.15_amd64.deb",
+    ] {
+        let cached = fake_root
+            .join("linux")
+            .join("var")
+            .join("cache")
+            .join("apt")
+            .join("archives")
+            .join(filename);
+        fs::remove_file(&cached).expect("remove newly required package from fake APT cache");
+        fs::remove_file(cached.with_extension("sha256")).expect("remove fake APT checksum sidecar");
+    }
+    let repair_output = run_install(false).success().get_output().stdout.clone();
+    let repair_events = String::from_utf8(repair_output)
+        .expect("UTF-8 repair JSONL")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("repair JSON event"))
+        .collect::<Vec<_>>();
+    let repaired_packages = repair_events
+        .iter()
+        .filter(|row| row["event"] == "package_cache_populated")
+        .map(|row| row["package"].as_str().expect("repaired package"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repaired_packages,
+        ["libpython3.12-dev", "python3.12-dev"],
+        "repair must download only the newly required Python development packages"
+    );
+    assert!(
+        repair_events.iter().any(|row| {
+            row["event"] == "package_download_skipped" && row["reason"] == "exact_version_installed"
+        }),
+        "repair must report reused pinned ROCm packages"
+    );
+    let invocations_after_repair =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("repair invocations");
+    let apt_updates_after_repair = invocations_after_repair
+        .lines()
+        .filter(|line| line.contains("--exec\tapt-get\tupdate"))
+        .count();
+    assert_eq!(
+        apt_updates_after_repair,
+        apt_updates_before + 1,
+        "repair must refresh package metadata exactly once"
+    );
     let mut stale_manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).expect("stale manifest"))
             .expect("stale manifest JSON");
@@ -338,7 +389,7 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
             .lines()
             .filter(|line| line.contains("--exec\tapt-get\tupdate"))
             .count(),
-        apt_updates_before,
+        apt_updates_after_repair,
         "runtime environment migration must reuse the verified system packages"
     );
     let migrated_manifest: serde_json::Value =

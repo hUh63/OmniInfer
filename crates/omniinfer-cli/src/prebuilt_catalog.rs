@@ -19,8 +19,10 @@ pub(crate) const REQUIRED_ROCM_SYSTEM_PACKAGES: &[&str] = &[
     "hipsparselt",
     "hsa-rocr",
     "libopenmpi3t64",
+    "libpython3.12-dev",
     "miopen-hip",
     "openmp-extras-runtime",
+    "python3.12-dev",
     "rccl",
     "rocblas",
     "rocfft",
@@ -48,8 +50,10 @@ pub(crate) const REQUIRED_ROCM_PACKAGE_ASSETS: &[&str] = &[
     "hipsparse",
     "hipsparselt",
     "hsa-rocr",
+    "libpython3.12-dev",
     "miopen-hip",
     "openmp-extras-runtime",
+    "python3.12-dev",
     "rccl",
     "rocblas",
     "rocfft",
@@ -445,6 +449,8 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                             .next()
                             .unwrap_or_default()
                             .trim_end_matches('/');
+                        let ubuntu_python_pool =
+                            "https://security.ubuntu.com/ubuntu/pool/main/p/python3.12/";
                         for (name, asset) in &system.package_assets {
                             validate_sha256(
                                 Some(&asset.sha256),
@@ -461,7 +467,11 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                                 || asset.size == 0
                                 || asset.filename.contains(['/', '\\'])
                                 || !asset.filename.ends_with(".deb")
-                                || !asset.url.starts_with(&format!("{repository_url}/"))
+                                || !(asset.url.starts_with(&format!("{repository_url}/"))
+                                    || (matches!(
+                                        name.as_str(),
+                                        "python3.12-dev" | "libpython3.12-dev"
+                                    ) && asset.url.starts_with(ubuntu_python_pool)))
                                 || !asset.url.ends_with(&asset.filename)
                             {
                                 anyhow::bail!(

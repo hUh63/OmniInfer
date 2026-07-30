@@ -53,8 +53,14 @@ fn main() {
             println!("hipsparselt=0.2.6.70203-90~24.04");
             println!("hsa-rocr=1.18.0.70203-90~24.04");
             println!("libopenmpi3t64=4.1.6-7ubuntu2");
+            if root().join("python-dev-installed").exists() {
+                println!("libpython3.12-dev=3.12.3-1ubuntu0.15");
+            }
             println!("miopen-hip=3.5.1.70203-90~24.04");
             println!("openmp-extras-runtime=20.70.0.70203-90~24.04");
+            if root().join("python-dev-installed").exists() {
+                println!("python3.12-dev=3.12.3-1ubuntu0.15");
+            }
             println!("rccl=2.27.7.70203-90~24.04");
             println!("rocblas=5.2.0.70203-90~24.04");
             println!("rocfft=1.0.36.70203-90~24.04");
@@ -175,6 +181,16 @@ fn handle_env(command: &[String]) {
         fs::create_dir_all(root()).expect("create fake WSL root");
         fs::write(root().join("rocm-installed"), b"installed")
             .expect("mark fake ROCm packages installed");
+        if command
+            .iter()
+            .any(|arg| arg == "python3.12-dev=3.12.3-1ubuntu0.15")
+            && command
+                .iter()
+                .any(|arg| arg == "libpython3.12-dev=3.12.3-1ubuntu0.15")
+        {
+            fs::write(root().join("python-dev-installed"), b"installed")
+                .expect("mark fake Python development packages installed");
+        }
         return;
     }
     if command
