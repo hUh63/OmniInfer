@@ -1233,7 +1233,10 @@ mod tests {
                 "missing capability {capability}"
             );
         }
-        assert!(is_hardware_compatible(registry.host, backend));
+        assert!(
+            gpu_backend_ids(registry.host).contains(&backend.id.as_str()),
+            "managed WSL2 vLLM must participate in Windows GPU detection"
+        );
     }
 
     #[test]
