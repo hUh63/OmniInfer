@@ -22,7 +22,120 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
-const RUNTIME_ENVIRONMENT_VERSION: u32 = 1;
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 2;
+const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.0.0";
+
+const ROCM_PLATFORM_PLUGIN: &str = r#"import os
+
+_shim_active = False
+
+
+def _is_wsl():
+    try:
+        with open("/proc/sys/kernel/osrelease", encoding="utf-8") as release:
+            return "microsoft" in release.read().lower()
+    except OSError:
+        return False
+
+
+def _amdsmi_has_gpu():
+    initialized = False
+    try:
+        import amdsmi
+
+        amdsmi.amdsmi_init()
+        initialized = True
+        return bool(amdsmi.amdsmi_get_processor_handles())
+    except Exception:
+        return False
+    finally:
+        if initialized:
+            try:
+                amdsmi.amdsmi_shut_down()
+            except Exception:
+                pass
+
+
+def _install_amdsmi_shim(devices):
+    import amdsmi
+
+    def handles():
+        return list(range(len(devices)))
+
+    def properties(handle):
+        return devices[int(handle)]
+
+    def asic_info(handle):
+        device = properties(handle)
+        return {
+            "asic_serial": device["asic_serial"],
+            "device_id": "",
+            "market_name": device["name"],
+            "target_graphics_version": device["gcn_arch"],
+        }
+
+    amdsmi.amdsmi_init = lambda *args, **kwargs: None
+    amdsmi.amdsmi_shut_down = lambda: None
+    amdsmi.amdsmi_get_processor_handles = handles
+    amdsmi.amdsmi_get_gpu_asic_info = asic_info
+    amdsmi.amdsmi_get_gpu_memory_total = (
+        lambda handle, memory_type: properties(handle)["total_memory"]
+    )
+    amdsmi.amdsmi_get_gpu_device_uuid = (
+        lambda handle: properties(handle)["uuid"]
+    )
+    amdsmi.amdsmi_topo_get_link_type = (
+        lambda handle, peer_handle: {"hops": 1, "type": 2}
+    )
+    amdsmi.amdsmi_topo_get_numa_node_number = lambda handle: 0
+
+
+def platform_plugin():
+    global _shim_active
+    if _shim_active:
+        return "vllm.platforms.rocm.RocmPlatform"
+    if os.environ.get("HSA_ENABLE_DXG_DETECTION") != "1" or not _is_wsl():
+        return None
+    if _amdsmi_has_gpu():
+        return None
+    try:
+        import torch
+
+        if (
+            torch.version.hip
+            and torch.cuda.is_available()
+            and torch.cuda.device_count() > 0
+        ):
+            devices = []
+            for index in range(torch.cuda.device_count()):
+                device = torch.cuda.get_device_properties(index)
+                uuid = str(getattr(device, "uuid", f"wsl2-rocm-{index}"))
+                devices.append(
+                    {
+                        "asic_serial": f"0x{uuid.replace('-', '')}",
+                        "gcn_arch": device.gcnArchName,
+                        "name": device.name,
+                        "total_memory": device.total_memory,
+                        "uuid": uuid,
+                    }
+                )
+            _install_amdsmi_shim(devices)
+            _shim_active = True
+            return "vllm.platforms.rocm.RocmPlatform"
+    except Exception:
+        pass
+    return None
+"#;
+
+const ROCM_PLATFORM_PLUGIN_METADATA: &str = r#"Metadata-Version: 2.1
+Name: omniinfer-vllm-wsl2-rocm
+Version: 1.0.0
+Summary: OmniInfer vLLM ROCm platform detection for supported WSL2 GPUs
+"#;
+
+const ROCM_PLATFORM_PLUGIN_ENTRY_POINTS: &str = r#"[vllm.platform_plugins]
+omniinfer_wsl2_rocm = omniinfer_vllm_wsl2_rocm:platform_plugin
+"#;
 
 const RUNNER_SCRIPT: &str = r#"#!/bin/sh
 set -eu
@@ -90,10 +203,17 @@ rm -f "$pid_file"
 "#;
 
 const GPU_PROBE: &str = r#"import json
+import os
 import torch
 import vllm
+from vllm.platforms import current_platform
 if not torch.cuda.is_available():
     raise SystemExit("torch.cuda.is_available() is false")
+expected_accelerator = os.environ["OMNIINFER_EXPECTED_ACCELERATOR"]
+if expected_accelerator == "rocm" and not current_platform.is_rocm():
+    raise SystemExit("vLLM did not select its ROCm platform")
+if expected_accelerator == "cuda" and not current_platform.is_cuda():
+    raise SystemExit("vLLM did not select its CUDA platform")
 x = torch.ones(1, device="cuda")
 torch.cuda.synchronize()
 print(json.dumps({
@@ -103,6 +223,7 @@ print(json.dumps({
     "torch_hip": torch.version.hip,
     "device": torch.cuda.get_device_name(0),
     "value": float(x.item()),
+    "vllm_platform": type(current_platform).__module__,
 }))
 "#;
 
@@ -532,6 +653,9 @@ pub(super) fn install_wsl_python_runtime(
             runtime_environment(&variant.accelerator).as_bytes(),
             false,
         )?;
+        if variant.accelerator == "rocm" {
+            write_rocm_platform_plugin(&wsl, &linux_staging)?;
+        }
         let managed_manifest = json!({
             "schema_version": 1,
             "backend": backend,
@@ -547,6 +671,12 @@ pub(super) fn install_wsl_python_runtime(
             "accelerator": variant.accelerator,
             "runtime_version": variant.runtime_version,
             "reported_runtime_version": variant.reported_runtime_version(),
+            "runtime_environment_version": RUNTIME_ENVIRONMENT_VERSION,
+            "rocm_platform_plugin_version": if variant.accelerator == "rocm" {
+                Some(ROCM_PLATFORM_PLUGIN_VERSION)
+            } else {
+                None
+            },
             "torch_backend": torch_backend,
             "minimum_driver": variant.minimum_driver,
             "driver": driver,
@@ -1552,9 +1682,39 @@ unset omniinfer_library_dir omniinfer_managed_library_path
 "#
     .to_string();
     if accelerator == "rocm" {
-        environment.push_str("HSA_ENABLE_DXG_DETECTION=1\n");
+        environment.push_str(
+            r#"HSA_ENABLE_DXG_DETECTION=1
+PYTHONPATH="$runtime_dir/plugins${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+"#,
+        );
     }
     environment
+}
+
+fn write_rocm_platform_plugin(wsl: &WslContext, runtime: &str) -> Result<()> {
+    let plugin_root = format!("{runtime}/plugins");
+    let metadata_root =
+        format!("{plugin_root}/omniinfer_vllm_wsl2_rocm-{ROCM_PLATFORM_PLUGIN_VERSION}.dist-info");
+    write_wsl_file(
+        wsl,
+        &format!("{plugin_root}/omniinfer_vllm_wsl2_rocm.py"),
+        ROCM_PLATFORM_PLUGIN.as_bytes(),
+        false,
+    )?;
+    write_wsl_file(
+        wsl,
+        &format!("{metadata_root}/METADATA"),
+        ROCM_PLATFORM_PLUGIN_METADATA.as_bytes(),
+        false,
+    )?;
+    write_wsl_file(
+        wsl,
+        &format!("{metadata_root}/entry_points.txt"),
+        ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.as_bytes(),
+        false,
+    )?;
+    Ok(())
 }
 
 fn query_nvidia_driver() -> Result<String> {
@@ -1636,14 +1796,25 @@ runtime=$1
 runtime_dir=$runtime
 python=$2
 probe=$3
+accelerator=$4
 set -a
 . "$runtime/runtime.env"
 set +a
+export OMNIINFER_EXPECTED_ACCELERATOR=$accelerator
 exec "$python" -c "$probe"
 "#;
     let output = run_wsl(
         wsl,
-        ["sh", "-c", script, "sh", runtime, &python, GPU_PROBE],
+        [
+            "sh",
+            "-c",
+            script,
+            "sh",
+            runtime,
+            &python,
+            GPU_PROBE,
+            accelerator,
+        ],
         None,
     )
     .with_context(|| format!("validate managed vLLM runtime {runtime}"))?;
@@ -2293,6 +2464,18 @@ mod tests {
         let rocm = runtime_environment("rocm");
         assert!(rocm.contains("site-packages/torch/lib"));
         assert!(rocm.contains("HSA_ENABLE_DXG_DETECTION=1"));
+        assert!(rocm.contains(r#"PYTHONPATH="$runtime_dir/plugins"#));
+    }
+
+    #[test]
+    fn rocm_platform_plugin_uses_the_upstream_extension_point() {
+        assert!(ROCM_PLATFORM_PLUGIN.contains("torch.cuda.is_available()"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("_amdsmi_has_gpu()"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("_install_amdsmi_shim(devices)"));
+        assert!(ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("[vllm.platform_plugins]"));
+        assert!(
+            ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("omniinfer_vllm_wsl2_rocm:platform_plugin")
+        );
     }
 
     #[test]
