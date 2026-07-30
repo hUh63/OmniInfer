@@ -145,6 +145,28 @@ fn handle_sh(command: &[String]) {
     if script.contains("for pid_file in") {
         return;
     }
+    if script.contains("managed native extensions") {
+        println!("42");
+        return;
+    }
+    if script.contains("exec \"$python\" -c \"$probe\"") {
+        let runtime = command.get(4).map(String::as_str).unwrap_or_default();
+        if env::var_os("OMNIINFER_FAKE_WSL_FAIL_CURRENT_PROBE").is_some()
+            && runtime.contains("/current")
+        {
+            fail("injected current runtime probe failure");
+        }
+        if runtime.contains("vllm-wsl2-rocm") {
+            println!(
+                r#"{{"vllm_version":"0.26.0","torch_version":"2.11.0+rocm7.2.3","torch_cuda":null,"torch_hip":"7.2.53211","device":"Fake AMD Radeon 8060S","value":1.0}}"#
+            );
+        } else {
+            println!(
+                r#"{{"vllm_version":"0.24.0+cu129","torch_version":"2.11.0+cu129","torch_cuda":"12.9","device":"Fake CUDA","value":1.0}}"#
+            );
+        }
+        return;
+    }
     fail("unsupported fake WSL shell script");
 }
 

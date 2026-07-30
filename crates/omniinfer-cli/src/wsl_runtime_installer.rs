@@ -22,6 +22,7 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 1;
 
 const RUNNER_SCRIPT: &str = r#"#!/bin/sh
 set -eu
@@ -105,6 +106,51 @@ print(json.dumps({
 }))
 "#;
 
+const NATIVE_DEPENDENCY_PROBE: &str = r#"set -eu
+runtime=$1
+runtime_dir=$runtime
+site_packages=
+for candidate in "$runtime"/venv/lib/python*/site-packages; do
+    [ -d "$candidate" ] || continue
+    site_packages=$candidate
+    break
+done
+if [ -z "$site_packages" ]; then
+    echo "managed site-packages directory not found" >&2
+    exit 1
+fi
+set -a
+. "$runtime/runtime.env"
+set +a
+checked=0
+missing=0
+for library in \
+    "$site_packages"/vllm/*.so \
+    "$site_packages"/flash_attn*.so \
+    "$site_packages"/aiter/jit/*.so \
+    "$site_packages"/xgrammar/*.so \
+    "$site_packages"/torchvision/*.so \
+    "$site_packages"/torchaudio/lib/*.so
+do
+    [ -f "$library" ] || continue
+    checked=$((checked + 1))
+    unresolved=$(ldd "$library" 2>&1 | grep 'not found' || true)
+    if [ -n "$unresolved" ]; then
+        printf '%s\n%s\n' "$library" "$unresolved" >&2
+        missing=$((missing + 1))
+    fi
+done
+if [ "$checked" -eq 0 ]; then
+    echo "no managed native extensions found" >&2
+    exit 1
+fi
+if [ "$missing" -ne 0 ]; then
+    echo "$missing of $checked managed native extensions have unresolved libraries" >&2
+    exit 1
+fi
+printf '%s\n' "$checked"
+"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LauncherManifest {
     schema_version: u32,
@@ -124,6 +170,8 @@ struct LauncherManifest {
     wheel_sha256: String,
     accelerator: String,
     runtime_version: String,
+    #[serde(default)]
+    runtime_environment_version: u32,
 }
 
 #[derive(Debug)]
@@ -216,6 +264,7 @@ pub(super) fn install_wsl_python_runtime(
         wheel_sha256: variant.sha256.clone(),
         accelerator: variant.accelerator.clone(),
         runtime_version: variant.runtime_version.clone(),
+        runtime_environment_version: RUNTIME_ENVIRONMENT_VERSION,
     };
 
     reporter.human(format!("Managed WSL2 Python runtime: windows/{backend}"));
@@ -259,6 +308,7 @@ pub(super) fn install_wsl_python_runtime(
             "accelerator": variant.accelerator,
             "runtime_version": variant.runtime_version,
             "reported_runtime_version": variant.reported_runtime_version(),
+            "runtime_environment_version": RUNTIME_ENVIRONMENT_VERSION,
             "torch_backend": torch_backend,
             "wheel_url": variant.url,
             "package_version": variant.version,
@@ -479,7 +529,7 @@ pub(super) fn install_wsl_python_runtime(
         write_wsl_file(
             &wsl,
             &format!("{linux_staging}/{RUNTIME_ENV}"),
-            runtime_environment(variant).as_bytes(),
+            runtime_environment(&variant.accelerator).as_bytes(),
             false,
         )?;
         let managed_manifest = json!({
@@ -715,6 +765,19 @@ fn ensure_rocm_system_runtime(
     catalog: &PrebuiltCatalog,
     reporter: &mut InstallReporter,
 ) -> Result<()> {
+    if let Ok(installed) = validate_rocm_system_versions(wsl, system)
+        && validate_wsl_rocm_gpu(wsl, system).is_ok()
+    {
+        reporter.event(
+            "system_runtime_verified",
+            json!({
+                "accelerator": "rocm",
+                "reused": true,
+                "packages": installed.lines().collect::<Vec<_>>(),
+            }),
+        );
+        return Ok(());
+    }
     let repository_key = download_verified_asset(
         catalog,
         &system.repository_key.url,
@@ -1463,11 +1526,35 @@ fn validate_wsl_rocm_gpu(wsl: &WslContext, system: &RocmSystemRuntime) -> Result
     Ok(())
 }
 
-fn runtime_environment(variant: &PythonRuntimeVariant) -> String {
-    match variant.accelerator.as_str() {
-        "rocm" => "HSA_ENABLE_DXG_DETECTION=1\n".to_string(),
-        _ => String::new(),
+fn runtime_environment(accelerator: &str) -> String {
+    let mut environment = r#"omniinfer_managed_library_path=
+for omniinfer_library_dir in \
+    "$runtime_dir"/venv/lib/python*/site-packages/torch/lib \
+    "$runtime_dir"/venv/lib/python*/site-packages/tvm_ffi/lib \
+    "$runtime_dir"/venv/lib/python*/site-packages/torchaudio/lib \
+    "$runtime_dir"/venv/lib/python*/site-packages/*.libs \
+    "$runtime_dir"/venv/lib/python*/site-packages/nvidia/*/lib
+do
+    [ -d "$omniinfer_library_dir" ] || continue
+    if [ -n "$omniinfer_managed_library_path" ]; then
+        omniinfer_managed_library_path="$omniinfer_managed_library_path:$omniinfer_library_dir"
+    else
+        omniinfer_managed_library_path=$omniinfer_library_dir
+    fi
+done
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    LD_LIBRARY_PATH="$omniinfer_managed_library_path:$LD_LIBRARY_PATH"
+else
+    LD_LIBRARY_PATH=$omniinfer_managed_library_path
+fi
+export LD_LIBRARY_PATH
+unset omniinfer_library_dir omniinfer_managed_library_path
+"#
+    .to_string();
+    if accelerator == "rocm" {
+        environment.push_str("HSA_ENABLE_DXG_DETECTION=1\n");
     }
+    environment
 }
 
 fn query_nvidia_driver() -> Result<String> {
@@ -1543,13 +1630,23 @@ fn validate_runtime_path(
     reporter: &mut InstallReporter,
 ) -> Result<Value> {
     let python = format!("{runtime}/venv/bin/python");
-    let mut command = Vec::new();
-    if accelerator == "rocm" {
-        command.extend(["env".to_string(), "HSA_ENABLE_DXG_DETECTION=1".to_string()]);
-    }
-    command.extend([python, "-c".to_string(), GPU_PROBE.to_string()]);
-    let output = run_wsl(wsl, command.iter().map(String::as_str), None)
-        .with_context(|| format!("validate managed vLLM runtime {runtime}"))?;
+    validate_native_dependencies(wsl, runtime, reporter)?;
+    let script = r#"set -eu
+runtime=$1
+runtime_dir=$runtime
+python=$2
+probe=$3
+set -a
+. "$runtime/runtime.env"
+set +a
+exec "$python" -c "$probe"
+"#;
+    let output = run_wsl(
+        wsl,
+        ["sh", "-c", script, "sh", runtime, &python, GPU_PROBE],
+        None,
+    )
+    .with_context(|| format!("validate managed vLLM runtime {runtime}"))?;
     append_install_log(&wsl.install_log, "gpu-probe", &output);
     if !output.status.success() {
         anyhow::bail!(
@@ -1590,6 +1687,40 @@ fn validate_runtime_path(
         }),
     );
     Ok(probe)
+}
+
+fn validate_native_dependencies(
+    wsl: &WslContext,
+    runtime: &str,
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let output = run_wsl(
+        wsl,
+        ["sh", "-c", NATIVE_DEPENDENCY_PROBE, "sh", runtime],
+        None,
+    )
+    .with_context(|| format!("validate managed native dependencies {runtime}"))?;
+    append_install_log(&wsl.install_log, "native-dependencies", &output);
+    if !output.status.success() {
+        anyhow::bail!(
+            "managed vLLM native dependency validation failed: {}",
+            decode_output(&output.stderr).trim()
+        );
+    }
+    let checked = decode_output(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("managed native dependency probe returned no count"))?;
+    reporter.event(
+        "native_dependencies_verified",
+        json!({
+            "distribution": wsl.distribution,
+            "runtime": runtime,
+            "extensions_checked": checked,
+        }),
+    );
+    Ok(())
 }
 
 fn ensure_runtime_not_active(wsl: &WslContext, linux_current: &str) -> Result<()> {
@@ -1732,6 +1863,7 @@ fn launcher_manifest_matches(runtime_dir: &Path, expected: &LauncherManifest) ->
                 && actual.wheel_sha256 == expected.wheel_sha256
                 && actual.accelerator == expected.accelerator
                 && actual.runtime_version == expected.runtime_version
+                && actual.runtime_environment_version == expected.runtime_environment_version
                 && actual.linux_launcher == expected.linux_launcher
                 && actual.linux_runner == expected.linux_runner
                 && actual.linux_stopper == expected.linux_stopper
@@ -2148,6 +2280,19 @@ mod tests {
         assert!(require_minimum_driver("581.57", "576.02").is_ok());
         let error = require_minimum_driver("575.99", "576.02").unwrap_err();
         assert!(error.to_string().contains("too old"));
+    }
+
+    #[test]
+    fn runtime_environment_exposes_managed_native_libraries() {
+        let cuda = runtime_environment("cuda");
+        assert!(cuda.contains("site-packages/torch/lib"));
+        assert!(cuda.contains("site-packages/nvidia/*/lib"));
+        assert!(cuda.contains("export LD_LIBRARY_PATH"));
+        assert!(!cuda.contains("HSA_ENABLE_DXG_DETECTION"));
+
+        let rocm = runtime_environment("rocm");
+        assert!(rocm.contains("site-packages/torch/lib"));
+        assert!(rocm.contains("HSA_ENABLE_DXG_DETECTION=1"));
     }
 
     #[test]
