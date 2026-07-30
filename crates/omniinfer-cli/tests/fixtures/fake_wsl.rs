@@ -36,7 +36,7 @@ fn main() {
         "uname" => println!("x86_64"),
         "nvidia-smi" => println!("NVIDIA GeForce RTX 3060 Laptop GPU, 581.57"),
         "env" => handle_env(command),
-        "install" | "apt-get" | "dpkg" | "ldconfig" => {}
+        "install" | "apt-get" | "dpkg" | "/sbin/ldconfig" => {}
         "dpkg-query" => {
             println!("rocm-hip-runtime=7.2.3.70203-90~24.04");
             println!("rocminfo=1.0.0.70203-90~24.04");

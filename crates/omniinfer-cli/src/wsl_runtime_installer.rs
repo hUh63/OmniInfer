@@ -821,7 +821,7 @@ fn ensure_rocm_system_runtime(
     run_wsl_as_checked(
         wsl,
         Some("root"),
-        ["ldconfig"],
+        ["/sbin/ldconfig"],
         None,
         reporter,
         "refresh ROCm runtime linker cache",
