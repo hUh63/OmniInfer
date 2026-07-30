@@ -16,7 +16,37 @@ pub(crate) struct PrebuiltCatalog {
     pub(crate) mirrors: Vec<String>,
     #[serde(default)]
     pub(crate) sources: BTreeMap<String, SourceMetadata>,
+    #[serde(default)]
+    pub(crate) python_runtimes: BTreeMap<String, BTreeMap<String, PythonRuntimeEntry>>,
     pub(crate) platforms: BTreeMap<String, BTreeMap<String, PrebuiltEntry>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PythonRuntimeEntry {
+    pub(crate) source: String,
+    pub(crate) tag: String,
+    pub(crate) package: String,
+    pub(crate) python: String,
+    pub(crate) launcher: String,
+    pub(crate) uv: BTreeMap<String, ToolAsset>,
+    pub(crate) variants: BTreeMap<String, PythonRuntimeVariant>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ToolAsset {
+    pub(crate) version: String,
+    pub(crate) url: String,
+    pub(crate) sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PythonRuntimeVariant {
+    pub(crate) version: String,
+    pub(crate) cuda: String,
+    pub(crate) torch_backend: String,
+    pub(crate) minimum_driver: String,
+    pub(crate) url: String,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +83,14 @@ pub(crate) struct CompanionAsset {
 impl PrebuiltCatalog {
     pub(crate) fn entry(&self, platform: &str, backend: &str) -> Option<&PrebuiltEntry> {
         self.platforms.get(platform)?.get(backend)
+    }
+
+    pub(crate) fn python_runtime(
+        &self,
+        platform: &str,
+        backend: &str,
+    ) -> Option<&PythonRuntimeEntry> {
+        self.python_runtimes.get(platform)?.get(backend)
     }
 
     pub(crate) fn source_metadata(&self, entry: &PrebuiltEntry) -> Option<&SourceMetadata> {
@@ -114,11 +152,22 @@ pub(crate) fn current_platform_name() -> &'static str {
 pub(crate) fn installable_backend_ids() -> BTreeSet<String> {
     load_catalog()
         .ok()
-        .and_then(|catalog| {
-            catalog
+        .map(|catalog| {
+            let platform = current_platform_name();
+            let mut ids = catalog
                 .platforms
-                .get(current_platform_name())
-                .map(|entries| entries.keys().cloned().collect())
+                .get(platform)
+                .into_iter()
+                .flat_map(|entries| entries.keys().cloned())
+                .collect::<BTreeSet<_>>();
+            ids.extend(
+                catalog
+                    .python_runtimes
+                    .get(platform)
+                    .into_iter()
+                    .flat_map(|entries| entries.keys().cloned()),
+            );
+            ids
         })
         .unwrap_or_default()
 }
@@ -128,7 +177,7 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
         return Ok(());
     }
     if catalog.sources.is_empty() {
-        anyhow::bail!("prebuilt catalog schema 3 requires source metadata");
+        anyhow::bail!("prebuilt catalog schema 3 or newer requires source metadata");
     }
     for (source_name, source) in &catalog.sources {
         let tag = source
@@ -179,7 +228,78 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
             }
         }
     }
+    for (platform, entries) in &catalog.python_runtimes {
+        for (backend, entry) in entries {
+            if entry.source.trim().is_empty()
+                || entry.package.trim().is_empty()
+                || entry.python.trim().is_empty()
+                || entry.launcher.trim().is_empty()
+            {
+                anyhow::bail!("{platform}/{backend} Python runtime metadata is incomplete");
+            }
+            if entry.tag.trim().is_empty() || entry.tag.contains('/') {
+                anyhow::bail!("{platform}/{backend} Python runtime has an invalid tag");
+            }
+            let source = catalog.sources.get(&entry.source).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{platform}/{backend} Python runtime references unknown source {}",
+                    entry.source
+                )
+            })?;
+            if source.tag.as_deref() != Some(entry.tag.as_str()) {
+                anyhow::bail!(
+                    "{platform}/{backend} Python runtime tag does not match source {}",
+                    entry.source
+                );
+            }
+            if entry.variants.is_empty() || entry.uv.is_empty() {
+                anyhow::bail!(
+                    "{platform}/{backend} Python runtime has no architecture variants or managed uv assets"
+                );
+            }
+            for (architecture, variant) in &entry.variants {
+                let role = format!("Python wheel ({architecture})");
+                validate_sha256(Some(&variant.sha256), platform, backend, &role)?;
+                validate_asset_url(&variant.url, platform, backend, &role, &entry.tag)?;
+                if variant.version.trim().is_empty()
+                    || !variant
+                        .version
+                        .starts_with(entry.tag.trim_start_matches('v'))
+                    || !variant.torch_backend.starts_with("cu")
+                    || variant.cuda.trim().is_empty()
+                    || parse_version_triplet(&variant.minimum_driver).is_none()
+                {
+                    anyhow::bail!(
+                        "{platform}/{backend} {architecture} has invalid CUDA compatibility metadata"
+                    );
+                }
+                let uv = entry.uv.get(architecture).ok_or_else(|| {
+                    anyhow::anyhow!("{platform}/{backend} {architecture} has no managed uv asset")
+                })?;
+                validate_sha256(
+                    Some(&uv.sha256),
+                    platform,
+                    backend,
+                    &format!("uv ({architecture})"),
+                )?;
+                if uv.version.trim().is_empty()
+                    || !uv.url.starts_with("https://")
+                    || !uv.url.contains(&format!("/download/{}/", uv.version))
+                {
+                    anyhow::bail!("{platform}/{backend} {architecture} has invalid uv metadata");
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+fn parse_version_triplet(value: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    parts.next().is_none().then_some((major, minor, patch))
 }
 
 fn validate_asset_url(
@@ -217,6 +337,11 @@ mod tests {
         let catalog: PrebuiltCatalog =
             serde_json::from_str(DEFAULT_CATALOG).expect("parse built-in catalog");
         validate_catalog(&catalog).expect("validate built-in catalog");
+        assert!(
+            catalog
+                .python_runtime("windows", "vllm-wsl2-cuda")
+                .is_some()
+        );
     }
 
     #[test]

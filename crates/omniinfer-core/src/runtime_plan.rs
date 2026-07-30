@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -17,6 +18,7 @@ pub struct ExternalRuntimeRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRuntimePlan {
     pub command: Vec<String>,
+    pub stop_command: Option<Vec<String>>,
     pub cwd: PathBuf,
     pub port: u16,
     pub ctx_size: Option<u32>,
@@ -36,6 +38,22 @@ pub enum RuntimePlanError {
     UnsupportedProtocol { backend: String, protocol: String },
     #[error("port must be in 1-65535")]
     InvalidPort,
+    #[error("invalid WSL2 launcher manifest {path}: {message}")]
+    InvalidWslLauncherManifest { path: String, message: String },
+    #[error("WSL2 vLLM does not support this Windows model path: {0}")]
+    UnsupportedWslModelPath(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct WslVllmLauncherManifest {
+    schema_version: u32,
+    backend: String,
+    distribution: String,
+    linux_launcher: String,
+    linux_runner: String,
+    linux_stopper: String,
+    linux_pid_dir: String,
+    automount_root: String,
 }
 
 pub fn build_external_runtime_plan(
@@ -76,6 +94,14 @@ pub fn build_external_runtime_plan(
             log_file_name,
         ),
         "vllm-openai-server" => build_vllm_plan(
+            &launcher_path,
+            request,
+            server_args,
+            effective_ctx_size,
+            log_file_name,
+        ),
+        "vllm-wsl2-openai-server" => build_wsl_vllm_plan(
+            backend_id,
             &launcher_path,
             request,
             server_args,
@@ -126,6 +152,7 @@ fn build_llama_cpp_plan(
     }
     Ok(ExternalRuntimePlan {
         command,
+        stop_command: None,
         cwd: launcher_path
             .parent()
             .map(Path::to_path_buf)
@@ -163,6 +190,7 @@ fn build_vllm_plan(
     command.extend(server_args);
     Ok(ExternalRuntimePlan {
         command,
+        stop_command: None,
         cwd: launcher_path
             .parent()
             .map(Path::to_path_buf)
@@ -172,6 +200,134 @@ fn build_vllm_plan(
         log_file_name,
         proxy_model_ref,
     })
+}
+
+fn build_wsl_vllm_plan(
+    backend_id: &str,
+    manifest_path: &Path,
+    request: &ExternalRuntimeRequest,
+    mut server_args: Vec<String>,
+    effective_ctx_size: Option<u32>,
+    log_file_name: String,
+) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    let raw = std::fs::read_to_string(manifest_path).map_err(|error| {
+        RuntimePlanError::InvalidWslLauncherManifest {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    let manifest: WslVllmLauncherManifest = serde_json::from_str(&raw).map_err(|error| {
+        RuntimePlanError::InvalidWslLauncherManifest {
+            path: manifest_path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    validate_wsl_manifest(backend_id, manifest_path, &manifest)?;
+    if extract_server_arg_value(&server_args, &["--served-model-name"]).is_none() {
+        server_args.splice(
+            0..0,
+            ["--served-model-name".to_string(), "local".to_string()],
+        );
+    }
+    let proxy_model_ref = extract_server_arg_value(&server_args, &["--served-model-name"]);
+    let model = translate_wsl_model_ref(&request.model_path, &manifest.automount_root)?;
+    let pid_file = format!(
+        "{}/{}.pid",
+        manifest.linux_pid_dir.trim_end_matches('/'),
+        request.port
+    );
+    let wsl = std::env::var("OMNIINFER_WSL_EXE").unwrap_or_else(|_| "wsl.exe".to_string());
+    let mut command = vec![
+        wsl.clone(),
+        "--distribution".to_string(),
+        manifest.distribution.clone(),
+        "--exec".to_string(),
+        manifest.linux_runner.clone(),
+        pid_file.clone(),
+        manifest.linux_launcher.clone(),
+        "serve".to_string(),
+        model,
+        "--host".to_string(),
+        request.host.clone(),
+        "--port".to_string(),
+        request.port.to_string(),
+    ];
+    command.extend(server_args);
+    let stop_command = vec![
+        wsl,
+        "--distribution".to_string(),
+        manifest.distribution,
+        "--exec".to_string(),
+        manifest.linux_stopper,
+        pid_file,
+    ];
+    Ok(ExternalRuntimePlan {
+        command,
+        stop_command: Some(stop_command),
+        cwd: manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        port: request.port,
+        ctx_size: effective_ctx_size,
+        log_file_name,
+        proxy_model_ref,
+    })
+}
+
+fn validate_wsl_manifest(
+    backend_id: &str,
+    path: &Path,
+    manifest: &WslVllmLauncherManifest,
+) -> Result<(), RuntimePlanError> {
+    let valid = manifest.schema_version == 1
+        && manifest.backend == backend_id
+        && !manifest.distribution.trim().is_empty()
+        && !manifest.distribution.chars().any(char::is_control)
+        && [
+            manifest.linux_launcher.as_str(),
+            manifest.linux_runner.as_str(),
+            manifest.linux_stopper.as_str(),
+            manifest.linux_pid_dir.as_str(),
+            manifest.automount_root.as_str(),
+        ]
+        .into_iter()
+        .all(valid_absolute_linux_path);
+    if valid {
+        Ok(())
+    } else {
+        Err(RuntimePlanError::InvalidWslLauncherManifest {
+            path: path.display().to_string(),
+            message: "unsupported schema or incomplete absolute Linux paths".to_string(),
+        })
+    }
+}
+
+fn valid_absolute_linux_path(value: &str) -> bool {
+    value.starts_with('/')
+        && !value.chars().any(char::is_control)
+        && !value.split('/').any(|component| component == "..")
+}
+
+fn translate_wsl_model_ref(model: &str, automount_root: &str) -> Result<String, RuntimePlanError> {
+    let bytes = model.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let suffix = model[3..].replace('\\', "/");
+        return Ok(format!(
+            "{}/{drive}/{}",
+            automount_root.trim_end_matches('/'),
+            suffix.trim_start_matches('/')
+        ));
+    }
+    if model.starts_with(r"\\") {
+        return Err(RuntimePlanError::UnsupportedWslModelPath(model.to_string()));
+    }
+    Ok(model.to_string())
 }
 
 fn validate_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
@@ -221,7 +377,7 @@ fn extract_server_arg_value(args: &[String], flags: &[&str]) -> Option<String> {
 }
 
 fn ctx_size_flags(protocol: &str) -> [&'static str; 2] {
-    if protocol == "vllm-openai-server" {
+    if matches!(protocol, "vllm-openai-server" | "vllm-wsl2-openai-server") {
         ["--max-model-len", ""]
     } else {
         ["-c", "--ctx-size"]
@@ -376,6 +532,95 @@ mod tests {
                 "4096"
             ]
         );
+    }
+
+    #[test]
+    fn wsl_vllm_uses_manifest_and_translates_windows_model_path() {
+        let root = std::env::temp_dir().join(format!("omniinfer-wsl-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("vllm-wsl2.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "backend": "vllm-wsl2-cuda",
+                "distribution": "Ubuntu-24.04",
+                "linux_launcher": "/home/test/runtime/current/venv/bin/vllm",
+                "linux_runner": "/home/test/runtime/current/bin/omniinfer-vllm-run",
+                "linux_stopper": "/home/test/runtime/current/bin/omniinfer-vllm-stop",
+                "linux_pid_dir": "/home/test/runtime/current/run",
+                "automount_root": "/mnt",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let backend = json!({
+            "id": "vllm-wsl2-cuda",
+            "launcher_path": manifest,
+            "runtime_dir": root,
+            "default_args": [],
+            "external_server_protocol": "vllm-wsl2-openai-server",
+            "log_file_name": "vllm-wsl2-server.log"
+        });
+        let plan = build_external_runtime_plan(&ExternalRuntimeRequest {
+            backend,
+            model_path: r"D:\models\Qwen 4B".to_string(),
+            mmproj_path: None,
+            host: "127.0.0.1".to_string(),
+            port: 24567,
+            ctx_size: Some(8192),
+            launch_args: None,
+        })
+        .unwrap();
+        assert_eq!(plan.proxy_model_ref.as_deref(), Some("local"));
+        assert!(
+            plan.command
+                .iter()
+                .any(|arg| arg == "/mnt/d/models/Qwen 4B")
+        );
+        assert!(
+            plan.command
+                .windows(2)
+                .any(|args| args == ["--max-model-len", "8192"])
+        );
+        assert_eq!(
+            plan.stop_command.as_ref().unwrap().last().unwrap(),
+            "/home/test/runtime/current/run/24567.pid"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn wsl_vllm_rejects_unc_model_path() {
+        let error = translate_wsl_model_ref(r"\\server\share\model", "/mnt").unwrap_err();
+        assert_eq!(
+            error,
+            RuntimePlanError::UnsupportedWslModelPath(r"\\server\share\model".to_string())
+        );
+    }
+
+    #[test]
+    fn wsl_vllm_keeps_huggingface_references_and_rejects_malformed_manifest() {
+        assert_eq!(
+            translate_wsl_model_ref("Qwen/Qwen2.5-7B-Instruct", "/mnt").unwrap(),
+            "Qwen/Qwen2.5-7B-Instruct"
+        );
+        let manifest = WslVllmLauncherManifest {
+            schema_version: 1,
+            backend: "vllm-wsl2-cuda".to_string(),
+            distribution: "Ubuntu-24.04".to_string(),
+            linux_launcher: "/home/test/runtime/../other/vllm".to_string(),
+            linux_runner: "/home/test/runtime/run".to_string(),
+            linux_stopper: "/home/test/runtime/stop".to_string(),
+            linux_pid_dir: "/home/test/runtime/pids".to_string(),
+            automount_root: "/mnt".to_string(),
+        };
+        let error = validate_wsl_manifest("vllm-wsl2-cuda", Path::new("vllm-wsl2.json"), &manifest)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimePlanError::InvalidWslLauncherManifest { .. }
+        ));
     }
 
     #[test]

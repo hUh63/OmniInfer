@@ -17,6 +17,7 @@ mod model_commands;
 mod prebuilt_catalog;
 mod serve;
 mod tui;
+mod wsl_runtime_installer;
 
 pub(crate) use backend_commands::{
     print_backend_list, rust_backend_payload, select_backend, select_backend_for_config,
@@ -66,12 +67,14 @@ fn run_ported_command(command: &Command) -> Result<()> {
                     from_source,
                     dry_run,
                     json,
+                    wsl_distro,
                 },
         } => backend_installer::install_backend(backend_installer::InstallOptions {
             backend: backend.clone(),
             dry_run: *dry_run,
             from_source: *from_source,
             json: *json,
+            wsl_distro: wsl_distro.clone(),
         }),
         Command::Backend {
             command: BackendCommand::Select { backend },
@@ -89,6 +92,7 @@ fn run_ported_command(command: &Command) -> Result<()> {
                 dry_run: false,
                 from_source: false,
                 json: false,
+                wsl_distro: None,
             })
         }
         Command::Build { .. } if !source_build_scripts_available() => anyhow::bail!(

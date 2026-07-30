@@ -91,6 +91,9 @@ pub(crate) enum BackendCommand {
         /// Emit newline-delimited JSON progress events on stdout.
         #[arg(long)]
         json: bool,
+        /// WSL2 distribution used by managed Windows Linux runtimes.
+        #[arg(long)]
+        wsl_distro: Option<String>,
     },
     /// Select a backend.
     Select { backend: String },

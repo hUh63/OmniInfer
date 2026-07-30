@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -30,6 +30,7 @@ pub struct RuntimeProcessInfo {
 pub struct RuntimeProcess {
     child: Child,
     log_handle: File,
+    stop_command: Option<Vec<String>>,
     info: RuntimeProcessInfo,
 }
 
@@ -61,6 +62,8 @@ pub enum RuntimeProcessError {
     EarlyExit,
     #[error("runtime did not become ready in time")]
     ReadyTimeout,
+    #[error("runtime stop hook failed: {0}")]
+    StopHook(String),
 }
 
 impl RuntimeProcess {
@@ -118,7 +121,11 @@ impl RuntimeProcess {
             options.startup_timeout,
             &mut child,
         )? {
-            let _ = terminate_child(&mut child, Duration::from_secs(2));
+            let _ = terminate_runtime(
+                &mut child,
+                plan.stop_command.as_deref(),
+                Duration::from_secs(2),
+            );
             return Err(RuntimeProcessError::ReadyTimeout);
         }
         let info = RuntimeProcessInfo {
@@ -130,6 +137,7 @@ impl RuntimeProcess {
         Ok(Self {
             child,
             log_handle,
+            stop_command: plan.stop_command.clone(),
             info,
         })
     }
@@ -139,7 +147,7 @@ impl RuntimeProcess {
     }
 
     pub fn stop(&mut self, grace: Duration) -> Result<(), RuntimeProcessError> {
-        terminate_child(&mut self.child, grace)?;
+        terminate_runtime(&mut self.child, self.stop_command.as_deref(), grace)?;
         self.log_handle.sync_all().ok();
         Ok(())
     }
@@ -211,6 +219,64 @@ fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), RuntimeProc
     child.kill()?;
     let _ = child.wait();
     Ok(())
+}
+
+fn terminate_runtime(
+    child: &mut Child,
+    stop_command: Option<&[String]>,
+    grace: Duration,
+) -> Result<(), RuntimeProcessError> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let hook_result = stop_command
+        .map(|command| run_stop_hook(command, grace.min(Duration::from_secs(5))))
+        .transpose();
+    let child_result = terminate_child(child, grace);
+    hook_result?;
+    child_result
+}
+
+fn run_stop_hook(command: &[String], timeout: Duration) -> Result<(), RuntimeProcessError> {
+    let Some(executable) = command.first() else {
+        return Err(RuntimeProcessError::StopHook(
+            "stop command is empty".to_string(),
+        ));
+    };
+    let mut process = Command::new(executable);
+    process
+        .args(command.iter().skip(1))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    hide_child_window(&mut process);
+    let mut hook = process.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = hook.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            let mut stderr = String::new();
+            if let Some(mut stream) = hook.stderr.take() {
+                let _ = stream.read_to_string(&mut stderr);
+            }
+            let detail = stderr.trim();
+            return Err(RuntimeProcessError::StopHook(if detail.is_empty() {
+                format!("command exited with {status}")
+            } else {
+                detail.to_string()
+            }));
+        }
+        if Instant::now() >= deadline {
+            let _ = hook.kill();
+            let _ = hook.wait();
+            return Err(RuntimeProcessError::StopHook(
+                "stop command timed out".to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[cfg(unix)]
@@ -293,6 +359,7 @@ mod tests {
         let script = write_test_server(&root, port);
         let plan = ExternalRuntimePlan {
             command: test_script_command(&script),
+            stop_command: None,
             cwd: root.clone(),
             port,
             ctx_size: None,
@@ -322,6 +389,7 @@ mod tests {
         let script = write_failed_process(&root);
         let plan = ExternalRuntimePlan {
             command: test_script_command(&script),
+            stop_command: None,
             cwd: root.clone(),
             port: 9,
             ctx_size: None,
@@ -351,6 +419,7 @@ mod tests {
         let script = write_sleep_process(&root);
         let plan = ExternalRuntimePlan {
             command: test_script_command(&script),
+            stop_command: None,
             cwd: root.clone(),
             port: 9,
             ctx_size: None,
@@ -368,6 +437,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, RuntimeProcessError::ReadyTimeout));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stop_hook_reports_failure_and_timeout() {
+        let root = temp_root("runtime-stop-hook");
+        let hook = write_stop_hook(&root);
+
+        let mut success = test_script_command(&hook);
+        success.push("success".to_string());
+        run_stop_hook(&success, Duration::from_secs(1)).unwrap();
+
+        let mut failure = test_script_command(&hook);
+        failure.push("failure".to_string());
+        let error = run_stop_hook(&failure, Duration::from_secs(1)).unwrap_err();
+        assert!(matches!(error, RuntimeProcessError::StopHook(_)));
+        assert!(error.to_string().contains("injected stop failure"));
+
+        let mut timeout = test_script_command(&hook);
+        timeout.push("timeout".to_string());
+        let error = run_stop_hook(&timeout, Duration::from_millis(100)).unwrap_err();
+        assert!(matches!(error, RuntimeProcessError::StopHook(_)));
+        assert!(error.to_string().contains("timed out"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn failed_stop_hook_still_reaps_wrapper_process() {
+        let root = temp_root("runtime-stop-hook-reap");
+        let sleep = write_sleep_process(&root);
+        let hook = write_stop_hook(&root);
+        let sleep_command = test_script_command(&sleep);
+        let mut child = Command::new(&sleep_command[0])
+            .args(&sleep_command[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut failure = test_script_command(&hook);
+        failure.push("failure".to_string());
+
+        let error =
+            terminate_runtime(&mut child, Some(&failure), Duration::from_millis(250)).unwrap_err();
+        assert!(matches!(error, RuntimeProcessError::StopHook(_)));
+        assert!(child.try_wait().unwrap().is_some());
+
         fs::remove_dir_all(root).ok();
     }
 
@@ -496,6 +613,44 @@ fn main() {
         {
             let script = root.join("sleep.sh");
             fs::write(&script, "#!/usr/bin/env bash\nsleep 30\n").unwrap();
+            make_executable(&script);
+            script
+        }
+    }
+
+    fn write_stop_hook(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        #[cfg(windows)]
+        {
+            let executable = root.join("stop-hook.exe");
+            compile_test_exe(
+                root,
+                "stop-hook.rs",
+                &executable,
+                r#"
+fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("success") => {}
+        Some("failure") => {
+            eprintln!("injected stop failure");
+            std::process::exit(9);
+        }
+        Some("timeout") => std::thread::sleep(std::time::Duration::from_secs(30)),
+        _ => std::process::exit(2),
+    }
+}
+"#,
+            );
+            executable
+        }
+        #[cfg(not(windows))]
+        {
+            let script = root.join("stop-hook.sh");
+            fs::write(
+                &script,
+                "#!/usr/bin/env bash\ncase \"$1\" in success) exit 0;; failure) echo 'injected stop failure' >&2; exit 9;; timeout) sleep 30;; *) exit 2;; esac\n",
+            )
+            .unwrap();
             make_executable(&script);
             script
         }

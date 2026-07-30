@@ -57,7 +57,29 @@ pub(super) fn runtime_env_for_backend(
             selection.visible_devices.clone(),
         ));
     }
+    if backend.id == "vllm-wsl2-cuda" {
+        let wslenv = merge_wslenv(&std::env::var("WSLENV").unwrap_or_default(), &env);
+        env.push(("WSLENV".to_string(), wslenv));
+    }
     (env, cuda_selection)
+}
+
+fn merge_wslenv(existing: &str, env: &[(String, String)]) -> String {
+    let mut forwarded = existing
+        .split(':')
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for name in ["CUDA_VISIBLE_DEVICES", "VLLM_USE_FLASHINFER_SAMPLER"] {
+        if env.iter().any(|(key, _)| key == name)
+            && !forwarded
+                .iter()
+                .any(|value| value.split('/').next() == Some(name))
+        {
+            forwarded.push(name.to_string());
+        }
+    }
+    forwarded.join(":")
 }
 
 fn vllm_runtime_library_paths(bin_dir: &Path) -> Vec<String> {
@@ -489,5 +511,17 @@ mod tests {
         assert!(paths.contains(&cuda_lib.display().to_string()));
         assert!(paths.contains(&cublas_lib.display().to_string()));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wslenv_preserves_flags_and_forwards_managed_cuda_variables_once() {
+        let env = vec![
+            ("CUDA_VISIBLE_DEVICES".to_string(), "0".to_string()),
+            ("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string()),
+        ];
+        assert_eq!(
+            merge_wslenv("PATH/l:CUDA_VISIBLE_DEVICES/u", &env),
+            "PATH/l:CUDA_VISIBLE_DEVICES/u:VLLM_USE_FLASHINFER_SAMPLER"
+        );
     }
 }
