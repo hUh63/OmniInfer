@@ -20,6 +20,7 @@ pub(crate) struct InstallOptions {
     pub(crate) dry_run: bool,
     pub(crate) from_source: bool,
     pub(crate) json: bool,
+    pub(crate) wsl_distro: Option<String>,
 }
 
 #[derive(Debug)]
@@ -46,7 +47,7 @@ struct TarLink {
     kind: TarLinkKind,
 }
 
-struct InstallReporter {
+pub(super) struct InstallReporter {
     backend: String,
     json: bool,
     sequence: u64,
@@ -61,13 +62,13 @@ impl InstallReporter {
         }
     }
 
-    fn human(&self, message: impl AsRef<str>) {
+    pub(super) fn human(&self, message: impl AsRef<str>) {
         if !self.json {
             println!("{}", message.as_ref());
         }
     }
 
-    fn event(&mut self, event: &str, fields: Value) {
+    pub(super) fn event(&mut self, event: &str, fields: Value) {
         if !self.json {
             return;
         }
@@ -119,7 +120,6 @@ fn install_backend_inner(options: &InstallOptions, reporter: &mut InstallReporte
         .ok_or_else(|| anyhow::anyhow!("Unsupported backend: {}", options.backend))?;
     let catalog = load_catalog()?;
     let runtime_dir = PathBuf::from(&spec.runtime_dir);
-    let entry_result = catalog_entry(&catalog, platform, &options.backend);
     reporter.event(
         "install_started",
         json!({
@@ -130,6 +130,21 @@ fn install_backend_inner(options: &InstallOptions, reporter: &mut InstallReporte
             "dry_run": options.dry_run,
         }),
     );
+    if let Some(entry) = catalog.python_runtime(platform, &options.backend) {
+        return crate::wsl_runtime_installer::install_wsl_python_runtime(
+            &options.backend,
+            &runtime_dir,
+            entry,
+            options.wsl_distro.as_deref(),
+            options.dry_run,
+            reporter,
+            &catalog,
+        );
+    }
+    if options.wsl_distro.is_some() {
+        anyhow::bail!("--wsl-distro is only valid for a managed WSL2 backend");
+    }
+    let entry_result = catalog_entry(&catalog, platform, &options.backend);
     if spec.binary_exists() {
         match entry_result.as_ref() {
             Ok(entry) => {
@@ -453,6 +468,25 @@ fn download_archive(
         }
     }
     anyhow::bail!("failed to download prebuilt archive; last error: {last_error}")
+}
+
+pub(super) fn download_verified_asset(
+    catalog: &PrebuiltCatalog,
+    url: &str,
+    expected_sha256: &str,
+    role: &str,
+    reporter: &mut InstallReporter,
+) -> Result<Vec<u8>> {
+    download_archive(
+        &mirror_urls(catalog, url),
+        Some(expected_sha256),
+        role,
+        "asset",
+        1,
+        1,
+        reporter,
+    )
+    .map(|archive| archive.bytes)
 }
 
 fn read_url_bytes(

@@ -346,6 +346,7 @@ fn choose_backend(config: &config::AppConfig) -> Result<Option<String>> {
                     dry_run: false,
                     from_source: false,
                     json: false,
+                    wsl_distro: None,
                 }) {
                     Ok(()) => {
                         notice(

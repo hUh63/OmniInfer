@@ -25,7 +25,7 @@ This document defines the stable gateway contract for loading a model through
 
 | Field | Type | Scope | Reloads runtime | Notes |
 |---|---:|---|---:|---|
-| `model` | string | load | yes | Required. Relative paths resolve under the selected backend model root for file/directory backends. Reference backends such as `vllm-linux-cuda` pass this string directly to the backend. |
+| `model` | string | load | yes | Required. Relative paths resolve under the selected backend model root for file/directory backends. Reference backends such as `vllm-linux-cuda` and `vllm-wsl2-cuda` pass model references directly to the backend. |
 | `backend` | string | load | maybe | Optional. If omitted, OmniInfer uses selected or automatic backend logic. |
 | `mmproj` | string | load | yes | Optional multimodal projector override. |
 | `ctx_size` / `ctx-size` | integer | load | yes | Optional context length override. |
@@ -129,8 +129,8 @@ For configuration screens that must reject unsupported settings, send
 
 ## Backend-Specific Notes
 
-`vllm-linux-cuda` runs the official vLLM OpenAI-compatible server. OmniInfer
-starts it as:
+`vllm-linux-cuda` and Windows `vllm-wsl2-cuda` run the official vLLM
+OpenAI-compatible server. OmniInfer starts the Linux backend as:
 
 ```text
 vllm serve <model> --host <loopback-host> --port <backend-port>
@@ -140,6 +140,13 @@ For this backend, `ctx_size` maps to vLLM's `--max-model-len`, and OmniInfer
 adds `--served-model-name local` unless the user supplies a backend-native
 `--served-model-name` in `launch_args`. `mmproj` is not supported and is ignored
 with a warning unless `strict_capabilities` is true.
+
+On Windows, vLLM runs inside the WSL2 distribution recorded by the managed
+launcher manifest. HuggingFace references are unchanged. Absolute drive paths
+are translated to the distribution automount root (`D:\models\x` becomes
+`/mnt/d/models/x` with the default WSL mount); UNC paths are rejected. Runtime
+shutdown invokes the managed WSL stopper for the vLLM process group and does not
+terminate the distribution.
 
 ## Chat Requests
 

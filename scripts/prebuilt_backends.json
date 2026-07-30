@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "mirrors": [
     "https://ghfast.top/"
   ],
@@ -8,6 +8,39 @@
       "tag": "b9500",
       "submodule_path": "framework/llama.cpp",
       "submodule_commit": "3d1998634e62b3a9920ea549c920bfc356ac599e"
+    },
+    "vllm-project/vllm": {
+      "tag": "v0.24.0",
+      "submodule_path": "framework/vllm",
+      "submodule_commit": "0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
+    }
+  },
+  "python_runtimes": {
+    "windows": {
+      "vllm-wsl2-cuda": {
+        "source": "vllm-project/vllm",
+        "tag": "v0.24.0",
+        "package": "vllm",
+        "python": "3.12",
+        "launcher": "vllm",
+        "uv": {
+          "x86_64": {
+            "version": "0.11.16",
+            "url": "https://github.com/astral-sh/uv/releases/download/0.11.16/uv-x86_64-unknown-linux-gnu.tar.gz",
+            "sha256": "74947fe2c03315cf07e82ab3acc703eddef01aba4d5232a98e4c6825ec116131"
+          }
+        },
+        "variants": {
+          "x86_64": {
+            "version": "0.24.0+cu129",
+            "cuda": "12.9",
+            "torch_backend": "cu129",
+            "minimum_driver": "576.02",
+            "url": "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl",
+            "sha256": "597949743f2a00c0539d9e2ff0f67b32c608a378e973f99e7529fd6fa9445f70"
+          }
+        }
+      }
     }
   },
   "platforms": {

@@ -14,7 +14,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,12 +34,18 @@ def iter_source_assets(catalog: dict[str, Any], source_name: str):
             yield platform, backend, "runtime", entry
             for index, asset in enumerate(entry.get("companion_assets", []), start=1):
                 yield platform, backend, f"companion {index}", asset
+    for platform, entries in catalog.get("python_runtimes", {}).items():
+        for backend, entry in entries.items():
+            if entry.get("source") != source_name:
+                continue
+            for architecture, variant in entry.get("variants", {}).items():
+                yield platform, backend, f"Python wheel ({architecture})", variant
 
 
 def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[str]:
     errors: list[str] = []
-    if catalog.get("schema_version") != 3:
-        errors.append("schema_version must be 3")
+    if catalog.get("schema_version") != 4:
+        errors.append("schema_version must be 4")
     sources = catalog.get("sources", {})
     if not isinstance(sources, dict) or not sources:
         errors.append("sources must be a non-empty object")
@@ -71,6 +77,66 @@ def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[st
             validate_asset(errors, platform, backend, "runtime", entry, tag)
             for index, asset in enumerate(entry.get("companion_assets", []), start=1):
                 validate_asset(errors, platform, backend, f"companion {index}", asset, tag)
+    for platform, entries in catalog.get("python_runtimes", {}).items():
+        for backend, entry in entries.items():
+            required = ("source", "tag", "package", "python", "launcher")
+            for key in required:
+                if not isinstance(entry.get(key), str) or not entry[key].strip():
+                    errors.append(f"{platform}/{backend}: Python runtime {key} is required")
+            variants = entry.get("variants")
+            uv_assets = entry.get("uv")
+            if not isinstance(variants, dict) or not variants:
+                errors.append(f"{platform}/{backend}: Python runtime variants are required")
+                continue
+            if not isinstance(uv_assets, dict) or not uv_assets:
+                errors.append(f"{platform}/{backend}: managed uv assets are required")
+                continue
+            for architecture, variant in variants.items():
+                source = sources.get(entry.get("source"))
+                if source is None:
+                    errors.append(
+                        f"{platform}/{backend}: unknown Python runtime source {entry.get('source')!r}"
+                    )
+                elif entry.get("tag") != source.get("tag"):
+                    errors.append(
+                        f"{platform}/{backend}: Python runtime tag does not match source"
+                    )
+                validate_asset(
+                    errors,
+                    platform,
+                    backend,
+                    f"Python wheel ({architecture})",
+                    variant,
+                    entry.get("tag"),
+                )
+                version = variant.get("version")
+                expected_base = str(entry.get("tag", "")).removeprefix("v")
+                if (
+                    not isinstance(version, str)
+                    or not version
+                    or not version.startswith(expected_base)
+                ):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: Python package version must match {entry.get('tag')!r}"
+                    )
+                if not isinstance(variant.get("minimum_driver"), str):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: minimum_driver is required"
+                    )
+                uv = uv_assets.get(architecture)
+                if not isinstance(uv, dict):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: managed uv asset is required"
+                    )
+                    continue
+                validate_asset(
+                    errors,
+                    platform,
+                    backend,
+                    f"uv ({architecture})",
+                    uv,
+                    uv.get("version"),
+                )
     return errors
 
 
@@ -136,8 +202,10 @@ def update_source(
     assets = release_assets(source_name, tag)
     for platform, backend, role, asset in iter_source_assets(catalog, source_name):
         old_url = asset["url"]
-        old_name = Path(urlparse(old_url).path).name
-        new_name = old_name.replace(old_tag, tag)
+        old_name = unquote(Path(urlparse(old_url).path).name)
+        new_name = old_name.replace(old_tag, tag).replace(
+            old_tag.removeprefix("v"), tag.removeprefix("v")
+        )
         upstream = assets.get(new_name)
         if upstream is None:
             raise SystemExit(f"{platform}/{backend} {role}: release asset {new_name!r} does not exist")
@@ -148,6 +216,16 @@ def update_source(
         asset["sha256"] = digest.removeprefix("sha256:")
     source["tag"] = tag
     source["submodule_commit"] = submodule_commit
+    for entries in catalog.get("python_runtimes", {}).values():
+        for entry in entries.values():
+            if entry.get("source") == source_name:
+                entry["tag"] = tag
+                for variant in entry.get("variants", {}).values():
+                    old_version = str(variant.get("version", ""))
+                    local_suffix = old_version.partition("+")[2]
+                    variant["version"] = tag.removeprefix("v") + (
+                        f"+{local_suffix}" if local_suffix else ""
+                    )
 
 
 def write_catalog_atomically(path: Path, catalog: dict[str, Any]) -> None:

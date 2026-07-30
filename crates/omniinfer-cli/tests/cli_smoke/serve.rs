@@ -864,6 +864,165 @@ fn successful_smoke_test_stops_gateway_backend_and_releases_ports() {
     fs::remove_dir_all(runtime_root).ok();
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_vllm_wsl2_install_and_smoke_cover_managed_lifecycle() {
+    let source_root = temp_repo_root("serve-vllm-wsl2-source");
+    let state_root = temp_repo_root("serve-vllm-wsl2-state");
+    let runtime_root = temp_repo_root("serve-vllm-wsl2-runtime");
+    let fake_root = temp_repo_root("serve-vllm-wsl2-fake");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create state config");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        r#"{"host":"127.0.0.1","startup_timeout":10}"#,
+    )
+    .expect("write state config");
+    let fake_wsl = compile_fake_wsl(&state_root.join("tools"));
+    let catalog = write_wsl_python_runtime_fixture(&state_root);
+
+    let mut install = Command::cargo_bin("omniinfer").expect("binary exists");
+    install
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_PREBUILT_CATALOG", &catalog)
+        .env("OMNIINFER_WSL_EXE", &fake_wsl)
+        .env("OMNIINFER_VLLM_NVIDIA_SMI", &fake_wsl)
+        .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+        .args([
+            "backend",
+            "install",
+            "vllm-wsl2-cuda",
+            "--wsl-distro",
+            "Ubuntu-24.04",
+            "--state-root",
+        ])
+        .arg(&state_root)
+        .arg("--runtime-root")
+        .arg(&runtime_root)
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"completed\""));
+
+    let launcher_manifest = runtime_root
+        .join("vllm-wsl2-cuda")
+        .join("bin")
+        .join("vllm-wsl2.json");
+    assert!(launcher_manifest.is_file());
+    let local_model = state_root.join("models").join("Local Model");
+    fs::create_dir_all(&local_model).expect("create local model directory");
+    fs::write(local_model.join("config.json"), "{}").expect("write local model config");
+    let models = [
+        "Qwen/Qwen2.5-0.5B-Instruct".to_string(),
+        local_model.display().to_string(),
+    ];
+
+    for (index, model) in models.iter().enumerate() {
+        let gateway_port = free_port();
+        let mut backend_port = free_port();
+        while backend_port == gateway_port {
+            backend_port = free_port();
+        }
+        let stdout_path = state_root.join(format!("vllm-smoke-{index}.stdout.txt"));
+        let stderr_path = state_root.join(format!("vllm-smoke-{index}.stderr.txt"));
+        let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin("omniinfer"));
+        command
+            .env("OMNIINFER_RUST_STRICT", "1")
+            .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+            .env("OMNIINFER_WSL_EXE", &fake_wsl)
+            .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+            .env("OMNIINFER_CUDA_VISIBLE_DEVICES", "0")
+            .args([
+                "serve",
+                "--smoke-test",
+                "--backend",
+                "vllm-wsl2-cuda",
+                "--model",
+            ])
+            .arg(model)
+            .arg("--backend-port")
+            .arg(backend_port.to_string())
+            .arg("--port")
+            .arg(gateway_port.to_string())
+            .arg("--state-root")
+            .arg(&state_root)
+            .arg("--runtime-root")
+            .arg(&runtime_root)
+            .stdout(Stdio::from(
+                fs::File::create(&stdout_path).expect("create smoke stdout"),
+            ))
+            .stderr(Stdio::from(
+                fs::File::create(&stderr_path).expect("create smoke stderr"),
+            ));
+        let mut child = command.spawn().expect("spawn vLLM WSL2 smoke test");
+        let Some(status) = wait_for_process_exit(&mut child, Duration::from_secs(30)) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("vLLM WSL2 smoke test did not exit");
+        };
+        let stdout = fs::read_to_string(&stdout_path).expect("read smoke stdout");
+        let stderr = fs::read_to_string(&stderr_path).expect("read smoke stderr");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "vLLM WSL2 smoke failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("Smoke: fake vLLM WSL2"),
+            "stdout:\n{stdout}"
+        );
+        assert!(stdout.contains("Smoke test cleanup complete"));
+        assert!(wait_for_port_closed(gateway_port));
+        assert!(wait_for_port_closed(backend_port));
+        assert!(
+            !state_root
+                .join(".local")
+                .join("run")
+                .join(format!("serve-{gateway_port}.json"))
+                .exists()
+        );
+    }
+
+    let invocations =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("read fake WSL invocations");
+    assert!(invocations.contains("Qwen/Qwen2.5-0.5B-Instruct"));
+    let local_model_wsl = local_model.display().to_string().replace('\\', "/");
+    let drive = local_model_wsl
+        .chars()
+        .next()
+        .expect("Windows model drive")
+        .to_ascii_lowercase();
+    assert!(
+        invocations.contains(&format!(
+            "/mnt/{drive}/{}",
+            local_model_wsl[3..].trim_start_matches('/')
+        )),
+        "local Windows model path was not translated:\n{invocations}"
+    );
+    assert!(
+        invocations
+            .lines()
+            .filter(|line| line.contains("/omniinfer-vllm-stop"))
+            .count()
+            >= 2
+    );
+    assert!(!invocations.contains("--terminate"));
+    assert!(launcher_manifest.is_file());
+
+    let status = StdCommand::new(&fake_wsl)
+        .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+        .args(["--list", "--quiet"])
+        .status()
+        .expect("query fake WSL after managed shutdown");
+    assert!(status.success(), "managed shutdown must not terminate WSL");
+
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+    fs::remove_dir_all(runtime_root).ok();
+    fs::remove_dir_all(fake_root).ok();
+}
+
 #[test]
 fn serve_rejects_an_occupied_port_before_spawning_gateway() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind occupied port");

@@ -39,6 +39,7 @@ Additional framework notes:
 - `mlx-mac` is embedded and uses Python packages instead of building `framework/mlx`
 - `framework/vllm` pins the upstream vLLM source release used for provenance and future source-build work
 - `vllm-linux-cuda` installs vLLM Python wheels into an OmniInfer-managed local venv by default, which matches vLLM's normal binary distribution path
+- Windows `vllm-wsl2-cuda` installs the pinned official Linux wheel into an OmniInfer-managed WSL2 venv; upstream vLLM has no native Windows runtime
 
 Submodule behavior:
 
@@ -46,7 +47,7 @@ Submodule behavior:
 - macOS `llama.cpp-*` scripts can bootstrap `framework/llama.cpp` automatically unless you pass `--no-bootstrap`
 - macOS `turboquant-mac` can bootstrap `framework/llama-cpp-turboquant` automatically unless you pass `--no-bootstrap`
 - Windows `llama.cpp-*` scripts do not bootstrap submodules automatically; initialize `framework/llama.cpp` first if it is missing
-- `vllm-linux-cuda` does not bootstrap `framework/vllm` during normal wheel installation
+- `vllm-linux-cuda` and `vllm-wsl2-cuda` do not bootstrap or update `framework/vllm` during normal wheel installation
 
 Example:
 
@@ -116,6 +117,7 @@ Current desktop runtime directories:
 - Windows arm64 CPU: `.local/runtime/windows/llama.cpp-windows-arm64`
 - Windows x64 SYCL: `.local/runtime/windows/llama.cpp-sycl`
 - Windows x64 HIP: `.local/runtime/windows/llama.cpp-hip`
+- Windows x64 WSL2 vLLM launcher manifest: `.local/runtime/windows/vllm-wsl2-cuda`
 - Linux x64 CPU: `.local/runtime/linux/llama.cpp-linux`
 - Linux x64 ROCm: `.local/runtime/linux/llama.cpp-linux-rocm`
 - Linux x64 Vulkan: `.local/runtime/linux/llama.cpp-linux-vulkan`
@@ -135,6 +137,27 @@ Typical subfolders:
 - `build/`
 
 ## Windows
+
+### Managed vLLM WSL2 Backend
+
+`vllm-wsl2-cuda` is the supported Windows vLLM path. The Windows runtime directory contains a validated launcher manifest, installer tool cache, and install logs; the uv-managed Python 3.12 environment lives in the selected user WSL2 distribution under `~/.local/share/omniinfer/runtimes/vllm-wsl2-cuda/`. Installation pins the upstream vLLM release, wheel URL and SHA256, CUDA/PyTorch ABI, minimum Windows driver, uv release and SHA256 in `scripts/prebuilt_backends.json`.
+
+```powershell
+wsl --install -d Ubuntu
+.\omniinfer.exe backend install vllm-wsl2-cuda --wsl-distro Ubuntu
+```
+
+The normal installer does not build or update the `framework/vllm` submodule. When intentionally updating the pinned upstream version, update catalog metadata and all associated digests together:
+
+```powershell
+python scripts/update_prebuilt_catalog.py update `
+  --source vllm-project/vllm `
+  --tag <vLLM-tag> `
+  --submodule-commit <upstream-commit>
+python scripts/update_prebuilt_catalog.py check
+```
+
+The updater changes source metadata, the managed Python runtime tag, the matching wheel asset URL and SHA256, and the recorded provenance commit. Updating the actual gitlink remains a separate explicit operation. Use `check --require-gitlink-match` only when the checked-out submodules are intentionally expected to match every catalog source.
 
 ### Available Scripts
 

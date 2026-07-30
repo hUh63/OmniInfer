@@ -253,6 +253,7 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "llama.cpp-linux" => 1,
         "llama.cpp-linux-s390x" => 1,
         "vllm-linux-cuda" => 2,
+        "vllm-wsl2-cuda" => 2,
         "llama.cpp-cpu" => 1,
         "llama.cpp-windows-arm64" => 1,
         "llama.cpp-ios" => 0,
@@ -639,6 +640,7 @@ fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
             "llama.cpp-sycl",
             "llama.cpp-hip",
             "ik_llama.cpp-cuda",
+            "vllm-wsl2-cuda",
         ],
         _ => &[],
     }
@@ -986,6 +988,30 @@ const WINDOWS_TEMPLATES: &[BackendTemplate] = &[
             "OMNIINFER_IK_LLAMA_CPP_CUDA",
         )
     },
+    BackendTemplate {
+        model_artifact: "reference",
+        supports_mmproj: false,
+        external_server_protocol: Some("vllm-wsl2-openai-server"),
+        log_file_name: "vllm-wsl2-server.log",
+        ..template(
+            "vllm-wsl2-cuda",
+            "vLLM WSL2 CUDA",
+            "vllm",
+            "vllm-wsl2-cuda",
+            Some("vllm-wsl2.json"),
+            "Official vLLM Linux CUDA runtime managed by OmniInfer through WSL2",
+            &[
+                "chat",
+                "stream",
+                "gpu",
+                "cuda",
+                "windows",
+                "wsl2",
+                "openai-compatible",
+            ],
+            "OMNIINFER_VLLM_WSL2_CUDA",
+        )
+    },
 ];
 
 const MAC_TEMPLATES: &[BackendTemplate] = &[
@@ -1184,6 +1210,36 @@ mod tests {
     }
 
     #[test]
+    fn windows_registry_exposes_managed_wsl2_vllm_backend() {
+        let registry = BackendRegistry::build(
+            HostInfo {
+                system: HostSystem::Windows,
+                machine: "x86_64",
+            },
+            "runtime",
+            &Value::Null,
+        );
+        let backend = registry.get("vllm-wsl2-cuda").unwrap();
+        assert_eq!(backend.family, "vllm");
+        assert_eq!(backend.model_artifact, "reference");
+        assert!(!backend.supports_mmproj);
+        assert_eq!(
+            backend.external_server_protocol.as_deref(),
+            Some("vllm-wsl2-openai-server")
+        );
+        for capability in ["gpu", "cuda", "windows", "wsl2", "openai-compatible"] {
+            assert!(
+                backend.capabilities.iter().any(|value| value == capability),
+                "missing capability {capability}"
+            );
+        }
+        assert!(
+            gpu_backend_ids(registry.host).contains(&backend.id.as_str()),
+            "managed WSL2 vLLM must participate in Windows GPU detection"
+        );
+    }
+
+    #[test]
     fn overrides_and_env_are_applied() {
         let overrides = json!({
             "llama.cpp-linux-cuda": {
@@ -1251,6 +1307,7 @@ mod tests {
     #[test]
     fn validated_llama_backends_rank_before_experimental_ik_backends() {
         assert!(backend_priority("llama.cpp-cuda") < backend_priority("ik_llama.cpp-cuda"));
+        assert!(backend_priority("llama.cpp-cuda") < backend_priority("vllm-wsl2-cuda"));
         assert!(
             backend_priority("llama.cpp-linux-cuda") < backend_priority("ik_llama.cpp-linux-cuda")
         );
