@@ -249,6 +249,8 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     let invocations =
         fs::read_to_string(fake_root.join("invocations.log")).expect("fake WSL invocations");
     assert!(invocations.contains("--user\troot\t--exec\tapt-get\tupdate"));
+    assert!(invocations.contains("--user\troot\t--exec\t/sbin/ldconfig"));
+    assert!(!invocations.contains("--user\troot\t--exec\tldconfig"));
     assert!(invocations.contains("rocm-hip-runtime=7.2.3.70203-90~24.04"));
     assert!(invocations.contains("rocminfo=1.0.0.70203-90~24.04"));
     assert!(invocations.contains("HSA_ENABLE_DXG_DETECTION=1"));
