@@ -864,6 +864,96 @@ fn successful_smoke_test_stops_gateway_backend_and_releases_ports() {
     fs::remove_dir_all(runtime_root).ok();
 }
 
+#[test]
+fn failed_model_load_stops_gateway_and_releases_port_for_retry() {
+    let backend_id = test_external_backend_id();
+    let runtime_root = temp_repo_root("serve-failed-load-runtime");
+    install_failing_runtime_in_root(&runtime_root, backend_id);
+
+    for detach in [false, true] {
+        let suffix = if detach { "detached" } else { "foreground" };
+        let source_root = temp_repo_root(&format!("serve-failed-load-{suffix}-source"));
+        let state_root = temp_repo_root(&format!("serve-failed-load-{suffix}-state"));
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(state_root.join("config")).expect("create state config");
+        fs::write(
+            state_root.join("config").join("omniinfer.json"),
+            r#"{"host":"127.0.0.1","startup_timeout":2}"#,
+        )
+        .expect("write config");
+        let model = state_root.join("model.gguf");
+        fs::write(&model, "gguf").expect("write model");
+        let gateway_port = free_port();
+
+        for attempt in 1..=2 {
+            let stdout_path = state_root.join(format!("attempt-{attempt}.stdout.txt"));
+            let stderr_path = state_root.join(format!("attempt-{attempt}.stderr.txt"));
+            let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin("omniinfer"));
+            command
+                .env("OMNIINFER_RUST_STRICT", "1")
+                .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+                .env_remove("OMNIINFER_STATE_ROOT")
+                .env_remove("OMNIINFER_RUNTIME_ROOT")
+                .env_remove("OMNIINFER_RUST_STATE_ROOT")
+                .args(["serve", "--smoke-test", "--backend", backend_id, "--model"])
+                .arg(&model)
+                .arg("--port")
+                .arg(gateway_port.to_string())
+                .arg("--state-root")
+                .arg(&state_root)
+                .arg("--runtime-root")
+                .arg(&runtime_root)
+                .stdout(Stdio::from(
+                    fs::File::create(&stdout_path).expect("create stdout capture"),
+                ))
+                .stderr(Stdio::from(
+                    fs::File::create(&stderr_path).expect("create stderr capture"),
+                ));
+            if detach {
+                command.arg("--detach");
+            }
+
+            let mut child = command.spawn().expect("spawn failed model load");
+            let Some(status) = wait_for_process_exit(&mut child, Duration::from_secs(20)) else {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "failed model load did not exit within 20 seconds (attempt={attempt}, detach={detach})"
+                );
+            };
+            let stdout = fs::read_to_string(&stdout_path).expect("read stdout capture");
+            let stderr = fs::read_to_string(&stderr_path).expect("read stderr capture");
+            assert_eq!(
+                status.code(),
+                Some(1),
+                "failed model load returned the wrong exit code (attempt={attempt}, detach={detach})\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            assert!(stdout.contains("Loading model..."), "stdout:\n{stdout}");
+            assert!(
+                stderr.contains("POST /omni/model/select failed with status 502"),
+                "stderr:\n{stderr}"
+            );
+            assert!(
+                wait_for_port_closed(gateway_port),
+                "failed model load must release gateway port {gateway_port} (attempt={attempt}, detach={detach})"
+            );
+            assert!(
+                !state_root
+                    .join(".local")
+                    .join("run")
+                    .join(format!("serve-{gateway_port}.json"))
+                    .exists(),
+                "failed model load must not retain stale serve metadata"
+            );
+        }
+
+        fs::remove_dir_all(source_root).ok();
+        fs::remove_dir_all(state_root).ok();
+    }
+
+    fs::remove_dir_all(runtime_root).ok();
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_vllm_wsl2_install_and_smoke_cover_managed_lifecycle() {

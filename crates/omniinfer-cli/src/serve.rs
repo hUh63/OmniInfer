@@ -117,10 +117,45 @@ fn cleanup_failed_serve(
         stop_process(tunnel.id());
         let _ = wait_for_child_exit(tunnel, FORCED_SHUTDOWN_TIMEOUT);
     }
-    stop_process(gateway.id());
-    let _ = wait_for_child_exit(gateway, FORCED_SHUTDOWN_TIMEOUT);
-    let _ = wait_for_local_port_closed(port, FORCED_SHUTDOWN_TIMEOUT);
-    let _ = serve_state::remove_serve_pid_info(port);
+
+    let mut config = config::load_app_config().unwrap_or_default();
+    config.port = port;
+    let url = format!("{}/omni/shutdown", config.service_base_url());
+    let shutdown_accepted =
+        http_client::post_json(&url, &serde_json::json!({}), SHUTDOWN_REQUEST_TIMEOUT)
+            .is_ok_and(|response| response.status < 400);
+    let mut gateway_exited = wait_for_child_exit(
+        gateway,
+        if shutdown_accepted {
+            GRACEFUL_SHUTDOWN_TIMEOUT
+        } else {
+            Duration::ZERO
+        },
+    );
+    let mut gateway_closed = wait_for_local_port_closed(
+        port,
+        if shutdown_accepted {
+            GRACEFUL_SHUTDOWN_TIMEOUT
+        } else {
+            Duration::ZERO
+        },
+    );
+    if !shutdown_accepted || !gateway_exited || !gateway_closed {
+        if !gateway_exited {
+            stop_process(gateway.id());
+        }
+        gateway_exited = gateway_exited || wait_for_child_exit(gateway, FORCED_SHUTDOWN_TIMEOUT);
+        gateway_closed =
+            gateway_closed || wait_for_local_port_closed(port, FORCED_SHUTDOWN_TIMEOUT);
+    }
+
+    if gateway_exited && gateway_closed {
+        let _ = serve_state::remove_serve_pid_info(port);
+    } else {
+        eprintln!(
+            "OmniInfer: failed startup cleanup did not fully stop the gateway on port {port}; run `omniinfer serve stop --port {port}`"
+        );
+    }
 }
 
 fn cleanup_smoke_serve(

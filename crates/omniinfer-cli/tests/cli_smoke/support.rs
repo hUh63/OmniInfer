@@ -201,6 +201,21 @@ pub(super) fn install_fake_runtime_server_in_root(
     );
 }
 
+pub(super) fn install_failing_runtime_in_root(runtime_root: &std::path::Path, backend_id: &str) {
+    let launcher_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
+    let launcher = runtime_root
+        .join(backend_id)
+        .join("bin")
+        .join(launcher_name);
+    fs::create_dir_all(launcher.parent().unwrap()).expect("create failing runtime dir");
+    fs::copy(assert_cmd::cargo::cargo_bin("omniinfer"), &launcher)
+        .expect("copy failing runtime fixture");
+}
+
 #[cfg(windows)]
 pub(super) fn compile_fake_wsl(root: &std::path::Path) -> std::path::PathBuf {
     let launcher = root.join("fake-wsl.exe");
