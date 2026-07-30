@@ -1,0 +1,267 @@
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process;
+use std::thread;
+use std::time::{Duration, Instant};
+
+fn main() {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    record_invocation(&args);
+    if args.first().is_some_and(|arg| arg.starts_with("--query-gpu")) {
+        println!("581.57");
+        return;
+    }
+    if args.as_slice() == ["--list", "--quiet"] {
+        println!("Ubuntu-24.04");
+        return;
+    }
+    if args.as_slice() == ["--list", "--verbose"] {
+        println!("  NAME STATE VERSION");
+        println!("* Ubuntu-24.04 Running 2");
+        return;
+    }
+    let Some(exec_index) = args.iter().position(|arg| arg == "--exec") else {
+        fail("fake WSL expected --exec");
+    };
+    let command = &args[exec_index + 1..];
+    if command.is_empty() {
+        fail("fake WSL command is empty");
+    }
+    match command[0].as_str() {
+        "sh" => handle_sh(command),
+        "wslpath" => handle_wslpath(command),
+        "uname" => println!("x86_64"),
+        "nvidia-smi" => println!("NVIDIA GeForce RTX 3060 Laptop GPU, 581.57"),
+        "mkdir" => handle_mkdir(command),
+        "rm" => handle_rm(command),
+        "cp" => handle_cp(command),
+        "chmod" => {}
+        "tee" => handle_tee(command),
+        executable if executable.ends_with("/omniinfer-vllm-run") => handle_runner(command),
+        executable if executable.ends_with("/omniinfer-vllm-stop") => handle_stopper(command),
+        executable if executable.ends_with("/uv-0.11.16") => handle_uv(command),
+        executable if executable.ends_with("/venv/bin/python") => {
+            if env::var_os("OMNIINFER_FAKE_WSL_FAIL_CURRENT_PROBE").is_some()
+                && executable.contains("/current/")
+            {
+                fail("injected current runtime probe failure");
+            }
+            println!(
+                r#"{{"vllm_version":"0.24.0+cu129","torch_version":"2.11.0+cu129","torch_cuda":"12.9","device":"Fake CUDA","value":1.0}}"#
+            );
+        }
+        other => fail(&format!("unsupported fake WSL command: {other}")),
+    }
+}
+
+fn handle_sh(command: &[String]) {
+    let script = command.get(2).map(String::as_str).unwrap_or_default();
+    if script.contains("printf %s \"$HOME\"") {
+        print!("/home/test");
+        return;
+    }
+    if script.contains("test -d \"$staging\"") {
+        let staging = map_linux(command.get(5).expect("staging argument"));
+        let current = map_linux(command.get(6).expect("current argument"));
+        let backup = map_linux(command.get(7).expect("backup argument"));
+        remove(&backup);
+        if current.exists() {
+            rename(&current, &backup);
+        }
+        rename(&staging, &current);
+        return;
+    }
+    if script.contains("rm -rf \"$current\"") {
+        let current = map_linux(command.get(4).expect("current argument"));
+        let backup = map_linux(command.get(5).expect("backup argument"));
+        remove(&current);
+        if backup.exists() {
+            rename(&backup, &current);
+        }
+        return;
+    }
+    if script.contains("for pid_file in") {
+        return;
+    }
+    fail("unsupported fake WSL shell script");
+}
+
+fn handle_wslpath(command: &[String]) {
+    let input = command.last().expect("wslpath input").replace('\\', "/");
+    if input.eq_ignore_ascii_case("C:/") {
+        print!("/mnt/c/");
+        return;
+    }
+    let bytes = input.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        print!("/mnt/{drive}/{}", input[3..].trim_start_matches('/'));
+        return;
+    }
+    print!("{input}");
+}
+
+fn handle_mkdir(command: &[String]) {
+    for path in command.iter().skip(1).filter(|arg| *arg != "-p") {
+        fs::create_dir_all(map_linux(path)).expect("create fake WSL directory");
+    }
+}
+
+fn handle_rm(command: &[String]) {
+    for path in command.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
+        remove(&map_linux(path));
+    }
+}
+
+fn handle_cp(command: &[String]) {
+    let destination = map_linux(command.last().expect("copy destination"));
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).expect("create copy parent");
+    }
+    fs::write(destination, b"fake uv").expect("write copied fake asset");
+}
+
+fn handle_tee(command: &[String]) {
+    let path = map_linux(command.get(1).expect("tee path"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create tee parent");
+    }
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes).expect("read tee stdin");
+    fs::write(path, bytes).expect("write fake WSL file");
+}
+
+fn handle_uv(command: &[String]) {
+    if command.get(1).map(String::as_str) == Some("venv") {
+        let runtime = map_linux(command.last().expect("venv path"));
+        let bin = runtime.join("bin");
+        fs::create_dir_all(&bin).expect("create fake venv");
+        fs::write(bin.join("python"), b"fake python").expect("write fake python");
+        fs::write(bin.join("vllm"), b"fake vllm").expect("write fake vllm");
+    }
+}
+
+fn handle_runner(command: &[String]) {
+    let pid_file = map_linux(command.get(1).expect("runner pid file"));
+    let stop_file = pid_file.with_extension("stop");
+    remove(&stop_file);
+    if let Some(parent) = pid_file.parent() {
+        fs::create_dir_all(parent).expect("create fake runner pid parent");
+    }
+    fs::write(&pid_file, process::id().to_string()).expect("write fake runner pid");
+    let port = command
+        .windows(2)
+        .find(|args| args[0] == "--port")
+        .map(|args| args[1].parse::<u16>().expect("valid fake vLLM port"))
+        .expect("fake vLLM --port");
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind fake vLLM server");
+    listener
+        .set_nonblocking(true)
+        .expect("set fake vLLM nonblocking");
+    while !stop_file.exists() {
+        match listener.accept() {
+            Ok((stream, _)) => handle_http(stream),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => fail(&format!("fake vLLM accept failed: {error}")),
+        }
+    }
+    remove(&pid_file);
+    remove(&stop_file);
+}
+
+fn handle_stopper(command: &[String]) {
+    let pid_file = map_linux(command.get(1).expect("stopper pid file"));
+    if !pid_file.exists() {
+        return;
+    }
+    fs::write(pid_file.with_extension("stop"), b"stop").expect("write fake runner stop marker");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pid_file.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if pid_file.exists() {
+        fail("fake vLLM runner did not stop");
+    }
+}
+
+fn handle_http(mut stream: TcpStream) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone fake vLLM stream"));
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+    let mut content_length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() || line.is_empty() {
+            return;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0; content_length];
+    if content_length > 0 && reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let response = if request_line.starts_with("GET /health") {
+        r#"{"status":"ok"}"#
+    } else if request_line.starts_with("POST /v1/chat/completions") {
+        r#"{"choices":[{"message":{"content":"fake vLLM WSL2"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#
+    } else {
+        r#"{"ok":true}"#
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        response.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn record_invocation(args: &[String]) {
+    fs::create_dir_all(root()).expect("create fake WSL root");
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root().join("invocations.log"))
+        .expect("open fake WSL invocation log");
+    writeln!(log, "{}", args.join("\t")).expect("record fake WSL invocation");
+}
+
+fn root() -> PathBuf {
+    PathBuf::from(env::var_os("OMNIINFER_FAKE_WSL_ROOT").expect("fake WSL root"))
+}
+
+fn map_linux(path: impl AsRef<str>) -> PathBuf {
+    let path = path.as_ref().trim_start_matches('/');
+    root().join("linux").join(path.replace('/', "\\"))
+}
+
+fn remove(path: &Path) {
+    if path.is_dir() {
+        fs::remove_dir_all(path).ok();
+    } else {
+        fs::remove_file(path).ok();
+    }
+}
+
+fn rename(source: &Path, target: &Path) {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).expect("create rename parent");
+    }
+    fs::rename(source, target).expect("rename fake WSL path");
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("{message}");
+    process::exit(2);
+}

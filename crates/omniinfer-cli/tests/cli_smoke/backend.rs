@@ -91,6 +91,97 @@ fn backend_install_prebuilt_from_local_catalog() {
     fs::remove_dir_all(root).ok();
 }
 
+#[cfg(windows)]
+#[test]
+fn backend_install_vllm_wsl2_is_transactional_and_idempotent() {
+    let root = temp_repo_root("backend-install-vllm-wsl2");
+    let runtime_root = root.join("runtime");
+    let fake_root = root.join("fake-wsl-state");
+    fs::create_dir_all(root.join("config")).expect("create config dir");
+    fs::write(root.join("config").join("omniinfer.json"), r#"{"port":1}"#).expect("write config");
+    let fake_wsl = compile_fake_wsl(&root.join("tools"));
+    let catalog = write_wsl_python_runtime_fixture(&root);
+
+    let run_install = |fail_current_probe: bool| {
+        let mut cmd = Command::cargo_bin("omniinfer").expect("binary exists");
+        cmd.env("OMNIINFER_RUST_STRICT", "1")
+            .env("OMNIINFER_RUST_REPO_ROOT", &root)
+            .env("OMNIINFER_PREBUILT_CATALOG", &catalog)
+            .env("OMNIINFER_WSL_EXE", &fake_wsl)
+            .env("OMNIINFER_VLLM_NVIDIA_SMI", &fake_wsl)
+            .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+            .args([
+                "backend",
+                "install",
+                "vllm-wsl2-cuda",
+                "--wsl-distro",
+                "Ubuntu-24.04",
+                "--runtime-root",
+            ])
+            .arg(&runtime_root)
+            .arg("--json");
+        if fail_current_probe {
+            cmd.env("OMNIINFER_FAKE_WSL_FAIL_CURRENT_PROBE", "1");
+        }
+        cmd.assert()
+    };
+
+    let output = run_install(false).success().get_output().stdout.clone();
+    let events = String::from_utf8(output)
+        .expect("UTF-8 JSONL")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON event"))
+        .collect::<Vec<_>>();
+    for event in [
+        "install_started",
+        "compatibility_selected",
+        "checksum_verified",
+        "staging_started",
+        "validation_passed",
+        "completed",
+    ] {
+        assert!(
+            events.iter().any(|row| row["event"] == event),
+            "missing event {event}"
+        );
+    }
+    let manifest_path = runtime_root
+        .join("vllm-wsl2-cuda")
+        .join("bin")
+        .join("vllm-wsl2.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("launcher manifest"))
+            .expect("launcher manifest JSON");
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["backend"], "vllm-wsl2-cuda");
+    assert_eq!(manifest["distribution"], "Ubuntu-24.04");
+    assert_eq!(manifest["tag"], "v0.24.0");
+    assert_eq!(manifest["package_version"], "0.24.0+cu129");
+    assert!(
+        manifest["linux_launcher"]
+            .as_str()
+            .unwrap()
+            .ends_with("/current/venv/bin/vllm")
+    );
+
+    let manifest_before_failure = fs::read(&manifest_path).expect("read launcher manifest");
+    run_install(false)
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"already_installed\""));
+    run_install(true).failure().stderr(predicate::str::contains(
+        "post-activation WSL runtime validation failed",
+    ));
+    assert_eq!(
+        fs::read(&manifest_path).expect("launcher manifest after failed reinstall"),
+        manifest_before_failure,
+        "failed reinstall must preserve the active launcher manifest"
+    );
+    run_install(false)
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"already_installed\""));
+    fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn backend_install_public_roots_emit_jsonl_progress() {
     let source_root = temp_repo_root("backend-install-json-source");

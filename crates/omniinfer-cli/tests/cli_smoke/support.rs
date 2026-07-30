@@ -201,6 +201,99 @@ pub(super) fn install_fake_runtime_server_in_root(
     );
 }
 
+#[cfg(windows)]
+pub(super) fn compile_fake_wsl(root: &std::path::Path) -> std::path::PathBuf {
+    let launcher = root.join("fake-wsl.exe");
+    fs::create_dir_all(root).expect("create fake WSL root");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("fake_wsl.rs");
+    let mut command = StdCommand::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()));
+    command
+        .arg("--edition=2021")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&launcher);
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+    let status = command.status().expect("compile fake WSL fixture");
+    assert!(
+        status.success(),
+        "failed to compile fake WSL fixture {}",
+        fixture.display()
+    );
+    launcher
+}
+
+#[cfg(windows)]
+pub(super) fn write_wsl_python_runtime_fixture(root: &std::path::Path) -> std::path::PathBuf {
+    use sha2::Digest;
+
+    let fixture = root.join("wsl-python-fixture");
+    fs::create_dir_all(&fixture).expect("create WSL Python fixture");
+    let archive = fixture.join("uv.tar.gz");
+    let file = fs::File::create(&archive).expect("create uv archive");
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(encoder);
+    let contents = b"fake uv";
+    let mut header = tar::Header::new_gnu();
+    header.set_path("uv-x86_64-unknown-linux-gnu/uv").unwrap();
+    header.set_size(contents.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    tar.append(&header, contents.as_slice())
+        .expect("append fake uv");
+    tar.finish().expect("finish fake uv archive");
+    drop(tar);
+    let sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(fs::read(&archive).expect("read fake uv archive"))
+    );
+    let catalog = fixture.join("catalog.json");
+    fs::write(
+        &catalog,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 2,
+            "mirrors": [],
+            "sources": {},
+            "python_runtimes": {
+                "windows": {
+                    "vllm-wsl2-cuda": {
+                        "source": "vllm-project/vllm",
+                        "tag": "v0.24.0",
+                        "package": "vllm",
+                        "python": "3.12",
+                        "launcher": "vllm",
+                        "uv": {
+                            "x86_64": {
+                                "version": "0.11.16",
+                                "url": format!("file://{}", archive.display()),
+                                "sha256": sha256
+                            }
+                        },
+                        "variants": {
+                            "x86_64": {
+                                "version": "0.24.0+cu129",
+                                "cuda": "12.9",
+                                "torch_backend": "cu129",
+                                "minimum_driver": "576.02",
+                                "url": "https://github.com/vllm-project/vllm/releases/download/v0.24.0/fake.whl",
+                                "sha256": "1".repeat(64)
+                            }
+                        }
+                    }
+                }
+            },
+            "platforms": {}
+        }))
+        .expect("serialize WSL Python catalog"),
+    )
+    .expect("write WSL Python catalog");
+    catalog
+}
+
 pub(super) fn test_external_backend_id() -> &'static str {
     if cfg!(target_os = "macos") {
         "llama.cpp-mac"
