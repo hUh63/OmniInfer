@@ -122,6 +122,8 @@ If exactly one eligible user WSL2 distribution exists, `--wsl-distro` may be omi
 
 `--runtime-root` contains the small Windows launcher manifest, installer tool cache, and logs for these backends. The large Python environment is stored in the selected distribution under `~/.local/share/omniinfer/runtimes/<backend>/<runtime-key>/current`. Keep both locations intact. Normal model unload, backend stop, gateway shutdown, and smoke-test cleanup target only the managed vLLM process group; OmniInfer does not terminate the WSL distribution or unrelated Linux workloads.
 
+Managed WSL2 vLLM launches forward only a documented allowlist of relevant Windows host variables through `WSLENV`: `HF_ENDPOINT`, `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HF_HUB_OFFLINE`, `HF_HUB_DISABLE_XET`, `HF_HUB_ENABLE_HF_TRANSFER`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`, and upper- or lowercase `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`. Set them before starting `omniinfer serve`. Arbitrary host variables and host cache-path variables are not forwarded.
+
 Desktop applications can isolate OmniInfer from the package directory with the public global root options. Global options may appear before or after the subcommands:
 
 ```powershell

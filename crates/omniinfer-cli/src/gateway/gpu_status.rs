@@ -8,6 +8,23 @@ use serde_json::{Value, json};
 
 use super::runtime_manager::LoadedRuntimeSummary;
 
+const WSL_VLLM_HOST_ENV: &[&str] = &[
+    "HF_ENDPOINT",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "HF_HUB_OFFLINE",
+    "HF_HUB_DISABLE_XET",
+    "HF_HUB_ENABLE_HF_TRANSFER",
+    "HF_HUB_ETAG_TIMEOUT",
+    "HF_HUB_DOWNLOAD_TIMEOUT",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RuntimeCudaSelection {
     pub(super) visible_devices: String,
@@ -58,10 +75,22 @@ pub(super) fn runtime_env_for_backend(
         ));
     }
     if matches!(backend.id.as_str(), "vllm-wsl2-cuda" | "vllm-wsl2-rocm") {
+        append_wsl_host_env(&mut env, |name| std::env::var(name).ok());
         let wslenv = merge_wslenv(&std::env::var("WSLENV").unwrap_or_default(), &env);
         env.push(("WSLENV".to_string(), wslenv));
     }
     (env, cuda_selection)
+}
+
+fn append_wsl_host_env(
+    env: &mut Vec<(String, String)>,
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) {
+    for name in WSL_VLLM_HOST_ENV {
+        if let Some(value) = lookup(name).filter(|value| !value.is_empty()) {
+            env.push(((*name).to_string(), value));
+        }
+    }
 }
 
 fn merge_wslenv(existing: &str, env: &[(String, String)]) -> String {
@@ -70,7 +99,10 @@ fn merge_wslenv(existing: &str, env: &[(String, String)]) -> String {
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    for name in ["CUDA_VISIBLE_DEVICES", "VLLM_USE_FLASHINFER_SAMPLER"] {
+    for name in ["CUDA_VISIBLE_DEVICES", "VLLM_USE_FLASHINFER_SAMPLER"]
+        .into_iter()
+        .chain(WSL_VLLM_HOST_ENV.iter().copied())
+    {
         if env.iter().any(|(key, _)| key == name)
             && !forwarded
                 .iter()
@@ -518,10 +550,36 @@ mod tests {
         let env = vec![
             ("CUDA_VISIBLE_DEVICES".to_string(), "0".to_string()),
             ("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string()),
+            (
+                "HF_ENDPOINT".to_string(),
+                "https://huggingface.example".to_string(),
+            ),
+            ("HF_HUB_DISABLE_XET".to_string(), "1".to_string()),
         ];
         assert_eq!(
-            merge_wslenv("PATH/l:CUDA_VISIBLE_DEVICES/u", &env),
-            "PATH/l:CUDA_VISIBLE_DEVICES/u:VLLM_USE_FLASHINFER_SAMPLER"
+            merge_wslenv("PATH/l:CUDA_VISIBLE_DEVICES/u:HF_ENDPOINT", &env),
+            "PATH/l:CUDA_VISIBLE_DEVICES/u:HF_ENDPOINT:VLLM_USE_FLASHINFER_SAMPLER:HF_HUB_DISABLE_XET"
+        );
+    }
+
+    #[test]
+    fn wsl_host_env_uses_an_explicit_nonempty_allowlist() {
+        let mut env = Vec::new();
+        append_wsl_host_env(&mut env, |name| match name {
+            "HF_ENDPOINT" => Some("https://huggingface.example".to_string()),
+            "HF_HUB_DISABLE_XET" => Some("1".to_string()),
+            "HTTPS_PROXY" => Some(String::new()),
+            _ => None,
+        });
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "HF_ENDPOINT".to_string(),
+                    "https://huggingface.example".to_string()
+                ),
+                ("HF_HUB_DISABLE_XET".to_string(), "1".to_string()),
+            ]
         );
     }
 }
