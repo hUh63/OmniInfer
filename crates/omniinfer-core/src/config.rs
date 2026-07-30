@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::{local_state, paths};
 
+pub const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 420;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
@@ -45,7 +47,7 @@ impl Default for AppConfig {
             default_backend: String::new(),
             default_thinking: "off".to_string(),
             window_mode: "hidden".to_string(),
-            startup_timeout: 300.0,
+            startup_timeout: DEFAULT_STARTUP_TIMEOUT_SECONDS as f64,
             runtime_root: "runtime".to_string(),
         }
     }
