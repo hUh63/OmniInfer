@@ -357,9 +357,22 @@ pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::pat
                                         "sha256": key_sha256
                                     },
                                     "packages": {
+                                        "hipblas": "3.2.0.70203-90~24.04",
+                                        "hipblaslt": "1.2.2.70203-90~24.04",
+                                        "hipfft": "1.0.22.70203-90~24.04",
+                                        "hiprand": "3.1.0.70203-90~24.04",
+                                        "hipsolver": "3.2.0.70203-90~24.04",
+                                        "hipsparse": "4.2.0.70203-90~24.04",
+                                        "hipsparselt": "0.2.6.70203-90~24.04",
                                         "libopenmpi3t64": "4.1.6-7ubuntu2",
+                                        "miopen-hip": "3.5.1.70203-90~24.04",
+                                        "rccl": "2.27.7.70203-90~24.04",
+                                        "rocblas": "5.2.0.70203-90~24.04",
                                         "rocm-hip-runtime": "7.2.3.70203-90~24.04",
-                                        "rocminfo": "1.0.0.70203-90~24.04"
+                                        "rocm-smi-lib": "7.8.0.70203-90~24.04",
+                                        "rocminfo": "1.0.0.70203-90~24.04",
+                                        "rocsolver": "3.32.0.70203-90~24.04",
+                                        "roctracer": "4.1.70203.70203-90~24.04"
                                     },
                                     "rocdxg": {
                                         "version": "1.2.0",

@@ -251,9 +251,29 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     assert!(invocations.contains("--user\troot\t--exec\tapt-get\tupdate"));
     assert!(invocations.contains("--user\troot\t--exec\t/sbin/ldconfig"));
     assert!(!invocations.contains("--user\troot\t--exec\tldconfig"));
-    assert!(invocations.contains("libopenmpi3t64=4.1.6-7ubuntu2"));
-    assert!(invocations.contains("rocm-hip-runtime=7.2.3.70203-90~24.04"));
-    assert!(invocations.contains("rocminfo=1.0.0.70203-90~24.04"));
+    for package in [
+        "hipblas=3.2.0.70203-90~24.04",
+        "hipblaslt=1.2.2.70203-90~24.04",
+        "hipfft=1.0.22.70203-90~24.04",
+        "hiprand=3.1.0.70203-90~24.04",
+        "hipsolver=3.2.0.70203-90~24.04",
+        "hipsparse=4.2.0.70203-90~24.04",
+        "hipsparselt=0.2.6.70203-90~24.04",
+        "libopenmpi3t64=4.1.6-7ubuntu2",
+        "miopen-hip=3.5.1.70203-90~24.04",
+        "rccl=2.27.7.70203-90~24.04",
+        "rocblas=5.2.0.70203-90~24.04",
+        "rocm-hip-runtime=7.2.3.70203-90~24.04",
+        "rocm-smi-lib=7.8.0.70203-90~24.04",
+        "rocminfo=1.0.0.70203-90~24.04",
+        "rocsolver=3.32.0.70203-90~24.04",
+        "roctracer=4.1.70203.70203-90~24.04",
+    ] {
+        assert!(
+            invocations.contains(package),
+            "missing pinned package {package}"
+        );
+    }
     assert!(invocations.contains("HSA_ENABLE_DXG_DETECTION=1"));
     assert!(invocations.contains("--extra-index-url"));
     assert!(!invocations.contains("--torch-backend\trocm723"));

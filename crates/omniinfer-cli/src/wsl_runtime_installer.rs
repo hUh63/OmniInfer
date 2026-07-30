@@ -788,27 +788,25 @@ fn ensure_rocm_system_runtime(
         reporter,
         "refresh ROCm package metadata",
     )?;
-    let hip_version = required_rocm_package(system, "rocm-hip-runtime")?;
-    let rocminfo_version = required_rocm_package(system, "rocminfo")?;
-    let openmpi_version = required_rocm_package(system, "libopenmpi3t64")?;
-    let hip_requirement = format!("rocm-hip-runtime={hip_version}");
-    let rocminfo_requirement = format!("rocminfo={rocminfo_version}");
-    let openmpi_requirement = format!("libopenmpi3t64={openmpi_version}");
+    let mut install_args = vec![
+        "env".to_string(),
+        "DEBIAN_FRONTEND=noninteractive".to_string(),
+        "apt-get".to_string(),
+        "install".to_string(),
+        "--no-install-recommends".to_string(),
+        "--allow-downgrades".to_string(),
+        "-y".to_string(),
+    ];
+    install_args.extend(
+        system
+            .packages
+            .iter()
+            .map(|(name, version)| format!("{name}={version}")),
+    );
     run_wsl_as_checked(
         wsl,
         Some("root"),
-        [
-            "env",
-            "DEBIAN_FRONTEND=noninteractive",
-            "apt-get",
-            "install",
-            "--no-install-recommends",
-            "--allow-downgrades",
-            "-y",
-            openmpi_requirement.as_str(),
-            hip_requirement.as_str(),
-            rocminfo_requirement.as_str(),
-        ],
+        install_args.iter().map(String::as_str),
         None,
         reporter,
         "install pinned ROCm runtime packages",
@@ -861,38 +859,28 @@ fn validate_existing_system_runtime(
 }
 
 fn validate_rocm_system_versions(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<String> {
-    let openmpi_requirement = format!(
-        "libopenmpi3t64={}",
-        required_rocm_package(system, "libopenmpi3t64")?
-    );
-    let hip_requirement = format!(
-        "rocm-hip-runtime={}",
-        required_rocm_package(system, "rocm-hip-runtime")?
-    );
-    let rocminfo_requirement = format!("rocminfo={}", required_rocm_package(system, "rocminfo")?);
-    let versions = run_wsl(
-        wsl,
-        [
-            "dpkg-query",
-            "-W",
-            "-f=${Package}=${Version}\n",
-            "libopenmpi3t64",
-            "rocm-hip-runtime",
-            "rocminfo",
-            "rocdxg-roct",
-        ],
-        None,
-    )
-    .context("verify installed ROCm system package versions")?;
+    let package_requirements = system
+        .packages
+        .iter()
+        .map(|(name, version)| format!("{name}={version}"))
+        .collect::<Vec<_>>();
+    let mut query_args = vec![
+        "dpkg-query".to_string(),
+        "-W".to_string(),
+        "-f=${Package}=${Version}\n".to_string(),
+    ];
+    query_args.extend(system.packages.keys().cloned());
+    query_args.push("rocdxg-roct".to_string());
+    let versions = run_wsl(wsl, query_args.iter().map(String::as_str), None);
+    let versions = versions.context("verify installed ROCm system package versions")?;
     require_success(&versions, "verify installed ROCm system package versions")?;
     let installed = decode_output(&versions.stdout);
     let rocdxg_requirement = format!("rocdxg-roct={}", system.rocdxg.version);
-    for expected in [
-        openmpi_requirement.as_str(),
-        hip_requirement.as_str(),
-        rocminfo_requirement.as_str(),
-        rocdxg_requirement.as_str(),
-    ] {
+    for expected in package_requirements
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(rocdxg_requirement.as_str()))
+    {
         if !installed.lines().any(|line| line.trim() == expected) {
             anyhow::bail!(
                 "installed ROCm system runtime does not match the pinned catalog: missing {expected}"
@@ -917,14 +905,6 @@ fn verify_wsl_sha256(wsl: &WslContext, path: &str, expected: &str, role: &str) -
         );
     }
     Ok(())
-}
-
-fn required_rocm_package<'a>(system: &'a RocmSystemRuntime, name: &str) -> Result<&'a str> {
-    system
-        .packages
-        .get(name)
-        .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!("ROCm catalog is missing pinned package {name}"))
 }
 
 fn validate_wsl_rocm_gpu(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<()> {

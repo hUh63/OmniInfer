@@ -151,9 +151,22 @@ def validate(
                     else:
                         packages = rocm_system.get("packages")
                         required_packages = {
+                            "hipblas",
+                            "hipblaslt",
+                            "hipfft",
+                            "hiprand",
+                            "hipsolver",
+                            "hipsparse",
+                            "hipsparselt",
                             "libopenmpi3t64",
+                            "miopen-hip",
+                            "rccl",
+                            "rocblas",
                             "rocm-hip-runtime",
+                            "rocm-smi-lib",
                             "rocminfo",
+                            "rocsolver",
+                            "roctracer",
                         }
                         if (
                             not isinstance(packages, dict)
@@ -164,8 +177,8 @@ def validate(
                             )
                         ):
                             errors.append(
-                                f"{platform}/{backend} {architecture}: ROCm system packages must pin "
-                                "libopenmpi3t64, rocm-hip-runtime, and rocminfo"
+                                f"{platform}/{backend} {architecture}: ROCm system packages must "
+                                "exactly match the required PyTorch runtime set"
                             )
                 uv = uv_assets.get(architecture)
                 if not isinstance(uv, dict):

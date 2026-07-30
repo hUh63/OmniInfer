@@ -38,9 +38,22 @@ fn main() {
         "env" => handle_env(command),
         "install" | "apt-get" | "dpkg" | "/sbin/ldconfig" => {}
         "dpkg-query" => {
+            println!("hipblas=3.2.0.70203-90~24.04");
+            println!("hipblaslt=1.2.2.70203-90~24.04");
+            println!("hipfft=1.0.22.70203-90~24.04");
+            println!("hiprand=3.1.0.70203-90~24.04");
+            println!("hipsolver=3.2.0.70203-90~24.04");
+            println!("hipsparse=4.2.0.70203-90~24.04");
+            println!("hipsparselt=0.2.6.70203-90~24.04");
             println!("libopenmpi3t64=4.1.6-7ubuntu2");
+            println!("miopen-hip=3.5.1.70203-90~24.04");
+            println!("rccl=2.27.7.70203-90~24.04");
+            println!("rocblas=5.2.0.70203-90~24.04");
             println!("rocm-hip-runtime=7.2.3.70203-90~24.04");
+            println!("rocm-smi-lib=7.8.0.70203-90~24.04");
             println!("rocminfo=1.0.0.70203-90~24.04");
+            println!("rocsolver=3.32.0.70203-90~24.04");
+            println!("roctracer=4.1.70203.70203-90~24.04");
             println!("rocdxg-roct=1.2.0");
         }
         "sha256sum" => {

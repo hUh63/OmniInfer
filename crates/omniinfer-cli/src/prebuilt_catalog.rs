@@ -7,6 +7,24 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CATALOG: &str = include_str!("../../../scripts/prebuilt_backends.json");
+pub(crate) const REQUIRED_ROCM_SYSTEM_PACKAGES: &[&str] = &[
+    "hipblas",
+    "hipblaslt",
+    "hipfft",
+    "hiprand",
+    "hipsolver",
+    "hipsparse",
+    "hipsparselt",
+    "libopenmpi3t64",
+    "miopen-hip",
+    "rccl",
+    "rocblas",
+    "rocm-hip-runtime",
+    "rocm-smi-lib",
+    "rocminfo",
+    "rocsolver",
+    "roctracer",
+];
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PrebuiltCatalog {
@@ -324,10 +342,10 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                                 !value.starts_with("https://wheels.vllm.ai/rocm/")
                             })
                             || system.apt_repository.trim().is_empty()
-                            || system.packages.len() != 3
-                            || !system.packages.contains_key("libopenmpi3t64")
-                            || !system.packages.contains_key("rocm-hip-runtime")
-                            || !system.packages.contains_key("rocminfo")
+                            || system.packages.len() != REQUIRED_ROCM_SYSTEM_PACKAGES.len()
+                            || REQUIRED_ROCM_SYSTEM_PACKAGES
+                                .iter()
+                                .any(|name| !system.packages.contains_key(*name))
                             || system.required_gfx.is_empty()
                             || system.minimum_windows_release.trim().is_empty()
                         {
