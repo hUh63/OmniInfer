@@ -456,6 +456,52 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
 }
 
 #[tokio::test]
+async fn gateway_uses_configured_runtime_startup_timeout() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("rust-gateway-runtime-timeout");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, "").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let delay_file = temp
+        .join(".local")
+        .join("runtime")
+        .join(test_runtime_platform_dir())
+        .join(backend_id)
+        .join("bin")
+        .join("startup-delay-ms");
+    std::fs::write(delay_file, "3000").unwrap();
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let gateway = spawn_test_gateway_with_runtime_timeout(
+        GatewayAccessPolicy::default(),
+        Duration::from_millis(100),
+    )
+    .await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let error = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "backend_port": backend_port
+            }))
+            .unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert!(
+        error.to_string().contains("502"),
+        "unexpected load response: {error}"
+    );
+
+    gateway.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn model_selection_is_idempotent_and_restore_state_is_explicit() {
     let _env_lock = TEST_ENV_LOCK.lock().await;
     let temp = temp_root("model-restore-contract");
@@ -1542,6 +1588,26 @@ async fn spawn_test_gateway_with_options(
     access_policy: GatewayAccessPolicy,
     public_model_root: Option<PathBuf>,
 ) -> TestServer {
+    spawn_test_gateway_with_runtime_options(
+        access_policy,
+        public_model_root,
+        Duration::from_secs(120),
+    )
+    .await
+}
+
+async fn spawn_test_gateway_with_runtime_timeout(
+    access_policy: GatewayAccessPolicy,
+    runtime_startup_timeout: Duration,
+) -> TestServer {
+    spawn_test_gateway_with_runtime_options(access_policy, None, runtime_startup_timeout).await
+}
+
+async fn spawn_test_gateway_with_runtime_options(
+    access_policy: GatewayAccessPolicy,
+    public_model_root: Option<PathBuf>,
+    runtime_startup_timeout: Duration,
+) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -1553,6 +1619,7 @@ async fn spawn_test_gateway_with_options(
             result = run_gateway(GatewayConfig {
                 listen_host: "127.0.0.1".to_string(),
                 listen_port: port,
+                runtime_startup_timeout,
                 access_policy,
                 public_model_root,
             }) => {
@@ -1767,12 +1834,16 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-python3 - "$port" <<'PY'
+delay_file="$(dirname "$0")/startup-delay-ms"
+delay_ms="$(cat "$delay_file" 2>/dev/null || printf 0)"
+python3 - "$port" "$delay_ms" <<'PY'
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 port = int(sys.argv[1])
+time.sleep(int(sys.argv[2]) / 1000)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -1945,6 +2016,13 @@ fn main() {
     while let Some(arg) = args.next() {
         if arg == "--port" {
             port = args.next().unwrap_or_default();
+        }
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Ok(raw) = std::fs::read_to_string(executable.with_file_name("startup-delay-ms")) {
+            if let Ok(delay_ms) = raw.trim().parse::<u64>() {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
         }
     }
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();

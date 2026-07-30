@@ -291,6 +291,8 @@ pub(crate) struct GatewayArgs {
     pub(crate) host: String,
     #[arg(long)]
     pub(crate) port: u16,
+    #[arg(long, default_value_t = 120)]
+    pub(crate) startup_timeout: u64,
     #[arg(long)]
     pub(crate) api_key: Option<String>,
     #[arg(long)]
