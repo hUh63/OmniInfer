@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use omniinfer_core::version;
+use omniinfer_core::{config::DEFAULT_STARTUP_TIMEOUT_SECONDS, version};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -291,7 +291,7 @@ pub(crate) struct GatewayArgs {
     pub(crate) host: String,
     #[arg(long)]
     pub(crate) port: u16,
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = DEFAULT_STARTUP_TIMEOUT_SECONDS)]
     pub(crate) startup_timeout: u64,
     #[arg(long)]
     pub(crate) api_key: Option<String>,

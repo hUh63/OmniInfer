@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 
 use super::gpu_status::runtime_env_for_backend;
 
-const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(270);
+const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(360);
 const WSL_ROCM_COLD_START_INITIAL_ATTEMPT: Duration = Duration::from_secs(120);
-const WSL_ROCM_COLD_START_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+const WSL_ROCM_COLD_START_RETRY_COOLDOWN: Duration = Duration::from_secs(90);
 
 #[derive(Default)]
 pub(super) struct RustRuntimeManager {
@@ -860,15 +860,15 @@ mod tests {
     #[test]
     fn wsl_rocm_cold_start_retry_requires_a_safe_total_budget() {
         assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(300)),
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(420)),
             Some(Duration::from_secs(120))
         );
         assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(269)),
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(359)),
             None
         );
         assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-cuda", Duration::from_secs(300)),
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-cuda", Duration::from_secs(420)),
             None
         );
     }
