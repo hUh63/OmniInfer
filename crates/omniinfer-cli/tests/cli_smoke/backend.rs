@@ -154,7 +154,7 @@ fn backend_install_vllm_wsl2_is_transactional_and_idempotent() {
         serde_json::from_str(&fs::read_to_string(&manifest_path).expect("launcher manifest"))
             .expect("launcher manifest JSON");
     assert_eq!(manifest["schema_version"], 1);
-    assert_eq!(manifest["runtime_environment_version"], 4);
+    assert_eq!(manifest["runtime_environment_version"], 5);
     assert_eq!(manifest["backend"], "vllm-wsl2-cuda");
     assert_eq!(manifest["distribution"], "Ubuntu-24.04");
     assert_eq!(manifest["tag"], "v0.24.0");
@@ -256,7 +256,7 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     assert_eq!(manifest["backend"], "vllm-wsl2-rocm");
     assert_eq!(manifest["accelerator"], "rocm");
     assert_eq!(manifest["runtime_version"], "7.2.3");
-    assert_eq!(manifest["runtime_environment_version"], 4);
+    assert_eq!(manifest["runtime_environment_version"], 5);
 
     let invocations =
         fs::read_to_string(fake_root.join("invocations.log")).expect("fake WSL invocations");
@@ -373,7 +373,7 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     let mut stale_manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).expect("stale manifest"))
             .expect("stale manifest JSON");
-    stale_manifest["runtime_environment_version"] = serde_json::json!(3);
+    stale_manifest["runtime_environment_version"] = serde_json::json!(4);
     fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&stale_manifest).expect("serialize stale manifest"),
@@ -395,7 +395,7 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     let migrated_manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).expect("migrated manifest"))
             .expect("migrated manifest JSON");
-    assert_eq!(migrated_manifest["runtime_environment_version"], 4);
+    assert_eq!(migrated_manifest["runtime_environment_version"], 5);
     let manifest_before_failure = fs::read(&manifest_path).expect("read launcher manifest");
     run_install(true).failure().stderr(predicate::str::contains(
         "post-activation WSL runtime validation failed",

@@ -22,7 +22,7 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
-const RUNTIME_ENVIRONMENT_VERSION: u32 = 4;
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 5;
 const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.1.0";
 
 const ROCM_PLATFORM_PLUGIN: &str = r#"import os
@@ -190,6 +190,30 @@ if [ -s "$pid_file" ]; then
     fi
     rm -f "$pid_file"
 fi
+managed_memory_policy=1
+for argument in "$@"; do
+    case "$argument" in
+        --kv-cache-memory-bytes|--kv-cache-memory-bytes=*|--gpu-memory-utilization|--gpu-memory-utilization=*)
+            managed_memory_policy=0
+            break
+            ;;
+    esac
+done
+if [ "${HSA_ENABLE_DXG_DETECTION:-}" = "1" ] && [ "$managed_memory_policy" -eq 1 ]; then
+    memory_kib=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)
+    case "$memory_kib" in
+        ''|*[!0-9]*) memory_kib=0 ;;
+    esac
+    kv_cache_bytes=$((memory_kib * 1024 / 5))
+    if [ "$kv_cache_bytes" -gt 4294967296 ]; then
+        kv_cache_bytes=4294967296
+    fi
+    if [ "$kv_cache_bytes" -ge 268435456 ]; then
+        set -- "$@" --kv-cache-memory-bytes "$kv_cache_bytes"
+        echo "OmniInfer: limiting WSL2 ROCm KV cache to $kv_cache_bytes bytes based on Linux memory; override with --kv-cache-memory-bytes or --gpu-memory-utilization" >&2
+    fi
+fi
+unset argument managed_memory_policy memory_kib kv_cache_bytes
 setsid "$@" &
 child=$!
 printf '%s\n' "$child" > "$pid_file"
@@ -2525,6 +2549,15 @@ mod tests {
         assert!(rocm.contains("CC=/opt/rocm/llvm/bin/clang"));
         assert!(rocm.contains("export CC CXX"));
         assert!(rocm.contains(r#"PYTHONPATH="$runtime_dir/plugins"#));
+    }
+
+    #[test]
+    fn runner_limits_default_rocm_kv_cache_without_overriding_explicit_policy() {
+        assert!(RUNNER_SCRIPT.contains(r#"HSA_ENABLE_DXG_DETECTION:-}" = "1"#));
+        assert!(RUNNER_SCRIPT.contains("--kv-cache-memory-bytes"));
+        assert!(RUNNER_SCRIPT.contains("--gpu-memory-utilization"));
+        assert!(RUNNER_SCRIPT.contains("memory_kib * 1024 / 5"));
+        assert!(RUNNER_SCRIPT.contains("4294967296"));
     }
 
     #[test]
