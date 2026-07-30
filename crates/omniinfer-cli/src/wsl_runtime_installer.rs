@@ -22,7 +22,7 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
-const RUNTIME_ENVIRONMENT_VERSION: u32 = 5;
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 6;
 const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.1.0";
 
 const ROCM_PLATFORM_PLUGIN: &str = r#"import os
@@ -191,29 +191,45 @@ if [ -s "$pid_file" ]; then
     rm -f "$pid_file"
 fi
 managed_memory_policy=1
+managed_eager_policy=1
+managed_chunked_prefill_policy=1
 for argument in "$@"; do
     case "$argument" in
         --kv-cache-memory-bytes|--kv-cache-memory-bytes=*|--gpu-memory-utilization|--gpu-memory-utilization=*)
             managed_memory_policy=0
-            break
+            ;;
+        --enforce-eager|--no-enforce-eager)
+            managed_eager_policy=0
+            ;;
+        --enable-chunked-prefill|--enable-chunked-prefill=*|--no-enable-chunked-prefill)
+            managed_chunked_prefill_policy=0
             ;;
     esac
 done
-if [ "${HSA_ENABLE_DXG_DETECTION:-}" = "1" ] && [ "$managed_memory_policy" -eq 1 ]; then
-    memory_kib=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)
-    case "$memory_kib" in
-        ''|*[!0-9]*) memory_kib=0 ;;
-    esac
-    kv_cache_bytes=$((memory_kib * 1024 / 5))
-    if [ "$kv_cache_bytes" -gt 4294967296 ]; then
-        kv_cache_bytes=4294967296
+if [ "${HSA_ENABLE_DXG_DETECTION:-}" = "1" ]; then
+    if [ "$managed_memory_policy" -eq 1 ]; then
+        memory_kib=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)
+        case "$memory_kib" in
+            ''|*[!0-9]*) memory_kib=0 ;;
+        esac
+        kv_cache_bytes=$((memory_kib * 1024 / 5))
+        if [ "$kv_cache_bytes" -gt 4294967296 ]; then
+            kv_cache_bytes=4294967296
+        fi
+        if [ "$kv_cache_bytes" -ge 268435456 ]; then
+            set -- "$@" --kv-cache-memory-bytes "$kv_cache_bytes"
+            echo "OmniInfer: limiting WSL2 ROCm KV cache to $kv_cache_bytes bytes based on Linux memory; override with --kv-cache-memory-bytes or --gpu-memory-utilization" >&2
+        fi
     fi
-    if [ "$kv_cache_bytes" -ge 268435456 ]; then
-        set -- "$@" --kv-cache-memory-bytes "$kv_cache_bytes"
-        echo "OmniInfer: limiting WSL2 ROCm KV cache to $kv_cache_bytes bytes based on Linux memory; override with --kv-cache-memory-bytes or --gpu-memory-utilization" >&2
+    if [ "$managed_eager_policy" -eq 1 ]; then
+        set -- "$@" --enforce-eager
     fi
+    if [ "$managed_chunked_prefill_policy" -eq 1 ]; then
+        set -- "$@" --no-enable-chunked-prefill
+    fi
+    echo "OmniInfer: applying WSL2 ROCm compatibility defaults for eager execution and non-chunked prefill; explicit vLLM flags override each default" >&2
 fi
-unset argument managed_memory_policy memory_kib kv_cache_bytes
+unset argument managed_memory_policy managed_eager_policy managed_chunked_prefill_policy memory_kib kv_cache_bytes
 setsid "$@" &
 child=$!
 printf '%s\n' "$child" > "$pid_file"
@@ -2558,6 +2574,16 @@ mod tests {
         assert!(RUNNER_SCRIPT.contains("--gpu-memory-utilization"));
         assert!(RUNNER_SCRIPT.contains("memory_kib * 1024 / 5"));
         assert!(RUNNER_SCRIPT.contains("4294967296"));
+    }
+
+    #[test]
+    fn runner_applies_overridable_wsl2_rocm_execution_defaults() {
+        assert!(RUNNER_SCRIPT.contains("--enforce-eager|--no-enforce-eager"));
+        assert!(RUNNER_SCRIPT.contains(
+            "--enable-chunked-prefill|--enable-chunked-prefill=*|--no-enable-chunked-prefill"
+        ));
+        assert!(RUNNER_SCRIPT.contains(r#"set -- "$@" --enforce-eager"#));
+        assert!(RUNNER_SCRIPT.contains(r#"set -- "$@" --no-enable-chunked-prefill"#));
     }
 
     #[test]
