@@ -151,21 +151,33 @@ def validate(
                     else:
                         packages = rocm_system.get("packages")
                         required_packages = {
+                            "comgr",
                             "hipblas",
                             "hipblaslt",
                             "hipfft",
                             "hiprand",
+                            "hip-runtime-amd",
                             "hipsolver",
                             "hipsparse",
                             "hipsparselt",
+                            "hsa-rocr",
                             "libopenmpi3t64",
                             "miopen-hip",
+                            "openmp-extras-runtime",
                             "rccl",
                             "rocblas",
+                            "rocfft",
                             "rocm-hip-runtime",
+                            "rocm-core",
+                            "rocm-device-libs",
+                            "rocm-language-runtime",
+                            "rocm-llvm",
                             "rocm-smi-lib",
                             "rocminfo",
+                            "rocprofiler-register",
+                            "rocrand",
                             "rocsolver",
+                            "rocsparse",
                             "roctracer",
                         }
                         if (
@@ -180,6 +192,49 @@ def validate(
                                 f"{platform}/{backend} {architecture}: ROCm system packages must "
                                 "exactly match the required PyTorch runtime set"
                             )
+                        package_assets = rocm_system.get("package_assets")
+                        required_assets = required_packages - {"libopenmpi3t64"}
+                        repository = str(rocm_system.get("apt_repository", "")).split()
+                        repository_url = (
+                            repository[0].rstrip("/") if repository else ""
+                        )
+                        if (
+                            not isinstance(package_assets, dict)
+                            or set(package_assets) != required_assets
+                        ):
+                            errors.append(
+                                f"{platform}/{backend} {architecture}: ROCm package assets must "
+                                "exactly match the pinned AMD runtime closure"
+                            )
+                        else:
+                            for package, asset in package_assets.items():
+                                if not isinstance(asset, dict):
+                                    errors.append(
+                                        f"{platform}/{backend} {architecture}: invalid ROCm "
+                                        f"package asset {package}"
+                                    )
+                                    continue
+                                filename = asset.get("filename")
+                                digest = asset.get("sha256")
+                                url = asset.get("url")
+                                if (
+                                    asset.get("version") != packages.get(package)
+                                    or not isinstance(filename, str)
+                                    or "/" in filename
+                                    or "\\" in filename
+                                    or not filename.endswith(".deb")
+                                    or not isinstance(asset.get("size"), int)
+                                    or asset["size"] <= 0
+                                    or not isinstance(digest, str)
+                                    or not SHA256_RE.fullmatch(digest)
+                                    or not isinstance(url, str)
+                                    or not url.startswith(f"{repository_url}/")
+                                    or not url.endswith(filename)
+                                ):
+                                    errors.append(
+                                        f"{platform}/{backend} {architecture}: invalid ROCm "
+                                        f"package asset {package}"
+                                    )
                 uv = uv_assets.get(architecture)
                 if not isinstance(uv, dict):
                     errors.append(

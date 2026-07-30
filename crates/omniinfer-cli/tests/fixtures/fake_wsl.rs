@@ -36,33 +36,57 @@ fn main() {
         "uname" => println!("x86_64"),
         "nvidia-smi" => println!("NVIDIA GeForce RTX 3060 Laptop GPU, 581.57"),
         "env" => handle_env(command),
-        "install" | "apt-get" | "dpkg" | "/sbin/ldconfig" => {}
+        "install" => handle_install(command),
+        "apt-get" | "dpkg" | "/sbin/ldconfig" => {}
         "dpkg-query" => {
+            if !root().join("rocm-installed").exists() {
+                return;
+            }
+            println!("comgr=3.0.0.70203-90~24.04");
             println!("hipblas=3.2.0.70203-90~24.04");
             println!("hipblaslt=1.2.2.70203-90~24.04");
             println!("hipfft=1.0.22.70203-90~24.04");
             println!("hiprand=3.1.0.70203-90~24.04");
+            println!("hip-runtime-amd=7.2.53211.70203-90~24.04");
             println!("hipsolver=3.2.0.70203-90~24.04");
             println!("hipsparse=4.2.0.70203-90~24.04");
             println!("hipsparselt=0.2.6.70203-90~24.04");
+            println!("hsa-rocr=1.18.0.70203-90~24.04");
             println!("libopenmpi3t64=4.1.6-7ubuntu2");
             println!("miopen-hip=3.5.1.70203-90~24.04");
+            println!("openmp-extras-runtime=20.70.0.70203-90~24.04");
             println!("rccl=2.27.7.70203-90~24.04");
             println!("rocblas=5.2.0.70203-90~24.04");
+            println!("rocfft=1.0.36.70203-90~24.04");
             println!("rocm-hip-runtime=7.2.3.70203-90~24.04");
+            println!("rocm-core=7.2.3.70203-90~24.04");
+            println!("rocm-device-libs=1.0.0.70203-90~24.04");
+            println!("rocm-language-runtime=7.2.3.70203-90~24.04");
+            println!("rocm-llvm=22.0.0.26084.70203-90~24.04");
             println!("rocm-smi-lib=7.8.0.70203-90~24.04");
             println!("rocminfo=1.0.0.70203-90~24.04");
+            println!("rocprofiler-register=0.6.0.70203-90~24.04");
+            println!("rocrand=4.2.0.70203-90~24.04");
             println!("rocsolver=3.32.0.70203-90~24.04");
+            println!("rocsparse=4.2.0.70203-90~24.04");
             println!("roctracer=4.1.70203.70203-90~24.04");
             println!("rocdxg-roct=1.2.0");
         }
         "sha256sum" => {
             let path = command.get(1).expect("sha256sum path");
-            let digest = Path::new(path)
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.rsplit('-').next())
-                .expect("digest in staged filename");
+            let mapped = map_linux(path);
+            if !mapped.exists() {
+                fail(&format!("sha256sum: {path}: No such file"));
+            }
+            let sidecar = mapped.with_extension("sha256");
+            let sidecar_digest = fs::read_to_string(&sidecar).ok();
+            let digest = sidecar_digest.as_deref().unwrap_or_else(|| {
+                Path::new(path)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.rsplit('-').next())
+                    .expect("digest in staged filename")
+            });
             println!("{digest}  {path}");
         }
         "mkdir" => handle_mkdir(command),
@@ -126,6 +150,9 @@ fn handle_sh(command: &[String]) {
 
 fn handle_env(command: &[String]) {
     if command.iter().any(|arg| arg == "apt-get") {
+        fs::create_dir_all(root()).expect("create fake WSL root");
+        fs::write(root().join("rocm-installed"), b"installed")
+            .expect("mark fake ROCm packages installed");
         return;
     }
     if command
@@ -150,6 +177,41 @@ fn handle_env(command: &[String]) {
         return;
     }
     fail("unsupported fake WSL env command");
+}
+
+fn handle_install(command: &[String]) {
+    if command.iter().any(|arg| arg == "-d") {
+        for path in command.iter().skip(1).filter(|arg| {
+            !arg.starts_with('-')
+                && arg.as_str() != "0755"
+                && arg.as_str() != "0644"
+        }) {
+            fs::create_dir_all(map_linux(path)).expect("create fake install directory");
+        }
+        return;
+    }
+    if command.len() < 3 {
+        return;
+    }
+    let source = command.get(command.len() - 2).expect("install source");
+    let destination = command.last().expect("install destination");
+    let source_path = map_linux(source);
+    if !source_path.exists() {
+        return;
+    }
+    let destination_path = map_linux(destination);
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent).expect("create fake install parent");
+    }
+    fs::copy(&source_path, &destination_path).expect("copy fake installed file");
+    if let Some(digest) = Path::new(source)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.len() == 64 && name.chars().all(|ch| ch.is_ascii_hexdigit()))
+    {
+        fs::write(destination_path.with_extension("sha256"), digest)
+            .expect("write fake installed checksum");
+    }
 }
 
 fn handle_wslpath(command: &[String]) {

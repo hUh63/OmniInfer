@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -12,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backend_installer::{InstallReporter, download_verified_asset};
 use crate::prebuilt_catalog::{
-    PrebuiltCatalog, PythonRuntimeEntry, PythonRuntimeVariant, RocmSystemRuntime,
+    PrebuiltCatalog, PythonRuntimeEntry, PythonRuntimeVariant, RocmPackageAsset, RocmSystemRuntime,
 };
 
 const CUDA_BACKEND_ID: &str = "vllm-wsl2-cuda";
@@ -351,7 +353,7 @@ pub(super) fn install_wsl_python_runtime(
         "prepare WSL runtime directories",
     )?;
     if let Some(system) = variant.rocm_system.as_ref() {
-        ensure_rocm_system_runtime(&wsl, system, catalog, reporter)?;
+        ensure_rocm_system_runtime(&wsl, system, runtime_dir, catalog, reporter)?;
         validate_wsl_rocm_gpu(&wsl, system)?;
     }
     run_wsl_checked(
@@ -691,6 +693,7 @@ fn validate_rocm_distro(wsl: &WslContext) -> Result<()> {
 fn ensure_rocm_system_runtime(
     wsl: &WslContext,
     system: &RocmSystemRuntime,
+    runtime_dir: &Path,
     catalog: &PrebuiltCatalog,
     reporter: &mut InstallReporter,
 ) -> Result<()> {
@@ -788,6 +791,7 @@ fn ensure_rocm_system_runtime(
         reporter,
         "refresh ROCm package metadata",
     )?;
+    let package_cache = prepare_rocm_apt_cache(wsl, system, runtime_dir, reporter)?;
     let mut install_args = vec![
         "env".to_string(),
         "DEBIAN_FRONTEND=noninteractive".to_string(),
@@ -828,6 +832,14 @@ fn ensure_rocm_system_runtime(
         "refresh ROCm runtime linker cache",
     )?;
     let installed = validate_rocm_system_versions(wsl, system)?;
+    if package_cache.exists() {
+        fs::remove_dir_all(&package_cache).with_context(|| {
+            format!(
+                "remove verified Windows ROCm package cache {}",
+                package_cache.display()
+            )
+        })?;
+    }
     reporter.event(
         "system_runtime_verified",
         json!({
@@ -836,6 +848,502 @@ fn ensure_rocm_system_runtime(
         }),
     );
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RocmPackageDownload {
+    name: String,
+    asset: RocmPackageAsset,
+    verified_path: PathBuf,
+    partial_path: PathBuf,
+    asset_index: usize,
+    asset_count: usize,
+}
+
+fn prepare_rocm_apt_cache(
+    wsl: &WslContext,
+    system: &RocmSystemRuntime,
+    runtime_dir: &Path,
+    reporter: &mut InstallReporter,
+) -> Result<PathBuf> {
+    let installed =
+        query_installed_package_versions(wsl, system.package_assets.keys().map(String::as_str))?;
+    let cache_dir = runtime_dir
+        .join("downloads")
+        .join(format!("rocm-{}", system.repository_key.version));
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create ROCm download cache {}", cache_dir.display()))?;
+
+    let mut downloads = Vec::new();
+    let asset_count = system.package_assets.len();
+    for (asset_index, (name, asset)) in system.package_assets.iter().enumerate() {
+        if installed
+            .get(name)
+            .is_some_and(|version| version == &asset.version)
+        {
+            reporter.event(
+                "package_download_skipped",
+                json!({
+                    "role": "ROCm package",
+                    "package": name,
+                    "version": asset.version,
+                    "reason": "exact_version_installed",
+                    "asset_index": asset_index + 1,
+                    "asset_count": asset_count,
+                }),
+            );
+            continue;
+        }
+        let apt_cache_path = format!("/var/cache/apt/archives/{}", asset.filename);
+        if wsl_file_matches_sha256(wsl, &apt_cache_path, &asset.sha256)? {
+            reporter.event(
+                "checksum_verified",
+                json!({
+                    "role": format!("ROCm package {name}"),
+                    "package": name,
+                    "version": asset.version,
+                    "url": asset.url,
+                    "bytes": asset.size,
+                    "sha256": asset.sha256,
+                    "expected_sha256": asset.sha256,
+                    "source": "wsl_apt_cache",
+                    "asset_index": asset_index + 1,
+                    "asset_count": asset_count,
+                }),
+            );
+            continue;
+        }
+        let verified_path = cache_dir.join(format!("{}.deb", asset.sha256));
+        let partial_path = cache_dir.join(format!("{}.partial", asset.sha256));
+        downloads.push(RocmPackageDownload {
+            name: name.clone(),
+            asset: asset.clone(),
+            verified_path,
+            partial_path,
+            asset_index: asset_index + 1,
+            asset_count,
+        });
+    }
+
+    download_rocm_packages(&downloads, reporter)?;
+    if !downloads.is_empty() {
+        run_wsl_as_checked(
+            wsl,
+            Some("root"),
+            [
+                "install",
+                "-d",
+                "-m",
+                "0755",
+                "/var/cache/omniinfer/rocm-packages",
+            ],
+            None,
+            reporter,
+            "prepare protected ROCm package cache",
+        )?;
+    }
+    for download in &downloads {
+        let staged = format!(
+            "/var/cache/omniinfer/rocm-packages/{}.deb",
+            download.asset.sha256
+        );
+        let output_arg = format!("of={staged}");
+        run_wsl_as_file_checked(
+            wsl,
+            Some("root"),
+            ["dd", output_arg.as_str(), "status=none"],
+            &download.verified_path,
+            reporter,
+            &format!("stage verified ROCm package {}", download.name),
+        )?;
+        verify_wsl_sha256(
+            wsl,
+            &staged,
+            &download.asset.sha256,
+            &format!("ROCm package {}", download.name),
+        )?;
+        let apt_cache_path = format!("/var/cache/apt/archives/{}", download.asset.filename);
+        run_wsl_as_checked(
+            wsl,
+            Some("root"),
+            [
+                "install",
+                "-m",
+                "0644",
+                staged.as_str(),
+                apt_cache_path.as_str(),
+            ],
+            None,
+            reporter,
+            &format!("populate APT cache for ROCm package {}", download.name),
+        )?;
+        verify_wsl_sha256(
+            wsl,
+            &apt_cache_path,
+            &download.asset.sha256,
+            &format!("APT cache package {}", download.name),
+        )?;
+        let _ = run_wsl_as(wsl, Some("root"), ["rm", "-f", staged.as_str()], None);
+        reporter.event(
+            "package_cache_populated",
+            json!({
+                "role": "ROCm package",
+                "package": download.name,
+                "version": download.asset.version,
+                "filename": download.asset.filename,
+                "sha256": download.asset.sha256,
+                "asset_index": download.asset_index,
+                "asset_count": download.asset_count,
+            }),
+        );
+    }
+    Ok(cache_dir)
+}
+
+fn query_installed_package_versions<'a>(
+    wsl: &WslContext,
+    packages: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>> {
+    let mut args = vec![
+        "dpkg-query".to_string(),
+        "-W".to_string(),
+        "-f=${Package}=${Version}\n".to_string(),
+    ];
+    args.extend(packages.into_iter().map(str::to_string));
+    let output = run_wsl(wsl, args.iter().map(String::as_str), None)
+        .context("query installed ROCm package versions")?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        require_success(&output, "query installed ROCm package versions")?;
+    }
+    let mut versions = BTreeMap::new();
+    for line in decode_output(&output.stdout).lines() {
+        if let Some((name, version)) = line.trim().split_once('=') {
+            versions.insert(name.to_string(), version.to_string());
+        }
+    }
+    Ok(versions)
+}
+
+fn wsl_file_matches_sha256(wsl: &WslContext, path: &str, expected: &str) -> Result<bool> {
+    let output = run_wsl_as(wsl, Some("root"), ["sha256sum", path], None)
+        .with_context(|| format!("inspect WSL2 package cache {path}"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(decode_output(&output.stdout)
+        .split_whitespace()
+        .next()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(expected)))
+}
+
+fn download_rocm_packages(
+    downloads: &[RocmPackageDownload],
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let mut pending_https = Vec::new();
+    for download in downloads {
+        if verified_file_matches(download)? {
+            emit_rocm_package_checksum(download, true, reporter);
+            continue;
+        }
+        if promote_complete_partial(download)? {
+            emit_rocm_package_checksum(download, true, reporter);
+            continue;
+        }
+        if let Some(path) = download.asset.url.strip_prefix("file://") {
+            reporter.event(
+                "download_started",
+                json!({
+                    "role": format!("ROCm package {}", download.name),
+                    "package": download.name,
+                    "asset_index": download.asset_index,
+                    "asset_count": download.asset_count,
+                    "url": download.asset.url,
+                }),
+            );
+            fs::copy(path, &download.partial_path).with_context(|| {
+                format!(
+                    "copy ROCm package fixture {} to {}",
+                    path,
+                    download.partial_path.display()
+                )
+            })?;
+            reporter.event(
+                "download_progress",
+                json!({
+                    "role": format!("ROCm package {}", download.name),
+                    "package": download.name,
+                    "asset_index": download.asset_index,
+                    "asset_count": download.asset_count,
+                    "url": download.asset.url,
+                    "bytes_downloaded": fs::metadata(&download.partial_path)?.len(),
+                    "bytes_total": download.asset.size,
+                }),
+            );
+        } else {
+            pending_https.push(download);
+        }
+    }
+
+    if !pending_https.is_empty() {
+        download_rocm_packages_with_curl(&pending_https, reporter)?;
+    }
+    for download in downloads {
+        if download.verified_path.exists() {
+            continue;
+        }
+        let actual_size = fs::metadata(&download.partial_path)
+            .with_context(|| {
+                format!(
+                    "downloaded ROCm package {} is missing from {}",
+                    download.name,
+                    download.partial_path.display()
+                )
+            })?
+            .len();
+        let actual_sha256 = sha256_file(&download.partial_path)?;
+        if actual_size != download.asset.size
+            || !actual_sha256.eq_ignore_ascii_case(&download.asset.sha256)
+        {
+            reporter.event(
+                "checksum_failed",
+                json!({
+                    "role": format!("ROCm package {}", download.name),
+                    "package": download.name,
+                    "asset_index": download.asset_index,
+                    "asset_count": download.asset_count,
+                    "url": download.asset.url,
+                    "expected_bytes": download.asset.size,
+                    "actual_bytes": actual_size,
+                    "expected_sha256": download.asset.sha256,
+                    "actual_sha256": actual_sha256,
+                }),
+            );
+            anyhow::bail!(
+                "ROCm package {} checksum mismatch: expected {} bytes / {}, got {} bytes / {}",
+                download.name,
+                download.asset.size,
+                download.asset.sha256,
+                actual_size,
+                actual_sha256
+            );
+        }
+        fs::rename(&download.partial_path, &download.verified_path).with_context(|| {
+            format!(
+                "commit verified ROCm package {} to {}",
+                download.name,
+                download.verified_path.display()
+            )
+        })?;
+        emit_rocm_package_checksum(download, false, reporter);
+    }
+    Ok(())
+}
+
+fn download_rocm_packages_with_curl(
+    pending: &[&RocmPackageDownload],
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let cache_dir = pending[0]
+        .partial_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("ROCm package cache has no parent directory"))?;
+    let stderr_path = cache_dir.join("curl.stderr.log");
+    let stderr_file = File::create(&stderr_path)
+        .with_context(|| format!("create curl log {}", stderr_path.display()))?;
+    let mut command = Command::new("curl.exe");
+    command.args([
+        "--fail",
+        "--location",
+        "--retry",
+        "8",
+        "--retry-all-errors",
+        "--retry-delay",
+        "2",
+        "--connect-timeout",
+        "30",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "60",
+        "--parallel",
+        "--parallel-max",
+        "4",
+        "--silent",
+        "--show-error",
+    ]);
+    for download in pending {
+        reporter.event(
+            "download_started",
+            json!({
+                "role": format!("ROCm package {}", download.name),
+                "package": download.name,
+                "asset_index": download.asset_index,
+                "asset_count": download.asset_count,
+                "url": download.asset.url,
+                "resumable": true,
+            }),
+        );
+        command
+            .arg("--continue-at")
+            .arg("-")
+            .arg("--output")
+            .arg(&download.partial_path)
+            .arg(&download.asset.url);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file));
+    hide_child_window(&mut command);
+    let mut child = command
+        .spawn()
+        .context("start Windows curl.exe for resumable ROCm package downloads")?;
+    let mut last_reported = BTreeMap::<String, u64>::new();
+    let status = loop {
+        if let Some(status) = child.try_wait().context("poll Windows curl.exe")? {
+            break status;
+        }
+        for download in pending {
+            let downloaded = fs::metadata(&download.partial_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default();
+            let previous = last_reported
+                .get(&download.name)
+                .copied()
+                .unwrap_or_default();
+            if downloaded >= previous.saturating_add(8 * 1024 * 1024)
+                || downloaded >= download.asset.size
+            {
+                reporter.event(
+                    "download_progress",
+                    json!({
+                        "role": format!("ROCm package {}", download.name),
+                        "package": download.name,
+                        "asset_index": download.asset_index,
+                        "asset_count": download.asset_count,
+                        "url": download.asset.url,
+                        "bytes_downloaded": downloaded,
+                        "bytes_total": download.asset.size,
+                    }),
+                );
+                last_reported.insert(download.name.clone(), downloaded);
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    };
+    for download in pending {
+        let downloaded = fs::metadata(&download.partial_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        reporter.event(
+            "download_progress",
+            json!({
+                "role": format!("ROCm package {}", download.name),
+                "package": download.name,
+                "asset_index": download.asset_index,
+                "asset_count": download.asset_count,
+                "url": download.asset.url,
+                "bytes_downloaded": downloaded,
+                "bytes_total": download.asset.size,
+            }),
+        );
+    }
+    if !status.success() {
+        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+        anyhow::bail!(
+            "Windows curl.exe failed while downloading ROCm packages with {status}: {}. Re-run the install to resume verified partial downloads.",
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+fn verified_file_matches(download: &RocmPackageDownload) -> Result<bool> {
+    if !download.verified_path.exists() {
+        return Ok(false);
+    }
+    let size = fs::metadata(&download.verified_path)?.len();
+    if size == download.asset.size
+        && sha256_file(&download.verified_path)?.eq_ignore_ascii_case(&download.asset.sha256)
+    {
+        return Ok(true);
+    }
+    fs::remove_file(&download.verified_path).with_context(|| {
+        format!(
+            "remove invalid cached ROCm package {}",
+            download.verified_path.display()
+        )
+    })?;
+    Ok(false)
+}
+
+fn promote_complete_partial(download: &RocmPackageDownload) -> Result<bool> {
+    if !download.partial_path.exists() {
+        return Ok(false);
+    }
+    let size = fs::metadata(&download.partial_path)?.len();
+    if size < download.asset.size {
+        return Ok(false);
+    }
+    if size == download.asset.size
+        && sha256_file(&download.partial_path)?.eq_ignore_ascii_case(&download.asset.sha256)
+    {
+        fs::rename(&download.partial_path, &download.verified_path).with_context(|| {
+            format!(
+                "promote completed ROCm package {} to {}",
+                download.name,
+                download.verified_path.display()
+            )
+        })?;
+        return Ok(true);
+    }
+    fs::remove_file(&download.partial_path).with_context(|| {
+        format!(
+            "remove invalid partial ROCm package {}",
+            download.partial_path.display()
+        )
+    })?;
+    Ok(false)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("open {} for SHA256 verification", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {} for SHA256 verification", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn emit_rocm_package_checksum(
+    download: &RocmPackageDownload,
+    cached: bool,
+    reporter: &mut InstallReporter,
+) {
+    reporter.event(
+        "checksum_verified",
+        json!({
+            "role": format!("ROCm package {}", download.name),
+            "package": download.name,
+            "version": download.asset.version,
+            "asset_index": download.asset_index,
+            "asset_count": download.asset_count,
+            "url": download.asset.url,
+            "bytes": download.asset.size,
+            "sha256": download.asset.sha256,
+            "expected_sha256": download.asset.sha256,
+            "source": if cached { "windows_cache" } else { "download" },
+        }),
+    );
 }
 
 fn validate_existing_system_runtime(
@@ -1312,6 +1820,39 @@ where
     Ok(())
 }
 
+fn run_wsl_as_file_checked<I, S>(
+    wsl: &WslContext,
+    user: Option<&str>,
+    args: I,
+    stdin_path: &Path,
+    reporter: &mut InstallReporter,
+    action: &str,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|value| value.as_ref().to_string())
+        .collect::<Vec<_>>();
+    reporter.event(
+        "command_started",
+        json!({
+            "action": action,
+            "distribution": wsl.distribution,
+            "command": args.first(),
+            "user": user,
+        }),
+    );
+    let output = run_wsl_as_file(wsl, user, args.iter().map(String::as_str), stdin_path)
+        .with_context(|| action.to_string())?;
+    append_install_log(&wsl.install_log, action, &output);
+    require_success(&output, action)?;
+    reporter.event("command_completed", json!({ "action": action }));
+    Ok(())
+}
+
 fn run_wsl<I, S>(wsl: &WslContext, args: I, stdin: Option<&[u8]>) -> Result<Output>
 where
     I: IntoIterator<Item = S>,
@@ -1337,6 +1878,36 @@ where
     full_args.push("--exec".to_string());
     full_args.extend(args.into_iter().map(|value| value.as_ref().to_string()));
     run_command(&wsl.executable, full_args.iter().map(String::as_str), stdin)
+}
+
+fn run_wsl_as_file<I, S>(
+    wsl: &WslContext,
+    user: Option<&str>,
+    args: I,
+    stdin_path: &Path,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut full_args = vec!["--distribution".to_string(), wsl.distribution.clone()];
+    if let Some(user) = user {
+        full_args.extend(["--user".to_string(), user.to_string()]);
+    }
+    full_args.push("--exec".to_string());
+    full_args.extend(args.into_iter().map(|value| value.as_ref().to_string()));
+    let stdin = File::open(stdin_path)
+        .with_context(|| format!("open staged input {}", stdin_path.display()))?;
+    let mut command = Command::new(&wsl.executable);
+    command
+        .args(full_args)
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_child_window(&mut command);
+    command
+        .output()
+        .with_context(|| format!("run {}", wsl.executable.display()))
 }
 
 fn run_wsl_text<I, S>(executable: &Path, distro: &str, args: I) -> Result<String>

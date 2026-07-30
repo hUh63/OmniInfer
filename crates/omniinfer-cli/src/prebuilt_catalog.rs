@@ -8,21 +8,62 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_CATALOG: &str = include_str!("../../../scripts/prebuilt_backends.json");
 pub(crate) const REQUIRED_ROCM_SYSTEM_PACKAGES: &[&str] = &[
+    "comgr",
     "hipblas",
     "hipblaslt",
     "hipfft",
     "hiprand",
+    "hip-runtime-amd",
     "hipsolver",
     "hipsparse",
     "hipsparselt",
+    "hsa-rocr",
     "libopenmpi3t64",
     "miopen-hip",
+    "openmp-extras-runtime",
     "rccl",
     "rocblas",
+    "rocfft",
     "rocm-hip-runtime",
+    "rocm-core",
+    "rocm-device-libs",
+    "rocm-language-runtime",
+    "rocm-llvm",
     "rocm-smi-lib",
     "rocminfo",
+    "rocprofiler-register",
+    "rocrand",
     "rocsolver",
+    "rocsparse",
+    "roctracer",
+];
+pub(crate) const REQUIRED_ROCM_PACKAGE_ASSETS: &[&str] = &[
+    "comgr",
+    "hipblas",
+    "hipblaslt",
+    "hipfft",
+    "hiprand",
+    "hip-runtime-amd",
+    "hipsolver",
+    "hipsparse",
+    "hipsparselt",
+    "hsa-rocr",
+    "miopen-hip",
+    "openmp-extras-runtime",
+    "rccl",
+    "rocblas",
+    "rocfft",
+    "rocm-hip-runtime",
+    "rocm-core",
+    "rocm-device-libs",
+    "rocm-language-runtime",
+    "rocm-llvm",
+    "rocm-smi-lib",
+    "rocminfo",
+    "rocprofiler-register",
+    "rocrand",
+    "rocsolver",
+    "rocsparse",
     "roctracer",
 ];
 
@@ -76,9 +117,19 @@ pub(crate) struct RocmSystemRuntime {
     pub(crate) apt_repository: String,
     pub(crate) repository_key: ToolAsset,
     pub(crate) packages: BTreeMap<String, String>,
+    pub(crate) package_assets: BTreeMap<String, RocmPackageAsset>,
     pub(crate) rocdxg: ToolAsset,
     pub(crate) required_gfx: Vec<String>,
     pub(crate) minimum_windows_release: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RocmPackageAsset {
+    pub(crate) version: String,
+    pub(crate) url: String,
+    pub(crate) filename: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -346,6 +397,10 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                             || REQUIRED_ROCM_SYSTEM_PACKAGES
                                 .iter()
                                 .any(|name| !system.packages.contains_key(*name))
+                            || system.package_assets.len() != REQUIRED_ROCM_PACKAGE_ASSETS.len()
+                            || REQUIRED_ROCM_PACKAGE_ASSETS
+                                .iter()
+                                .any(|name| !system.package_assets.contains_key(*name))
                             || system.required_gfx.is_empty()
                             || system.minimum_windows_release.trim().is_empty()
                         {
@@ -365,6 +420,36 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                             backend,
                             "ROCDXG runtime",
                         )?;
+                        let repository_url = system
+                            .apt_repository
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .trim_end_matches('/');
+                        for (name, asset) in &system.package_assets {
+                            validate_sha256(
+                                Some(&asset.sha256),
+                                platform,
+                                backend,
+                                &format!("ROCm package {name}"),
+                            )?;
+                            let expected_version = system
+                                .packages
+                                .get(name)
+                                .map(String::as_str)
+                                .unwrap_or_default();
+                            if asset.version != expected_version
+                                || asset.size == 0
+                                || asset.filename.contains(['/', '\\'])
+                                || !asset.filename.ends_with(".deb")
+                                || !asset.url.starts_with(&format!("{repository_url}/"))
+                                || !asset.url.ends_with(&asset.filename)
+                            {
+                                anyhow::bail!(
+                                    "{platform}/{backend} {architecture} has invalid ROCm package asset {name}"
+                                );
+                            }
+                        }
                         if !system
                             .repository_key
                             .url

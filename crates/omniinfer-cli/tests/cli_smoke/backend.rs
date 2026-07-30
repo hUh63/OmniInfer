@@ -225,6 +225,7 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     for event in [
         "compatibility_selected",
         "checksum_verified",
+        "package_cache_populated",
         "system_runtime_verified",
         "validation_passed",
         "completed",
@@ -252,21 +253,33 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     assert!(invocations.contains("--user\troot\t--exec\t/sbin/ldconfig"));
     assert!(!invocations.contains("--user\troot\t--exec\tldconfig"));
     for package in [
+        "comgr=3.0.0.70203-90~24.04",
         "hipblas=3.2.0.70203-90~24.04",
         "hipblaslt=1.2.2.70203-90~24.04",
         "hipfft=1.0.22.70203-90~24.04",
         "hiprand=3.1.0.70203-90~24.04",
+        "hip-runtime-amd=7.2.53211.70203-90~24.04",
         "hipsolver=3.2.0.70203-90~24.04",
         "hipsparse=4.2.0.70203-90~24.04",
         "hipsparselt=0.2.6.70203-90~24.04",
+        "hsa-rocr=1.18.0.70203-90~24.04",
         "libopenmpi3t64=4.1.6-7ubuntu2",
         "miopen-hip=3.5.1.70203-90~24.04",
+        "openmp-extras-runtime=20.70.0.70203-90~24.04",
         "rccl=2.27.7.70203-90~24.04",
         "rocblas=5.2.0.70203-90~24.04",
+        "rocfft=1.0.36.70203-90~24.04",
         "rocm-hip-runtime=7.2.3.70203-90~24.04",
+        "rocm-core=7.2.3.70203-90~24.04",
+        "rocm-device-libs=1.0.0.70203-90~24.04",
+        "rocm-language-runtime=7.2.3.70203-90~24.04",
+        "rocm-llvm=22.0.0.26084.70203-90~24.04",
         "rocm-smi-lib=7.8.0.70203-90~24.04",
         "rocminfo=1.0.0.70203-90~24.04",
+        "rocprofiler-register=0.6.0.70203-90~24.04",
+        "rocrand=4.2.0.70203-90~24.04",
         "rocsolver=3.32.0.70203-90~24.04",
+        "rocsparse=4.2.0.70203-90~24.04",
         "roctracer=4.1.70203.70203-90~24.04",
     ] {
         assert!(

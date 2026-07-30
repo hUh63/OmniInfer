@@ -141,7 +141,7 @@ Typical subfolders:
 
 ### Managed vLLM WSL2 Backend
 
-`vllm-wsl2-cuda` and `vllm-wsl2-rocm` are the supported Windows vLLM paths. Each Windows runtime directory contains a validated launcher manifest, installer tool cache, and install logs; the uv-managed Python 3.12 environment lives in the selected user WSL2 distribution under `~/.local/share/omniinfer/runtimes/<backend>/`. The catalog pins each vLLM wheel URL and SHA256, accelerator ABI, uv release and SHA256. The ROCm entry also pins the Ubuntu 24.04 repository, repository-key SHA256, exact minimal package versions, ROCDXG asset SHA256, supported GFX targets, wheel index, and wheel build commit.
+`vllm-wsl2-cuda` and `vllm-wsl2-rocm` are the supported Windows vLLM paths. Each Windows runtime directory contains a validated launcher manifest, resumable installer cache, and install logs; the uv-managed Python 3.12 environment lives in the selected user WSL2 distribution under `~/.local/share/omniinfer/runtimes/<backend>/`. The catalog pins each vLLM wheel URL and SHA256, accelerator ABI, uv release and SHA256. The ROCm entry also pins the Ubuntu 24.04 repository, repository-key SHA256, every package URL/version/size/SHA256 in the minimal compute-runtime closure, ROCDXG asset SHA256, supported GFX targets, wheel index, and wheel build commit. Windows downloads missing AMD packages in parallel, WSL verifies the staged bytes again, and APT remains responsible for dependency resolution and package installation.
 
 ```powershell
 wsl --install -d Ubuntu

@@ -75,22 +75,225 @@
                 "sha256": "2de99e2354646a90d9903e2a669fc4e36b02c1bbff7075c481e12d7edab2c88b"
               },
               "packages": {
+                "comgr": "3.0.0.70203-90~24.04",
                 "hipblas": "3.2.0.70203-90~24.04",
                 "hipblaslt": "1.2.2.70203-90~24.04",
                 "hipfft": "1.0.22.70203-90~24.04",
                 "hiprand": "3.1.0.70203-90~24.04",
+                "hip-runtime-amd": "7.2.53211.70203-90~24.04",
                 "hipsolver": "3.2.0.70203-90~24.04",
                 "hipsparse": "4.2.0.70203-90~24.04",
                 "hipsparselt": "0.2.6.70203-90~24.04",
+                "hsa-rocr": "1.18.0.70203-90~24.04",
                 "libopenmpi3t64": "4.1.6-7ubuntu2",
                 "miopen-hip": "3.5.1.70203-90~24.04",
+                "openmp-extras-runtime": "20.70.0.70203-90~24.04",
                 "rccl": "2.27.7.70203-90~24.04",
                 "rocblas": "5.2.0.70203-90~24.04",
+                "rocfft": "1.0.36.70203-90~24.04",
                 "rocm-hip-runtime": "7.2.3.70203-90~24.04",
+                "rocm-core": "7.2.3.70203-90~24.04",
+                "rocm-device-libs": "1.0.0.70203-90~24.04",
+                "rocm-language-runtime": "7.2.3.70203-90~24.04",
+                "rocm-llvm": "22.0.0.26084.70203-90~24.04",
                 "rocm-smi-lib": "7.8.0.70203-90~24.04",
                 "rocminfo": "1.0.0.70203-90~24.04",
+                "rocprofiler-register": "0.6.0.70203-90~24.04",
+                "rocrand": "4.2.0.70203-90~24.04",
                 "rocsolver": "3.32.0.70203-90~24.04",
+                "rocsparse": "4.2.0.70203-90~24.04",
                 "roctracer": "4.1.70203.70203-90~24.04"
+              },
+              "package_assets": {
+                "comgr": {
+                  "version": "3.0.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/c/comgr/comgr_3.0.0.70203-90~24.04_amd64.deb",
+                  "filename": "comgr_3.0.0.70203-90~24.04_amd64.deb",
+                  "size": 58023510,
+                  "sha256": "8b06233cf94891404a1485f435045edafa842441e3d6358b1fa5f9783ea540c2"
+                },
+                "hipblas": {
+                  "version": "3.2.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hipblas/hipblas_3.2.0.70203-90~24.04_amd64.deb",
+                  "filename": "hipblas_3.2.0.70203-90~24.04_amd64.deb",
+                  "size": 116636,
+                  "sha256": "14ababc3d76ac6600e23b58b0e9ef6e70eb0abde2ecafc1916159995740b4bb3"
+                },
+                "hipblaslt": {
+                  "version": "1.2.2.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hipblaslt/hipblaslt_1.2.2.70203-90~24.04_amd64.deb",
+                  "filename": "hipblaslt_1.2.2.70203-90~24.04_amd64.deb",
+                  "size": 1614830202,
+                  "sha256": "e21357408338b7fc5959854d66c46f28b7bfa6a91c2950588a6f0fae26a7b2d2"
+                },
+                "hipfft": {
+                  "version": "1.0.22.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hipfft/hipfft_1.0.22.70203-90~24.04_amd64.deb",
+                  "filename": "hipfft_1.0.22.70203-90~24.04_amd64.deb",
+                  "size": 49202,
+                  "sha256": "cd2f2c9bb2174a84feafc8cf40b1d68eb84933ff12a3c3388f69fc9506de6de0"
+                },
+                "hiprand": {
+                  "version": "3.1.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hiprand/hiprand_3.1.0.70203-90~24.04_amd64.deb",
+                  "filename": "hiprand_3.1.0.70203-90~24.04_amd64.deb",
+                  "size": 5024,
+                  "sha256": "3a445ff754b526832f3aa8855dec2467e4e9af0489446711aa764c05f718f3ae"
+                },
+                "hip-runtime-amd": {
+                  "version": "7.2.53211.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hip-runtime-amd/hip-runtime-amd_7.2.53211.70203-90~24.04_amd64.deb",
+                  "filename": "hip-runtime-amd_7.2.53211.70203-90~24.04_amd64.deb",
+                  "size": 13373510,
+                  "sha256": "a23c99e2f0ebf7c1287417a6dca63643670d54fd94380122674fba80686edeea"
+                },
+                "hipsolver": {
+                  "version": "3.2.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hipsolver/hipsolver_3.2.0.70203-90~24.04_amd64.deb",
+                  "filename": "hipsolver_3.2.0.70203-90~24.04_amd64.deb",
+                  "size": 59464,
+                  "sha256": "76d722a86002f94e58481c91073e75a92bac3e9c2c313a72fc98aa3aceae780a"
+                },
+                "hipsparse": {
+                  "version": "4.2.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hipsparse/hipsparse_4.2.0.70203-90~24.04_amd64.deb",
+                  "filename": "hipsparse_4.2.0.70203-90~24.04_amd64.deb",
+                  "size": 51856,
+                  "sha256": "4e96e58329b4f66aa9a78aeb6dff83d29f133c0c49a4ea5c3361daf8ef1402e2"
+                },
+                "hipsparselt": {
+                  "version": "0.2.6.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hipsparselt/hipsparselt_0.2.6.70203-90~24.04_amd64.deb",
+                  "filename": "hipsparselt_0.2.6.70203-90~24.04_amd64.deb",
+                  "size": 44874064,
+                  "sha256": "f928d3fa42c78eea0031c246b07a6c4d6d0fd1099470d7d8979466aede12e2e6"
+                },
+                "hsa-rocr": {
+                  "version": "1.18.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/h/hsa-rocr/hsa-rocr_1.18.0.70203-90~24.04_amd64.deb",
+                  "filename": "hsa-rocr_1.18.0.70203-90~24.04_amd64.deb",
+                  "size": 1661214,
+                  "sha256": "6c8ac83309637e162ed26eb8c97fdf347e6fc6d9700914d75650e85397c1821e"
+                },
+                "miopen-hip": {
+                  "version": "3.5.1.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/m/miopen-hip/miopen-hip_3.5.1.70203-90~24.04_amd64.deb",
+                  "filename": "miopen-hip_3.5.1.70203-90~24.04_amd64.deb",
+                  "size": 308049996,
+                  "sha256": "5d62dbbb3f54c7a2ae3b9fe154e73b2f1e6b9d950cf214de15b5bf23fc4fc0d3"
+                },
+                "openmp-extras-runtime": {
+                  "version": "20.70.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/o/openmp-extras-runtime/openmp-extras-runtime_20.70.0.70203-90~24.04_amd64.deb",
+                  "filename": "openmp-extras-runtime_20.70.0.70203-90~24.04_amd64.deb",
+                  "size": 60019084,
+                  "sha256": "bc00c9a00548db742f7ef007a1d4d6efdbd5aaa234981975ad90aea1c7c1e804"
+                },
+                "rccl": {
+                  "version": "2.27.7.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rccl/rccl_2.27.7.70203-90~24.04_amd64.deb",
+                  "filename": "rccl_2.27.7.70203-90~24.04_amd64.deb",
+                  "size": 556000120,
+                  "sha256": "15122ac311fc8fb3bd00409a4239d082b7e78b74210c5afccbbe2ed90b8bbe6c"
+                },
+                "rocblas": {
+                  "version": "5.2.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocblas/rocblas_5.2.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocblas_5.2.0.70203-90~24.04_amd64.deb",
+                  "size": 164394422,
+                  "sha256": "2c0348d90534ede9561064892c01a935e772ff717734d7b47e00d239c954a47a"
+                },
+                "rocfft": {
+                  "version": "1.0.36.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocfft/rocfft_1.0.36.70203-90~24.04_amd64.deb",
+                  "filename": "rocfft_1.0.36.70203-90~24.04_amd64.deb",
+                  "size": 100355726,
+                  "sha256": "0b8a84c6361122eda9b14dd7977f3f5293453f20a126cf98eeae70fd76eaf022"
+                },
+                "rocm-hip-runtime": {
+                  "version": "7.2.3.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocm-hip-runtime/rocm-hip-runtime_7.2.3.70203-90~24.04_amd64.deb",
+                  "filename": "rocm-hip-runtime_7.2.3.70203-90~24.04_amd64.deb",
+                  "size": 2168,
+                  "sha256": "cd800bbad1ad2744dc15390d0f577481a63db3c1df57d37c027babe3b836032c"
+                },
+                "rocm-core": {
+                  "version": "7.2.3.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocm-core/rocm-core_7.2.3.70203-90~24.04_amd64.deb",
+                  "filename": "rocm-core_7.2.3.70203-90~24.04_amd64.deb",
+                  "size": 32688,
+                  "sha256": "372cce4b73ba244a1b93147f1e3fde111e41506e59ea0d04a23d284666f6d0e2"
+                },
+                "rocm-device-libs": {
+                  "version": "1.0.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocm-device-libs/rocm-device-libs_1.0.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocm-device-libs_1.0.0.70203-90~24.04_amd64.deb",
+                  "size": 728306,
+                  "sha256": "a650e69a9fdd4e658217bea3bebeb477cade8107f3cf6e921cf821e592cc8035"
+                },
+                "rocm-language-runtime": {
+                  "version": "7.2.3.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocm-language-runtime/rocm-language-runtime_7.2.3.70203-90~24.04_amd64.deb",
+                  "filename": "rocm-language-runtime_7.2.3.70203-90~24.04_amd64.deb",
+                  "size": 836,
+                  "sha256": "bf42301dbe87898f9013fecaa7fbc633203d3b7c7edf519f53f6841acb2e4cc7"
+                },
+                "rocm-llvm": {
+                  "version": "22.0.0.26084.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocm-llvm/rocm-llvm_22.0.0.26084.70203-90~24.04_amd64.deb",
+                  "filename": "rocm-llvm_22.0.0.26084.70203-90~24.04_amd64.deb",
+                  "size": 544597988,
+                  "sha256": "78573c4e4ed903b7608b1939c78809bf790f51134a0bf6912f5d3dd41d18f618"
+                },
+                "rocm-smi-lib": {
+                  "version": "7.8.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.8.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocm-smi-lib_7.8.0.70203-90~24.04_amd64.deb",
+                  "size": 1150974,
+                  "sha256": "2997c3db8b5871861371fa61bd4380fed4ed8c9df095d08375694d562aa4e0a9"
+                },
+                "rocminfo": {
+                  "version": "1.0.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocminfo/rocminfo_1.0.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocminfo_1.0.0.70203-90~24.04_amd64.deb",
+                  "size": 28534,
+                  "sha256": "4e06521d158ed07775239ec684d8e3c9cb59edb406891c9a18358ec7bc3247c0"
+                },
+                "rocprofiler-register": {
+                  "version": "0.6.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocprofiler-register/rocprofiler-register_0.6.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocprofiler-register_0.6.0.70203-90~24.04_amd64.deb",
+                  "size": 242884,
+                  "sha256": "ebb06aec60237fd853ca42b2c2fceab2739db8f1ba9c08afc625dc9d1a4f91ef"
+                },
+                "rocrand": {
+                  "version": "4.2.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocrand/rocrand_4.2.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocrand_4.2.0.70203-90~24.04_amd64.deb",
+                  "size": 39576042,
+                  "sha256": "34160f7007e84772f2cc26180dc30aea6f844afc5fdf4f4f0d7089edf4efa7b9"
+                },
+                "rocsolver": {
+                  "version": "3.32.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocsolver/rocsolver_3.32.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocsolver_3.32.0.70203-90~24.04_amd64.deb",
+                  "size": 768156316,
+                  "sha256": "6e8f2405fedde90a082b4e0c4ac1a9c6042fe179b1297d7acc478fbbd2324914"
+                },
+                "rocsparse": {
+                  "version": "4.2.0.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/rocsparse/rocsparse_4.2.0.70203-90~24.04_amd64.deb",
+                  "filename": "rocsparse_4.2.0.70203-90~24.04_amd64.deb",
+                  "size": 420929726,
+                  "sha256": "bf41f32f04f909c7c29a42dccbbebcf5b6774ae528f34df9e774a543b34d4710"
+                },
+                "roctracer": {
+                  "version": "4.1.70203.70203-90~24.04",
+                  "url": "https://repo.radeon.com/rocm/apt/7.2.3/pool/main/r/roctracer/roctracer_4.1.70203.70203-90~24.04_amd64.deb",
+                  "filename": "roctracer_4.1.70203.70203-90~24.04_amd64.deb",
+                  "size": 532196,
+                  "sha256": "567afd3a629352ee6fc205b41213698e8cc9c1229598a41eb1856d029c7abe52"
+                }
               },
               "rocdxg": {
                 "version": "1.2.0",
