@@ -7,6 +7,69 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CATALOG: &str = include_str!("../../../scripts/prebuilt_backends.json");
+pub(crate) const REQUIRED_ROCM_SYSTEM_PACKAGES: &[&str] = &[
+    "comgr",
+    "hipblas",
+    "hipblaslt",
+    "hipfft",
+    "hiprand",
+    "hip-runtime-amd",
+    "hipsolver",
+    "hipsparse",
+    "hipsparselt",
+    "hsa-rocr",
+    "libopenmpi3t64",
+    "libpython3.12-dev",
+    "miopen-hip",
+    "openmp-extras-runtime",
+    "python3.12-dev",
+    "rccl",
+    "rocblas",
+    "rocfft",
+    "rocm-hip-runtime",
+    "rocm-core",
+    "rocm-device-libs",
+    "rocm-language-runtime",
+    "rocm-llvm",
+    "rocm-smi-lib",
+    "rocminfo",
+    "rocprofiler-register",
+    "rocrand",
+    "rocsolver",
+    "rocsparse",
+    "roctracer",
+];
+pub(crate) const REQUIRED_ROCM_PACKAGE_ASSETS: &[&str] = &[
+    "comgr",
+    "hipblas",
+    "hipblaslt",
+    "hipfft",
+    "hiprand",
+    "hip-runtime-amd",
+    "hipsolver",
+    "hipsparse",
+    "hipsparselt",
+    "hsa-rocr",
+    "libpython3.12-dev",
+    "miopen-hip",
+    "openmp-extras-runtime",
+    "python3.12-dev",
+    "rccl",
+    "rocblas",
+    "rocfft",
+    "rocm-hip-runtime",
+    "rocm-core",
+    "rocm-device-libs",
+    "rocm-language-runtime",
+    "rocm-llvm",
+    "rocm-smi-lib",
+    "rocminfo",
+    "rocprofiler-register",
+    "rocrand",
+    "rocsolver",
+    "rocsparse",
+    "roctracer",
+];
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PrebuiltCatalog {
@@ -42,8 +105,10 @@ pub(crate) struct ToolAsset {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct PythonRuntimeVariant {
     pub(crate) version: String,
+    pub(crate) reported_version: Option<String>,
     pub(crate) accelerator: String,
     pub(crate) runtime_version: String,
+    pub(crate) reported_runtime_version: Option<String>,
     pub(crate) torch_backend: Option<String>,
     pub(crate) minimum_driver: Option<String>,
     pub(crate) build_commit: Option<String>,
@@ -53,14 +118,36 @@ pub(crate) struct PythonRuntimeVariant {
     pub(crate) sha256: String,
 }
 
+impl PythonRuntimeVariant {
+    pub(crate) fn reported_version(&self) -> &str {
+        self.reported_version.as_deref().unwrap_or(&self.version)
+    }
+
+    pub(crate) fn reported_runtime_version(&self) -> &str {
+        self.reported_runtime_version
+            .as_deref()
+            .unwrap_or(&self.runtime_version)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct RocmSystemRuntime {
     pub(crate) apt_repository: String,
     pub(crate) repository_key: ToolAsset,
     pub(crate) packages: BTreeMap<String, String>,
+    pub(crate) package_assets: BTreeMap<String, RocmPackageAsset>,
     pub(crate) rocdxg: ToolAsset,
     pub(crate) required_gfx: Vec<String>,
     pub(crate) minimum_windows_release: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RocmPackageAsset {
+    pub(crate) version: String,
+    pub(crate) url: String,
+    pub(crate) filename: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,7 +373,12 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                     || !variant
                         .version
                         .starts_with(entry.tag.trim_start_matches('v'))
+                    || variant.reported_version().trim().is_empty()
+                    || !variant
+                        .reported_version()
+                        .starts_with(entry.tag.trim_start_matches('v'))
                     || variant.runtime_version.trim().is_empty()
+                    || variant.reported_runtime_version().trim().is_empty()
                 {
                     anyhow::bail!(
                         "{platform}/{backend} {architecture} has invalid accelerator compatibility metadata"
@@ -324,10 +416,14 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                                 !value.starts_with("https://wheels.vllm.ai/rocm/")
                             })
                             || system.apt_repository.trim().is_empty()
-                            || system.packages.len() != 3
-                            || !system.packages.contains_key("libopenmpi3t64")
-                            || !system.packages.contains_key("rocm-hip-runtime")
-                            || !system.packages.contains_key("rocminfo")
+                            || system.packages.len() != REQUIRED_ROCM_SYSTEM_PACKAGES.len()
+                            || REQUIRED_ROCM_SYSTEM_PACKAGES
+                                .iter()
+                                .any(|name| !system.packages.contains_key(*name))
+                            || system.package_assets.len() != REQUIRED_ROCM_PACKAGE_ASSETS.len()
+                            || REQUIRED_ROCM_PACKAGE_ASSETS
+                                .iter()
+                                .any(|name| !system.package_assets.contains_key(*name))
                             || system.required_gfx.is_empty()
                             || system.minimum_windows_release.trim().is_empty()
                         {
@@ -347,6 +443,42 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                             backend,
                             "ROCDXG runtime",
                         )?;
+                        let repository_url = system
+                            .apt_repository
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .trim_end_matches('/');
+                        let ubuntu_python_pool =
+                            "https://security.ubuntu.com/ubuntu/pool/main/p/python3.12/";
+                        for (name, asset) in &system.package_assets {
+                            validate_sha256(
+                                Some(&asset.sha256),
+                                platform,
+                                backend,
+                                &format!("ROCm package {name}"),
+                            )?;
+                            let expected_version = system
+                                .packages
+                                .get(name)
+                                .map(String::as_str)
+                                .unwrap_or_default();
+                            if asset.version != expected_version
+                                || asset.size == 0
+                                || asset.filename.contains(['/', '\\'])
+                                || !asset.filename.ends_with(".deb")
+                                || !(asset.url.starts_with(&format!("{repository_url}/"))
+                                    || (matches!(
+                                        name.as_str(),
+                                        "python3.12-dev" | "libpython3.12-dev"
+                                    ) && asset.url.starts_with(ubuntu_python_pool)))
+                                || !asset.url.ends_with(&asset.filename)
+                            {
+                                anyhow::bail!(
+                                    "{platform}/{backend} {architecture} has invalid ROCm package asset {name}"
+                                );
+                            }
+                        }
                         if !system
                             .repository_key
                             .url

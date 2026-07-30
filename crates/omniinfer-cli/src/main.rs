@@ -188,6 +188,7 @@ fn run_gateway_command(args: &GatewayArgs) -> Result<()> {
     gateway::run_gateway_blocking(gateway::GatewayConfig {
         listen_host: args.host.clone(),
         listen_port: args.port,
+        runtime_startup_timeout: Duration::from_secs(args.startup_timeout.max(1)),
         access_policy: gateway_auth::GatewayAccessPolicy {
             api_key: args.api_key.clone().unwrap_or_default(),
             admin_api_key: args.admin_api_key.clone().unwrap_or_default(),

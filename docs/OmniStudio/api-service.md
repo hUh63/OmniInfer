@@ -72,7 +72,7 @@ omniinfer.exe backend install vllm-wsl2-rocm `
   --json
 ```
 
-Parse stdout as JSONL using the same forward-compatible install contract as other backends. vLLM installation additionally emits `compatibility_selected`, `command_started`, `command_completed`, and `validation_passed`; ROCm also emits `system_runtime_verified`. It may download and consume several GB. A non-zero exit or final `error` event is a failed install even if earlier phases succeeded. The client must not claim success before the final `completed` event.
+Parse stdout as JSONL using the same forward-compatible install contract as other backends. vLLM installation additionally emits `compatibility_selected`, `command_started`, `command_completed`, and `validation_passed`; ROCm also emits per-package `download_started`, `download_progress`, `checksum_verified`, `package_download_skipped`, and `package_cache_populated` events before `system_runtime_verified`. Missing AMD packages use resumable, bounded-parallel Windows downloads and are SHA256-verified again after staging into WSL. It may download and consume several GB. A non-zero exit or final `error` event is a failed install even if earlier phases succeeded. The client must not claim success before the final `completed` event.
 
 `<runtimes>\<backend>` stores the Windows launcher manifest, installer tool cache, and logs; the large Python environment remains in the selected WSL2 filesystem. Use the same explicit roots for `serve` and all lifecycle commands. HuggingFace model IDs can be sent directly. Absolute local drive paths are translated into WSL automount paths; UNC model paths are unsupported. Unload/shutdown stops only OmniInfer's vLLM process group and must not terminate the whole distribution.
 

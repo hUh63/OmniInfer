@@ -72,7 +72,7 @@ omniinfer.exe backend install vllm-wsl2-rocm `
   --json
 ```
 
-stdout 按与其他后端相同的前向兼容 JSONL 安装契约解析。vLLM 安装还会发出 `compatibility_selected`、`command_started`、`command_completed` 和 `validation_passed`；ROCm 还会发出 `system_runtime_verified`。下载量和磁盘占用可能达到数 GB。命令非零退出或最后收到 `error` 事件都表示安装失败，即使前面的阶段已经成功；客户端只能在收到最终 `completed` 事件后显示安装成功。
+stdout 按与其他后端相同的前向兼容 JSONL 安装契约解析。vLLM 安装还会发出 `compatibility_selected`、`command_started`、`command_completed` 和 `validation_passed`；ROCm 会先按包发出 `download_started`、`download_progress`、`checksum_verified`、`package_download_skipped` 和 `package_cache_populated`，再发出 `system_runtime_verified`。缺失的 AMD 包通过 Windows 侧有界并行、可续传下载获取，并在送入 WSL 后再次校验 SHA256。下载量和磁盘占用可能达到数 GB。命令非零退出或最后收到 `error` 事件都表示安装失败，即使前面的阶段已经成功；客户端只能在收到最终 `completed` 事件后显示安装成功。
 
 `<runtimes>\<backend>` 保存 Windows launcher manifest、安装器工具缓存和日志；体积较大的 Python 环境保留在所选 WSL2 文件系统中。`serve` 与所有生命周期命令必须继续使用相同的显式 roots。HuggingFace 模型 ID 可直接传入；本地盘符绝对路径会转换为 WSL automount 路径，UNC 模型路径不支持。卸载模型或关闭服务只停止 OmniInfer 管理的 vLLM 进程组，不得终止整个发行版。
 

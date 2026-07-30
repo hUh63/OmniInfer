@@ -827,6 +827,8 @@ fn start_rust_gateway_child(
         .arg(&public_config.host)
         .arg("--port")
         .arg(public_config.port.to_string())
+        .arg("--startup-timeout")
+        .arg(public_config.startup_timeout.max(1.0).round().to_string())
         .current_dir(paths::repo_root())
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))

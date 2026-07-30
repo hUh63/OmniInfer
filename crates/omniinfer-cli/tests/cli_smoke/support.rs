@@ -318,6 +318,64 @@ pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::pat
         "{:x}",
         sha2::Sha256::digest(fs::read(&rocdxg).expect("read fake ROCDXG"))
     );
+    let package_versions = [
+        ("comgr", "3.0.0.70203-90~24.04"),
+        ("hipblas", "3.2.0.70203-90~24.04"),
+        ("hipblaslt", "1.2.2.70203-90~24.04"),
+        ("hipfft", "1.0.22.70203-90~24.04"),
+        ("hiprand", "3.1.0.70203-90~24.04"),
+        ("hip-runtime-amd", "7.2.53211.70203-90~24.04"),
+        ("hipsolver", "3.2.0.70203-90~24.04"),
+        ("hipsparse", "4.2.0.70203-90~24.04"),
+        ("hipsparselt", "0.2.6.70203-90~24.04"),
+        ("hsa-rocr", "1.18.0.70203-90~24.04"),
+        ("libpython3.12-dev", "3.12.3-1ubuntu0.15"),
+        ("miopen-hip", "3.5.1.70203-90~24.04"),
+        ("openmp-extras-runtime", "20.70.0.70203-90~24.04"),
+        ("python3.12-dev", "3.12.3-1ubuntu0.15"),
+        ("rccl", "2.27.7.70203-90~24.04"),
+        ("rocblas", "5.2.0.70203-90~24.04"),
+        ("rocfft", "1.0.36.70203-90~24.04"),
+        ("rocm-hip-runtime", "7.2.3.70203-90~24.04"),
+        ("rocm-core", "7.2.3.70203-90~24.04"),
+        ("rocm-device-libs", "1.0.0.70203-90~24.04"),
+        ("rocm-language-runtime", "7.2.3.70203-90~24.04"),
+        ("rocm-llvm", "22.0.0.26084.70203-90~24.04"),
+        ("rocm-smi-lib", "7.8.0.70203-90~24.04"),
+        ("rocminfo", "1.0.0.70203-90~24.04"),
+        ("rocprofiler-register", "0.6.0.70203-90~24.04"),
+        ("rocrand", "4.2.0.70203-90~24.04"),
+        ("rocsolver", "3.32.0.70203-90~24.04"),
+        ("rocsparse", "4.2.0.70203-90~24.04"),
+        ("roctracer", "4.1.70203.70203-90~24.04"),
+    ];
+    let mut packages = serde_json::Map::new();
+    let mut package_assets = serde_json::Map::new();
+    packages.insert(
+        "libopenmpi3t64".to_string(),
+        serde_json::Value::String("4.1.6-7ubuntu2".to_string()),
+    );
+    for (name, version) in package_versions {
+        let contents = format!("fake verified ROCm package {name}={version}");
+        let package = fixture.join(format!("{name}.deb"));
+        fs::write(&package, contents.as_bytes()).expect("write fake ROCm package");
+        let sha256 = format!("{:x}", sha2::Sha256::digest(contents.as_bytes()));
+        let filename = format!("{name}_{version}_amd64.deb");
+        packages.insert(
+            name.to_string(),
+            serde_json::Value::String(version.to_string()),
+        );
+        package_assets.insert(
+            name.to_string(),
+            serde_json::json!({
+                "version": version,
+                "url": format!("file://{}", package.display()),
+                "filename": filename,
+                "size": contents.len(),
+                "sha256": sha256,
+            }),
+        );
+    }
     fs::write(
         &catalog,
         serde_json::to_string_pretty(&serde_json::json!({
@@ -342,8 +400,10 @@ pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::pat
                         "variants": {
                             "x86_64": {
                                 "version": "0.26.0+rocm723",
+                                "reported_version": "0.26.0",
                                 "accelerator": "rocm",
                                 "runtime_version": "7.2.3",
+                                "reported_runtime_version": "7.2.53211",
                                 "torch_backend": "rocm723",
                                 "build_commit": "f2654939e69b4069b13977e9aef3e31d4dcaf051",
                                 "index_url": "https://wheels.vllm.ai/rocm/f2654939e69b4069b13977e9aef3e31d4dcaf051/rocm723",
@@ -356,11 +416,8 @@ pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::pat
                                         "url": format!("file://{}", key.display()),
                                         "sha256": key_sha256
                                     },
-                                    "packages": {
-                                        "libopenmpi3t64": "4.1.6-7ubuntu2",
-                                        "rocm-hip-runtime": "7.2.3.70203-90~24.04",
-                                        "rocminfo": "1.0.0.70203-90~24.04"
-                                    },
+                                    "packages": packages,
+                                    "package_assets": package_assets,
                                     "rocdxg": {
                                         "version": "1.2.0",
                                         "url": format!("file://{}", rocdxg.display()),

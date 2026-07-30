@@ -59,6 +59,7 @@ use gpu_status::{
 pub struct GatewayConfig {
     pub listen_host: String,
     pub listen_port: u16,
+    pub runtime_startup_timeout: Duration,
     pub access_policy: GatewayAccessPolicy,
     pub public_model_root: Option<PathBuf>,
 }
@@ -66,6 +67,7 @@ pub struct GatewayConfig {
 #[derive(Clone)]
 struct GatewayState {
     backend_host: String,
+    runtime_startup_timeout: Duration,
     access_policy: Arc<tokio::sync::Mutex<DynamicAccessPolicy>>,
     public_model_root: Option<PathBuf>,
     request_history_dir: PathBuf,
@@ -85,6 +87,7 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let state = GatewayState {
         backend_host: "127.0.0.1".to_string(),
+        runtime_startup_timeout: config.runtime_startup_timeout,
         access_policy: Arc::new(tokio::sync::Mutex::new(DynamicAccessPolicy::new(
             config.access_policy,
             paths::admin_keys_file(),
@@ -500,6 +503,7 @@ async fn try_handle_rust_endpoint(
                 }
             };
             let backend_host = state.backend_host.clone();
+            let runtime_startup_timeout = state.runtime_startup_timeout;
             let runtime = Arc::clone(&state.runtime);
             let outcome = tokio::task::spawn_blocking(move || {
                 let handle = tokio::runtime::Handle::current();
@@ -507,7 +511,7 @@ async fn try_handle_rust_endpoint(
                     runtime.lock().await.load_model(
                         payload,
                         backend_host,
-                        Duration::from_secs(120),
+                        runtime_startup_timeout,
                         auth.admin_id.clone(),
                     )
                 })

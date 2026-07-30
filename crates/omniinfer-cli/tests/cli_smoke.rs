@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[path = "cli_smoke/advisor.rs"]
 mod advisor;
 #[path = "cli_smoke/backend.rs"]

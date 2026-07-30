@@ -137,6 +137,7 @@ fn backend_install_vllm_wsl2_is_transactional_and_idempotent() {
         "compatibility_selected",
         "checksum_verified",
         "staging_started",
+        "native_dependencies_verified",
         "validation_passed",
         "completed",
     ] {
@@ -153,6 +154,7 @@ fn backend_install_vllm_wsl2_is_transactional_and_idempotent() {
         serde_json::from_str(&fs::read_to_string(&manifest_path).expect("launcher manifest"))
             .expect("launcher manifest JSON");
     assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["runtime_environment_version"], 6);
     assert_eq!(manifest["backend"], "vllm-wsl2-cuda");
     assert_eq!(manifest["distribution"], "Ubuntu-24.04");
     assert_eq!(manifest["tag"], "v0.24.0");
@@ -225,7 +227,9 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     for event in [
         "compatibility_selected",
         "checksum_verified",
+        "package_cache_populated",
         "system_runtime_verified",
+        "native_dependencies_verified",
         "validation_passed",
         "completed",
     ] {
@@ -234,6 +238,14 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
             "missing event {event}"
         );
     }
+    let compatibility = events
+        .iter()
+        .find(|row| row["event"] == "compatibility_selected")
+        .expect("compatibility event");
+    assert_eq!(compatibility["package_version"], "0.26.0+rocm723");
+    assert_eq!(compatibility["reported_package_version"], "0.26.0");
+    assert_eq!(compatibility["runtime_version"], "7.2.3");
+    assert_eq!(compatibility["reported_runtime_version"], "7.2.53211");
     let manifest_path = runtime_root
         .join("vllm-wsl2-rocm")
         .join("bin")
@@ -244,16 +256,50 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     assert_eq!(manifest["backend"], "vllm-wsl2-rocm");
     assert_eq!(manifest["accelerator"], "rocm");
     assert_eq!(manifest["runtime_version"], "7.2.3");
-    let manifest_before_failure = fs::read(&manifest_path).expect("read launcher manifest");
+    assert_eq!(manifest["runtime_environment_version"], 6);
 
     let invocations =
         fs::read_to_string(fake_root.join("invocations.log")).expect("fake WSL invocations");
     assert!(invocations.contains("--user\troot\t--exec\tapt-get\tupdate"));
     assert!(invocations.contains("--user\troot\t--exec\t/sbin/ldconfig"));
     assert!(!invocations.contains("--user\troot\t--exec\tldconfig"));
-    assert!(invocations.contains("libopenmpi3t64=4.1.6-7ubuntu2"));
-    assert!(invocations.contains("rocm-hip-runtime=7.2.3.70203-90~24.04"));
-    assert!(invocations.contains("rocminfo=1.0.0.70203-90~24.04"));
+    for package in [
+        "comgr=3.0.0.70203-90~24.04",
+        "hipblas=3.2.0.70203-90~24.04",
+        "hipblaslt=1.2.2.70203-90~24.04",
+        "hipfft=1.0.22.70203-90~24.04",
+        "hiprand=3.1.0.70203-90~24.04",
+        "hip-runtime-amd=7.2.53211.70203-90~24.04",
+        "hipsolver=3.2.0.70203-90~24.04",
+        "hipsparse=4.2.0.70203-90~24.04",
+        "hipsparselt=0.2.6.70203-90~24.04",
+        "hsa-rocr=1.18.0.70203-90~24.04",
+        "libopenmpi3t64=4.1.6-7ubuntu2",
+        "libpython3.12-dev=3.12.3-1ubuntu0.15",
+        "miopen-hip=3.5.1.70203-90~24.04",
+        "openmp-extras-runtime=20.70.0.70203-90~24.04",
+        "python3.12-dev=3.12.3-1ubuntu0.15",
+        "rccl=2.27.7.70203-90~24.04",
+        "rocblas=5.2.0.70203-90~24.04",
+        "rocfft=1.0.36.70203-90~24.04",
+        "rocm-hip-runtime=7.2.3.70203-90~24.04",
+        "rocm-core=7.2.3.70203-90~24.04",
+        "rocm-device-libs=1.0.0.70203-90~24.04",
+        "rocm-language-runtime=7.2.3.70203-90~24.04",
+        "rocm-llvm=22.0.0.26084.70203-90~24.04",
+        "rocm-smi-lib=7.8.0.70203-90~24.04",
+        "rocminfo=1.0.0.70203-90~24.04",
+        "rocprofiler-register=0.6.0.70203-90~24.04",
+        "rocrand=4.2.0.70203-90~24.04",
+        "rocsolver=3.32.0.70203-90~24.04",
+        "rocsparse=4.2.0.70203-90~24.04",
+        "roctracer=4.1.70203.70203-90~24.04",
+    ] {
+        assert!(
+            invocations.contains(package),
+            "missing pinned package {package}"
+        );
+    }
     assert!(invocations.contains("HSA_ENABLE_DXG_DETECTION=1"));
     assert!(invocations.contains("--extra-index-url"));
     assert!(!invocations.contains("--torch-backend\trocm723"));
@@ -275,6 +321,82 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
         apt_updates_before,
         "idempotent install must not refresh or reinstall system packages"
     );
+    fs::remove_file(fake_root.join("python-dev-installed"))
+        .expect("simulate an older runtime without Python development headers");
+    for filename in [
+        "libpython3.12-dev_3.12.3-1ubuntu0.15_amd64.deb",
+        "python3.12-dev_3.12.3-1ubuntu0.15_amd64.deb",
+    ] {
+        let cached = fake_root
+            .join("linux")
+            .join("var")
+            .join("cache")
+            .join("apt")
+            .join("archives")
+            .join(filename);
+        fs::remove_file(&cached).expect("remove newly required package from fake APT cache");
+        fs::remove_file(cached.with_extension("sha256")).expect("remove fake APT checksum sidecar");
+    }
+    let repair_output = run_install(false).success().get_output().stdout.clone();
+    let repair_events = String::from_utf8(repair_output)
+        .expect("UTF-8 repair JSONL")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("repair JSON event"))
+        .collect::<Vec<_>>();
+    let repaired_packages = repair_events
+        .iter()
+        .filter(|row| row["event"] == "package_cache_populated")
+        .map(|row| row["package"].as_str().expect("repaired package"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repaired_packages,
+        ["libpython3.12-dev", "python3.12-dev"],
+        "repair must download only the newly required Python development packages"
+    );
+    assert!(
+        repair_events.iter().any(|row| {
+            row["event"] == "package_download_skipped" && row["reason"] == "exact_version_installed"
+        }),
+        "repair must report reused pinned ROCm packages"
+    );
+    let invocations_after_repair =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("repair invocations");
+    let apt_updates_after_repair = invocations_after_repair
+        .lines()
+        .filter(|line| line.contains("--exec\tapt-get\tupdate"))
+        .count();
+    assert_eq!(
+        apt_updates_after_repair,
+        apt_updates_before + 1,
+        "repair must refresh package metadata exactly once"
+    );
+    let mut stale_manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("stale manifest"))
+            .expect("stale manifest JSON");
+    stale_manifest["runtime_environment_version"] = serde_json::json!(5);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&stale_manifest).expect("serialize stale manifest"),
+    )
+    .expect("write stale manifest");
+    run_install(false)
+        .success()
+        .stdout(predicate::str::contains("\"reused\":true"));
+    let after_migration =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("migration invocations");
+    assert_eq!(
+        after_migration
+            .lines()
+            .filter(|line| line.contains("--exec\tapt-get\tupdate"))
+            .count(),
+        apt_updates_after_repair,
+        "runtime environment migration must reuse the verified system packages"
+    );
+    let migrated_manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("migrated manifest"))
+            .expect("migrated manifest JSON");
+    assert_eq!(migrated_manifest["runtime_environment_version"], 6);
+    let manifest_before_failure = fs::read(&manifest_path).expect("read launcher manifest");
     run_install(true).failure().stderr(predicate::str::contains(
         "post-activation WSL runtime validation failed",
     ));

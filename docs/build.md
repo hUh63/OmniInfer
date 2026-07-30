@@ -141,7 +141,7 @@ Typical subfolders:
 
 ### Managed vLLM WSL2 Backend
 
-`vllm-wsl2-cuda` and `vllm-wsl2-rocm` are the supported Windows vLLM paths. Each Windows runtime directory contains a validated launcher manifest, installer tool cache, and install logs; the uv-managed Python 3.12 environment lives in the selected user WSL2 distribution under `~/.local/share/omniinfer/runtimes/<backend>/`. The catalog pins each vLLM wheel URL and SHA256, accelerator ABI, uv release and SHA256. The ROCm entry also pins the Ubuntu 24.04 repository, repository-key SHA256, exact minimal package versions, ROCDXG asset SHA256, supported GFX targets, wheel index, and wheel build commit.
+`vllm-wsl2-cuda` and `vllm-wsl2-rocm` are the supported Windows vLLM paths. Each Windows runtime directory contains a validated launcher manifest, resumable installer cache, and install logs; the uv-managed Python 3.12 environment lives in the selected user WSL2 distribution under `~/.local/share/omniinfer/runtimes/<backend>/`. The catalog pins each vLLM wheel URL and SHA256, the wheel artifact version, its optional distinct Python metadata version, the accelerator release ABI and optional distinct PyTorch-reported ABI, plus the uv release and SHA256. The ROCm entry also pins the Ubuntu 24.04 repository, repository-key SHA256, every package URL/version/size/SHA256 in the minimal compute-runtime closure, the Python development headers required by Triton JIT, ROCDXG asset SHA256, supported GFX targets, wheel index, and wheel build commit. Windows downloads missing AMD packages in parallel, WSL verifies the staged bytes again, and APT remains responsible for dependency resolution and package installation. Before activation, the installer checks the vLLM, FlashAttention, AITER, structured-output, vision, and audio native extensions with the same managed library path used by the runtime launcher. The ROCm launcher also bounds its default KV cache by WSL memory and uses overridable eager/non-chunked execution defaults on unified-memory GPUs.
 
 ```powershell
 wsl --install -d Ubuntu
@@ -161,7 +161,7 @@ python scripts/update_prebuilt_catalog.py update `
 python scripts/update_prebuilt_catalog.py check --require-gitlink-match --verify-upstream-tags
 ```
 
-The updater verifies that the requested source tag resolves to the supplied commit, changes the source/runtime release metadata and matching prebuilt assets, and refuses a tag/commit mismatch. Python runtime releases are intentionally independent entries: their release tag, package version, wheel URL/SHA256, accelerator ABI, and optional ROCm build commit/index must be updated together. Updating the actual gitlink remains a separate explicit operation; `check --require-gitlink-match --verify-upstream-tags` confirms that every catalog submodule tag/commit matches both the gitlink and GitHub.
+The updater verifies that the requested source tag resolves to the supplied commit, changes the source/runtime release metadata and matching prebuilt assets, and refuses a tag/commit mismatch. Python runtime releases are intentionally independent entries: their release tag, artifact and reported metadata versions, wheel URL/SHA256, release and reported accelerator ABIs, and optional ROCm build commit/index must be updated together. Updating the actual gitlink remains a separate explicit operation; `check --require-gitlink-match --verify-upstream-tags` confirms that every catalog submodule tag/commit matches both the gitlink and GitHub.
 
 ### Available Scripts
 

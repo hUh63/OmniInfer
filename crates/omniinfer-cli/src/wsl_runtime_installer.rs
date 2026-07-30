@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -12,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backend_installer::{InstallReporter, download_verified_asset};
 use crate::prebuilt_catalog::{
-    PrebuiltCatalog, PythonRuntimeEntry, PythonRuntimeVariant, RocmSystemRuntime,
+    PrebuiltCatalog, PythonRuntimeEntry, PythonRuntimeVariant, RocmPackageAsset, RocmSystemRuntime,
 };
 
 const CUDA_BACKEND_ID: &str = "vllm-wsl2-cuda";
@@ -20,6 +22,154 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 6;
+const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.1.0";
+
+const ROCM_PLATFORM_PLUGIN: &str = r#"import os
+
+_shim_active = False
+_uva_fallback_active = False
+
+
+def _is_wsl():
+    try:
+        with open("/proc/sys/kernel/osrelease", encoding="utf-8") as release:
+            return "microsoft" in release.read().lower()
+    except OSError:
+        return False
+
+
+def _amdsmi_has_gpu():
+    initialized = False
+    try:
+        import amdsmi
+
+        amdsmi.amdsmi_init()
+        initialized = True
+        return bool(amdsmi.amdsmi_get_processor_handles())
+    except Exception:
+        return False
+    finally:
+        if initialized:
+            try:
+                amdsmi.amdsmi_shut_down()
+            except Exception:
+                pass
+
+
+def _install_amdsmi_shim(devices):
+    import amdsmi
+
+    def handles():
+        return list(range(len(devices)))
+
+    def properties(handle):
+        return devices[int(handle)]
+
+    def asic_info(handle):
+        device = properties(handle)
+        return {
+            "asic_serial": device["asic_serial"],
+            "device_id": "",
+            "market_name": device["name"],
+            "target_graphics_version": device["gcn_arch"],
+        }
+
+    amdsmi.amdsmi_init = lambda *args, **kwargs: None
+    amdsmi.amdsmi_shut_down = lambda: None
+    amdsmi.amdsmi_get_processor_handles = handles
+    amdsmi.amdsmi_get_gpu_asic_info = asic_info
+    amdsmi.amdsmi_get_gpu_memory_total = (
+        lambda handle, memory_type: properties(handle)["total_memory"]
+    )
+    amdsmi.amdsmi_get_gpu_device_uuid = (
+        lambda handle: properties(handle)["uuid"]
+    )
+    amdsmi.amdsmi_topo_get_link_type = (
+        lambda handle, peer_handle: {"hops": 1, "type": 2}
+    )
+    amdsmi.amdsmi_topo_get_numa_node_number = lambda handle: 0
+
+
+def platform_plugin():
+    global _shim_active
+    if _shim_active:
+        return "vllm.platforms.rocm.RocmPlatform"
+    if os.environ.get("HSA_ENABLE_DXG_DETECTION") != "1" or not _is_wsl():
+        return None
+    if _amdsmi_has_gpu():
+        return None
+    try:
+        import torch
+
+        if (
+            torch.version.hip
+            and torch.cuda.is_available()
+            and torch.cuda.device_count() > 0
+        ):
+            devices = []
+            for index in range(torch.cuda.device_count()):
+                device = torch.cuda.get_device_properties(index)
+                uuid = str(getattr(device, "uuid", f"wsl2-rocm-{index}"))
+                devices.append(
+                    {
+                        "asic_serial": f"0x{uuid.replace('-', '')}",
+                        "gcn_arch": device.gcnArchName,
+                        "name": device.name,
+                        "total_memory": device.total_memory,
+                        "uuid": uuid,
+                    }
+                )
+            _install_amdsmi_shim(devices)
+            _shim_active = True
+            return "vllm.platforms.rocm.RocmPlatform"
+    except Exception:
+        pass
+    return None
+
+
+def general_plugin():
+    global _uva_fallback_active
+    if _uva_fallback_active:
+        return
+    if not _shim_active:
+        platform_plugin()
+    if not _shim_active:
+        return
+
+    from vllm.utils.platform_utils import is_uva_available
+
+    if is_uva_available():
+        return
+
+    import torch
+    from vllm.v1.worker.gpu import buffer_utils
+
+    class WslRocmBuffer:
+        def __init__(self, size, dtype):
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+            self.np = self.cpu.numpy()
+            self.uva = torch.zeros(size, dtype=dtype, device="cuda")
+
+    def copy_to_accelerator(self, value):
+        self._curr = (self._curr + 1) % self.max_concurrency
+        buffer = self._uva_bufs[self._curr]
+        destination = buffer.cpu if isinstance(value, torch.Tensor) else buffer.np
+        count = len(value)
+        destination[:count] = value
+        return buffer.uva[:count].copy_(buffer.cpu[:count])
+
+    buffer_utils.UvaBuffer = WslRocmBuffer
+    buffer_utils.UvaBufferPool.copy_to_uva = copy_to_accelerator
+    _uva_fallback_active = True
+"#;
+
+const ROCM_PLATFORM_PLUGIN_ENTRY_POINTS: &str = r#"[vllm.platform_plugins]
+omniinfer_wsl2_rocm = omniinfer_vllm_wsl2_rocm:platform_plugin
+
+[vllm.general_plugins]
+omniinfer_wsl2_rocm = omniinfer_vllm_wsl2_rocm:general_plugin
+"#;
 
 const RUNNER_SCRIPT: &str = r#"#!/bin/sh
 set -eu
@@ -40,6 +190,46 @@ if [ -s "$pid_file" ]; then
     fi
     rm -f "$pid_file"
 fi
+managed_memory_policy=1
+managed_eager_policy=1
+managed_chunked_prefill_policy=1
+for argument in "$@"; do
+    case "$argument" in
+        --kv-cache-memory-bytes|--kv-cache-memory-bytes=*|--gpu-memory-utilization|--gpu-memory-utilization=*)
+            managed_memory_policy=0
+            ;;
+        --enforce-eager|--no-enforce-eager)
+            managed_eager_policy=0
+            ;;
+        --enable-chunked-prefill|--enable-chunked-prefill=*|--no-enable-chunked-prefill)
+            managed_chunked_prefill_policy=0
+            ;;
+    esac
+done
+if [ "${HSA_ENABLE_DXG_DETECTION:-}" = "1" ]; then
+    if [ "$managed_memory_policy" -eq 1 ]; then
+        memory_kib=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)
+        case "$memory_kib" in
+            ''|*[!0-9]*) memory_kib=0 ;;
+        esac
+        kv_cache_bytes=$((memory_kib * 1024 / 5))
+        if [ "$kv_cache_bytes" -gt 4294967296 ]; then
+            kv_cache_bytes=4294967296
+        fi
+        if [ "$kv_cache_bytes" -ge 268435456 ]; then
+            set -- "$@" --kv-cache-memory-bytes "$kv_cache_bytes"
+            echo "OmniInfer: limiting WSL2 ROCm KV cache to $kv_cache_bytes bytes based on Linux memory; override with --kv-cache-memory-bytes or --gpu-memory-utilization" >&2
+        fi
+    fi
+    if [ "$managed_eager_policy" -eq 1 ]; then
+        set -- "$@" --enforce-eager
+    fi
+    if [ "$managed_chunked_prefill_policy" -eq 1 ]; then
+        set -- "$@" --no-enable-chunked-prefill
+    fi
+    echo "OmniInfer: applying WSL2 ROCm compatibility defaults for eager execution and non-chunked prefill; explicit vLLM flags override each default" >&2
+fi
+unset argument managed_memory_policy managed_eager_policy managed_chunked_prefill_policy memory_kib kv_cache_bytes
 setsid "$@" &
 child=$!
 printf '%s\n' "$child" > "$pid_file"
@@ -87,10 +277,17 @@ rm -f "$pid_file"
 "#;
 
 const GPU_PROBE: &str = r#"import json
+import os
 import torch
 import vllm
+from vllm.platforms import current_platform
 if not torch.cuda.is_available():
     raise SystemExit("torch.cuda.is_available() is false")
+expected_accelerator = os.environ["OMNIINFER_EXPECTED_ACCELERATOR"]
+if expected_accelerator == "rocm" and not current_platform.is_rocm():
+    raise SystemExit("vLLM did not select its ROCm platform")
+if expected_accelerator == "cuda" and not current_platform.is_cuda():
+    raise SystemExit("vLLM did not select its CUDA platform")
 x = torch.ones(1, device="cuda")
 torch.cuda.synchronize()
 print(json.dumps({
@@ -100,7 +297,68 @@ print(json.dumps({
     "torch_hip": torch.version.hip,
     "device": torch.cuda.get_device_name(0),
     "value": float(x.item()),
+    "vllm_platform": type(current_platform).__module__,
 }))
+"#;
+
+const NATIVE_DEPENDENCY_PROBE: &str = r#"set -eu
+runtime=$1
+runtime_dir=$runtime
+site_packages=
+for candidate in "$runtime"/venv/lib/python*/site-packages; do
+    [ -d "$candidate" ] || continue
+    site_packages=$candidate
+    break
+done
+if [ -z "$site_packages" ]; then
+    echo "managed site-packages directory not found" >&2
+    exit 1
+fi
+set -a
+. "$runtime/runtime.env"
+set +a
+if [ -n "${CC:-}" ]; then
+    [ -x "$CC" ] || {
+        echo "managed C compiler is not executable: $CC" >&2
+        exit 1
+    }
+    cc_probe="$runtime/run/.cc-probe-$$.so"
+    if ! printf '%s\n' 'int omniinfer_cc_probe(void) { return 0; }' |
+        "$CC" -x c -shared -fPIC -o "$cc_probe" -
+    then
+        echo "managed C compiler probe failed: $CC" >&2
+        rm -f "$cc_probe"
+        exit 1
+    fi
+    rm -f "$cc_probe"
+fi
+checked=0
+missing=0
+for library in \
+    "$site_packages"/vllm/*.so \
+    "$site_packages"/flash_attn*.so \
+    "$site_packages"/aiter/jit/*.so \
+    "$site_packages"/xgrammar/*.so \
+    "$site_packages"/torchvision/*.so \
+    "$site_packages"/torchaudio/lib/*.so
+do
+    [ -f "$library" ] || continue
+    checked=$((checked + 1))
+    unresolved=$(ldd "$library" 2>&1 | grep 'not found' || true)
+    if [ -n "$unresolved" ]; then
+        printf '%s\n%s\n' "$library" "$unresolved" >&2
+        missing=$((missing + 1))
+    fi
+done
+if [ "$checked" -eq 0 ]; then
+    echo "no managed native extensions found" >&2
+    exit 1
+fi
+if [ "$missing" -ne 0 ]; then
+    echo "$missing of $checked managed native extensions have unresolved libraries" >&2
+    exit 1
+fi
+printf '%s\n' "$checked"
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +380,8 @@ struct LauncherManifest {
     wheel_sha256: String,
     accelerator: String,
     runtime_version: String,
+    #[serde(default)]
+    runtime_environment_version: u32,
 }
 
 #[derive(Debug)]
@@ -214,6 +474,7 @@ pub(super) fn install_wsl_python_runtime(
         wheel_sha256: variant.sha256.clone(),
         accelerator: variant.accelerator.clone(),
         runtime_version: variant.runtime_version.clone(),
+        runtime_environment_version: RUNTIME_ENVIRONMENT_VERSION,
     };
 
     reporter.human(format!("Managed WSL2 Python runtime: windows/{backend}"));
@@ -234,6 +495,18 @@ pub(super) fn install_wsl_python_runtime(
             system.minimum_windows_release
         ));
     }
+    if variant.reported_version() != variant.version {
+        reporter.human(format!(
+            "  package metadata version: {}",
+            variant.reported_version()
+        ));
+    }
+    if variant.reported_runtime_version() != variant.runtime_version {
+        reporter.human(format!(
+            "  reported accelerator ABI: {}",
+            variant.reported_runtime_version()
+        ));
+    }
     reporter.human(format!("  wheel sha256: {}", variant.sha256));
     reporter.event(
         "compatibility_selected",
@@ -244,9 +517,12 @@ pub(super) fn install_wsl_python_runtime(
             "minimum_driver": variant.minimum_driver,
             "accelerator": variant.accelerator,
             "runtime_version": variant.runtime_version,
+            "reported_runtime_version": variant.reported_runtime_version(),
+            "runtime_environment_version": RUNTIME_ENVIRONMENT_VERSION,
             "torch_backend": torch_backend,
             "wheel_url": variant.url,
             "package_version": variant.version,
+            "reported_package_version": variant.reported_version(),
             "wheel_sha256": variant.sha256,
             "linux_runtime": linux_current,
         }),
@@ -257,9 +533,9 @@ pub(super) fn install_wsl_python_runtime(
         && validate_installed_runtime(
             &wsl,
             &linux_current,
-            &variant.version,
+            variant.reported_version(),
             &variant.accelerator,
-            &variant.runtime_version,
+            variant.reported_runtime_version(),
             reporter,
         )
         .is_ok()
@@ -314,6 +590,8 @@ pub(super) fn install_wsl_python_runtime(
                 "linux_runtime": linux_current,
                 "wheel_url": variant.url,
                 "package_version": variant.version,
+                "reported_package_version": variant.reported_version(),
+                "reported_runtime_version": variant.reported_runtime_version(),
                 "wheel_sha256": variant.sha256,
             }),
         );
@@ -351,7 +629,7 @@ pub(super) fn install_wsl_python_runtime(
         "prepare WSL runtime directories",
     )?;
     if let Some(system) = variant.rocm_system.as_ref() {
-        ensure_rocm_system_runtime(&wsl, system, catalog, reporter)?;
+        ensure_rocm_system_runtime(&wsl, system, runtime_dir, catalog, reporter)?;
         validate_wsl_rocm_gpu(&wsl, system)?;
     }
     run_wsl_checked(
@@ -461,9 +739,12 @@ pub(super) fn install_wsl_python_runtime(
         write_wsl_file(
             &wsl,
             &format!("{linux_staging}/{RUNTIME_ENV}"),
-            runtime_environment(variant).as_bytes(),
+            runtime_environment(&variant.accelerator).as_bytes(),
             false,
         )?;
+        if variant.accelerator == "rocm" {
+            write_rocm_platform_plugin(&wsl, &linux_staging)?;
+        }
         let managed_manifest = json!({
             "schema_version": 1,
             "backend": backend,
@@ -474,9 +755,17 @@ pub(super) fn install_wsl_python_runtime(
             "uv_sha256": uv.sha256,
             "wheel_url": variant.url,
             "package_version": variant.version,
+            "reported_package_version": variant.reported_version(),
             "wheel_sha256": variant.sha256,
             "accelerator": variant.accelerator,
             "runtime_version": variant.runtime_version,
+            "reported_runtime_version": variant.reported_runtime_version(),
+            "runtime_environment_version": RUNTIME_ENVIRONMENT_VERSION,
+            "rocm_platform_plugin_version": if variant.accelerator == "rocm" {
+                Some(ROCM_PLATFORM_PLUGIN_VERSION)
+            } else {
+                None
+            },
             "torch_backend": torch_backend,
             "minimum_driver": variant.minimum_driver,
             "driver": driver,
@@ -493,9 +782,9 @@ pub(super) fn install_wsl_python_runtime(
         validate_runtime_path(
             &wsl,
             &linux_staging,
-            &variant.version,
+            variant.reported_version(),
             &variant.accelerator,
-            &variant.runtime_version,
+            variant.reported_runtime_version(),
             reporter,
         )?;
         activate_runtime(
@@ -509,9 +798,9 @@ pub(super) fn install_wsl_python_runtime(
         if let Err(error) = validate_runtime_path(
             &wsl,
             &linux_current,
-            &variant.version,
+            variant.reported_version(),
             &variant.accelerator,
-            &variant.runtime_version,
+            variant.reported_runtime_version(),
             reporter,
         ) {
             rollback_runtime(&wsl, &linux_current, &linux_backup, reporter)?;
@@ -691,9 +980,23 @@ fn validate_rocm_distro(wsl: &WslContext) -> Result<()> {
 fn ensure_rocm_system_runtime(
     wsl: &WslContext,
     system: &RocmSystemRuntime,
+    runtime_dir: &Path,
     catalog: &PrebuiltCatalog,
     reporter: &mut InstallReporter,
 ) -> Result<()> {
+    if let Ok(installed) = validate_rocm_system_versions(wsl, system)
+        && validate_wsl_rocm_gpu(wsl, system).is_ok()
+    {
+        reporter.event(
+            "system_runtime_verified",
+            json!({
+                "accelerator": "rocm",
+                "reused": true,
+                "packages": installed.lines().collect::<Vec<_>>(),
+            }),
+        );
+        return Ok(());
+    }
     let repository_key = download_verified_asset(
         catalog,
         &system.repository_key.url,
@@ -788,27 +1091,26 @@ fn ensure_rocm_system_runtime(
         reporter,
         "refresh ROCm package metadata",
     )?;
-    let hip_version = required_rocm_package(system, "rocm-hip-runtime")?;
-    let rocminfo_version = required_rocm_package(system, "rocminfo")?;
-    let openmpi_version = required_rocm_package(system, "libopenmpi3t64")?;
-    let hip_requirement = format!("rocm-hip-runtime={hip_version}");
-    let rocminfo_requirement = format!("rocminfo={rocminfo_version}");
-    let openmpi_requirement = format!("libopenmpi3t64={openmpi_version}");
+    let package_cache = prepare_rocm_apt_cache(wsl, system, runtime_dir, reporter)?;
+    let mut install_args = vec![
+        "env".to_string(),
+        "DEBIAN_FRONTEND=noninteractive".to_string(),
+        "apt-get".to_string(),
+        "install".to_string(),
+        "--no-install-recommends".to_string(),
+        "--allow-downgrades".to_string(),
+        "-y".to_string(),
+    ];
+    install_args.extend(
+        system
+            .packages
+            .iter()
+            .map(|(name, version)| format!("{name}={version}")),
+    );
     run_wsl_as_checked(
         wsl,
         Some("root"),
-        [
-            "env",
-            "DEBIAN_FRONTEND=noninteractive",
-            "apt-get",
-            "install",
-            "--no-install-recommends",
-            "--allow-downgrades",
-            "-y",
-            openmpi_requirement.as_str(),
-            hip_requirement.as_str(),
-            rocminfo_requirement.as_str(),
-        ],
+        install_args.iter().map(String::as_str),
         None,
         reporter,
         "install pinned ROCm runtime packages",
@@ -830,6 +1132,14 @@ fn ensure_rocm_system_runtime(
         "refresh ROCm runtime linker cache",
     )?;
     let installed = validate_rocm_system_versions(wsl, system)?;
+    if package_cache.exists() {
+        fs::remove_dir_all(&package_cache).with_context(|| {
+            format!(
+                "remove verified Windows ROCm package cache {}",
+                package_cache.display()
+            )
+        })?;
+    }
     reporter.event(
         "system_runtime_verified",
         json!({
@@ -838,6 +1148,502 @@ fn ensure_rocm_system_runtime(
         }),
     );
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RocmPackageDownload {
+    name: String,
+    asset: RocmPackageAsset,
+    verified_path: PathBuf,
+    partial_path: PathBuf,
+    asset_index: usize,
+    asset_count: usize,
+}
+
+fn prepare_rocm_apt_cache(
+    wsl: &WslContext,
+    system: &RocmSystemRuntime,
+    runtime_dir: &Path,
+    reporter: &mut InstallReporter,
+) -> Result<PathBuf> {
+    let installed =
+        query_installed_package_versions(wsl, system.package_assets.keys().map(String::as_str))?;
+    let cache_dir = runtime_dir
+        .join("downloads")
+        .join(format!("rocm-{}", system.repository_key.version));
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create ROCm download cache {}", cache_dir.display()))?;
+
+    let mut downloads = Vec::new();
+    let asset_count = system.package_assets.len();
+    for (asset_index, (name, asset)) in system.package_assets.iter().enumerate() {
+        if installed
+            .get(name)
+            .is_some_and(|version| version == &asset.version)
+        {
+            reporter.event(
+                "package_download_skipped",
+                json!({
+                    "role": "ROCm package",
+                    "package": name,
+                    "version": asset.version,
+                    "reason": "exact_version_installed",
+                    "asset_index": asset_index + 1,
+                    "asset_count": asset_count,
+                }),
+            );
+            continue;
+        }
+        let apt_cache_path = format!("/var/cache/apt/archives/{}", asset.filename);
+        if wsl_file_matches_sha256(wsl, &apt_cache_path, &asset.sha256)? {
+            reporter.event(
+                "checksum_verified",
+                json!({
+                    "role": format!("ROCm package {name}"),
+                    "package": name,
+                    "version": asset.version,
+                    "url": asset.url,
+                    "bytes": asset.size,
+                    "sha256": asset.sha256,
+                    "expected_sha256": asset.sha256,
+                    "source": "wsl_apt_cache",
+                    "asset_index": asset_index + 1,
+                    "asset_count": asset_count,
+                }),
+            );
+            continue;
+        }
+        let verified_path = cache_dir.join(format!("{}.deb", asset.sha256));
+        let partial_path = cache_dir.join(format!("{}.partial", asset.sha256));
+        downloads.push(RocmPackageDownload {
+            name: name.clone(),
+            asset: asset.clone(),
+            verified_path,
+            partial_path,
+            asset_index: asset_index + 1,
+            asset_count,
+        });
+    }
+
+    download_rocm_packages(&downloads, reporter)?;
+    if !downloads.is_empty() {
+        run_wsl_as_checked(
+            wsl,
+            Some("root"),
+            [
+                "install",
+                "-d",
+                "-m",
+                "0755",
+                "/var/cache/omniinfer/rocm-packages",
+            ],
+            None,
+            reporter,
+            "prepare protected ROCm package cache",
+        )?;
+    }
+    for download in &downloads {
+        let staged = format!(
+            "/var/cache/omniinfer/rocm-packages/{}.deb",
+            download.asset.sha256
+        );
+        let output_arg = format!("of={staged}");
+        run_wsl_as_file_checked(
+            wsl,
+            Some("root"),
+            ["dd", output_arg.as_str(), "status=none"],
+            &download.verified_path,
+            reporter,
+            &format!("stage verified ROCm package {}", download.name),
+        )?;
+        verify_wsl_sha256(
+            wsl,
+            &staged,
+            &download.asset.sha256,
+            &format!("ROCm package {}", download.name),
+        )?;
+        let apt_cache_path = format!("/var/cache/apt/archives/{}", download.asset.filename);
+        run_wsl_as_checked(
+            wsl,
+            Some("root"),
+            [
+                "install",
+                "-m",
+                "0644",
+                staged.as_str(),
+                apt_cache_path.as_str(),
+            ],
+            None,
+            reporter,
+            &format!("populate APT cache for ROCm package {}", download.name),
+        )?;
+        verify_wsl_sha256(
+            wsl,
+            &apt_cache_path,
+            &download.asset.sha256,
+            &format!("APT cache package {}", download.name),
+        )?;
+        let _ = run_wsl_as(wsl, Some("root"), ["rm", "-f", staged.as_str()], None);
+        reporter.event(
+            "package_cache_populated",
+            json!({
+                "role": "ROCm package",
+                "package": download.name,
+                "version": download.asset.version,
+                "filename": download.asset.filename,
+                "sha256": download.asset.sha256,
+                "asset_index": download.asset_index,
+                "asset_count": download.asset_count,
+            }),
+        );
+    }
+    Ok(cache_dir)
+}
+
+fn query_installed_package_versions<'a>(
+    wsl: &WslContext,
+    packages: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>> {
+    let mut args = vec![
+        "dpkg-query".to_string(),
+        "-W".to_string(),
+        "-f=${Package}=${Version}\n".to_string(),
+    ];
+    args.extend(packages.into_iter().map(str::to_string));
+    let output = run_wsl(wsl, args.iter().map(String::as_str), None)
+        .context("query installed ROCm package versions")?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        require_success(&output, "query installed ROCm package versions")?;
+    }
+    let mut versions = BTreeMap::new();
+    for line in decode_output(&output.stdout).lines() {
+        if let Some((name, version)) = line.trim().split_once('=') {
+            versions.insert(name.to_string(), version.to_string());
+        }
+    }
+    Ok(versions)
+}
+
+fn wsl_file_matches_sha256(wsl: &WslContext, path: &str, expected: &str) -> Result<bool> {
+    let output = run_wsl_as(wsl, Some("root"), ["sha256sum", path], None)
+        .with_context(|| format!("inspect WSL2 package cache {path}"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(decode_output(&output.stdout)
+        .split_whitespace()
+        .next()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(expected)))
+}
+
+fn download_rocm_packages(
+    downloads: &[RocmPackageDownload],
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let mut pending_https = Vec::new();
+    for download in downloads {
+        if verified_file_matches(download)? {
+            emit_rocm_package_checksum(download, true, reporter);
+            continue;
+        }
+        if promote_complete_partial(download)? {
+            emit_rocm_package_checksum(download, true, reporter);
+            continue;
+        }
+        if let Some(path) = download.asset.url.strip_prefix("file://") {
+            reporter.event(
+                "download_started",
+                json!({
+                    "role": format!("ROCm package {}", download.name),
+                    "package": download.name,
+                    "asset_index": download.asset_index,
+                    "asset_count": download.asset_count,
+                    "url": download.asset.url,
+                }),
+            );
+            fs::copy(path, &download.partial_path).with_context(|| {
+                format!(
+                    "copy ROCm package fixture {} to {}",
+                    path,
+                    download.partial_path.display()
+                )
+            })?;
+            reporter.event(
+                "download_progress",
+                json!({
+                    "role": format!("ROCm package {}", download.name),
+                    "package": download.name,
+                    "asset_index": download.asset_index,
+                    "asset_count": download.asset_count,
+                    "url": download.asset.url,
+                    "bytes_downloaded": fs::metadata(&download.partial_path)?.len(),
+                    "bytes_total": download.asset.size,
+                }),
+            );
+        } else {
+            pending_https.push(download);
+        }
+    }
+
+    if !pending_https.is_empty() {
+        download_rocm_packages_with_curl(&pending_https, reporter)?;
+    }
+    for download in downloads {
+        if download.verified_path.exists() {
+            continue;
+        }
+        let actual_size = fs::metadata(&download.partial_path)
+            .with_context(|| {
+                format!(
+                    "downloaded ROCm package {} is missing from {}",
+                    download.name,
+                    download.partial_path.display()
+                )
+            })?
+            .len();
+        let actual_sha256 = sha256_file(&download.partial_path)?;
+        if actual_size != download.asset.size
+            || !actual_sha256.eq_ignore_ascii_case(&download.asset.sha256)
+        {
+            reporter.event(
+                "checksum_failed",
+                json!({
+                    "role": format!("ROCm package {}", download.name),
+                    "package": download.name,
+                    "asset_index": download.asset_index,
+                    "asset_count": download.asset_count,
+                    "url": download.asset.url,
+                    "expected_bytes": download.asset.size,
+                    "actual_bytes": actual_size,
+                    "expected_sha256": download.asset.sha256,
+                    "actual_sha256": actual_sha256,
+                }),
+            );
+            anyhow::bail!(
+                "ROCm package {} checksum mismatch: expected {} bytes / {}, got {} bytes / {}",
+                download.name,
+                download.asset.size,
+                download.asset.sha256,
+                actual_size,
+                actual_sha256
+            );
+        }
+        fs::rename(&download.partial_path, &download.verified_path).with_context(|| {
+            format!(
+                "commit verified ROCm package {} to {}",
+                download.name,
+                download.verified_path.display()
+            )
+        })?;
+        emit_rocm_package_checksum(download, false, reporter);
+    }
+    Ok(())
+}
+
+fn download_rocm_packages_with_curl(
+    pending: &[&RocmPackageDownload],
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let cache_dir = pending[0]
+        .partial_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("ROCm package cache has no parent directory"))?;
+    let stderr_path = cache_dir.join("curl.stderr.log");
+    let stderr_file = File::create(&stderr_path)
+        .with_context(|| format!("create curl log {}", stderr_path.display()))?;
+    let mut command = Command::new("curl.exe");
+    command.args([
+        "--fail",
+        "--location",
+        "--retry",
+        "8",
+        "--retry-all-errors",
+        "--retry-delay",
+        "2",
+        "--connect-timeout",
+        "30",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "60",
+        "--parallel",
+        "--parallel-max",
+        "4",
+        "--silent",
+        "--show-error",
+    ]);
+    for download in pending {
+        reporter.event(
+            "download_started",
+            json!({
+                "role": format!("ROCm package {}", download.name),
+                "package": download.name,
+                "asset_index": download.asset_index,
+                "asset_count": download.asset_count,
+                "url": download.asset.url,
+                "resumable": true,
+            }),
+        );
+        command
+            .arg("--continue-at")
+            .arg("-")
+            .arg("--output")
+            .arg(&download.partial_path)
+            .arg(&download.asset.url);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file));
+    hide_child_window(&mut command);
+    let mut child = command
+        .spawn()
+        .context("start Windows curl.exe for resumable ROCm package downloads")?;
+    let mut last_reported = BTreeMap::<String, u64>::new();
+    let status = loop {
+        if let Some(status) = child.try_wait().context("poll Windows curl.exe")? {
+            break status;
+        }
+        for download in pending {
+            let downloaded = fs::metadata(&download.partial_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default();
+            let previous = last_reported
+                .get(&download.name)
+                .copied()
+                .unwrap_or_default();
+            if downloaded >= previous.saturating_add(8 * 1024 * 1024)
+                || downloaded >= download.asset.size
+            {
+                reporter.event(
+                    "download_progress",
+                    json!({
+                        "role": format!("ROCm package {}", download.name),
+                        "package": download.name,
+                        "asset_index": download.asset_index,
+                        "asset_count": download.asset_count,
+                        "url": download.asset.url,
+                        "bytes_downloaded": downloaded,
+                        "bytes_total": download.asset.size,
+                    }),
+                );
+                last_reported.insert(download.name.clone(), downloaded);
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    };
+    for download in pending {
+        let downloaded = fs::metadata(&download.partial_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        reporter.event(
+            "download_progress",
+            json!({
+                "role": format!("ROCm package {}", download.name),
+                "package": download.name,
+                "asset_index": download.asset_index,
+                "asset_count": download.asset_count,
+                "url": download.asset.url,
+                "bytes_downloaded": downloaded,
+                "bytes_total": download.asset.size,
+            }),
+        );
+    }
+    if !status.success() {
+        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+        anyhow::bail!(
+            "Windows curl.exe failed while downloading ROCm packages with {status}: {}. Re-run the install to resume verified partial downloads.",
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+fn verified_file_matches(download: &RocmPackageDownload) -> Result<bool> {
+    if !download.verified_path.exists() {
+        return Ok(false);
+    }
+    let size = fs::metadata(&download.verified_path)?.len();
+    if size == download.asset.size
+        && sha256_file(&download.verified_path)?.eq_ignore_ascii_case(&download.asset.sha256)
+    {
+        return Ok(true);
+    }
+    fs::remove_file(&download.verified_path).with_context(|| {
+        format!(
+            "remove invalid cached ROCm package {}",
+            download.verified_path.display()
+        )
+    })?;
+    Ok(false)
+}
+
+fn promote_complete_partial(download: &RocmPackageDownload) -> Result<bool> {
+    if !download.partial_path.exists() {
+        return Ok(false);
+    }
+    let size = fs::metadata(&download.partial_path)?.len();
+    if size < download.asset.size {
+        return Ok(false);
+    }
+    if size == download.asset.size
+        && sha256_file(&download.partial_path)?.eq_ignore_ascii_case(&download.asset.sha256)
+    {
+        fs::rename(&download.partial_path, &download.verified_path).with_context(|| {
+            format!(
+                "promote completed ROCm package {} to {}",
+                download.name,
+                download.verified_path.display()
+            )
+        })?;
+        return Ok(true);
+    }
+    fs::remove_file(&download.partial_path).with_context(|| {
+        format!(
+            "remove invalid partial ROCm package {}",
+            download.partial_path.display()
+        )
+    })?;
+    Ok(false)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("open {} for SHA256 verification", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {} for SHA256 verification", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn emit_rocm_package_checksum(
+    download: &RocmPackageDownload,
+    cached: bool,
+    reporter: &mut InstallReporter,
+) {
+    reporter.event(
+        "checksum_verified",
+        json!({
+            "role": format!("ROCm package {}", download.name),
+            "package": download.name,
+            "version": download.asset.version,
+            "asset_index": download.asset_index,
+            "asset_count": download.asset_count,
+            "url": download.asset.url,
+            "bytes": download.asset.size,
+            "sha256": download.asset.sha256,
+            "expected_sha256": download.asset.sha256,
+            "source": if cached { "windows_cache" } else { "download" },
+        }),
+    );
 }
 
 fn validate_existing_system_runtime(
@@ -861,38 +1667,28 @@ fn validate_existing_system_runtime(
 }
 
 fn validate_rocm_system_versions(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<String> {
-    let openmpi_requirement = format!(
-        "libopenmpi3t64={}",
-        required_rocm_package(system, "libopenmpi3t64")?
-    );
-    let hip_requirement = format!(
-        "rocm-hip-runtime={}",
-        required_rocm_package(system, "rocm-hip-runtime")?
-    );
-    let rocminfo_requirement = format!("rocminfo={}", required_rocm_package(system, "rocminfo")?);
-    let versions = run_wsl(
-        wsl,
-        [
-            "dpkg-query",
-            "-W",
-            "-f=${Package}=${Version}\n",
-            "libopenmpi3t64",
-            "rocm-hip-runtime",
-            "rocminfo",
-            "rocdxg-roct",
-        ],
-        None,
-    )
-    .context("verify installed ROCm system package versions")?;
+    let package_requirements = system
+        .packages
+        .iter()
+        .map(|(name, version)| format!("{name}={version}"))
+        .collect::<Vec<_>>();
+    let mut query_args = vec![
+        "dpkg-query".to_string(),
+        "-W".to_string(),
+        "-f=${Package}=${Version}\n".to_string(),
+    ];
+    query_args.extend(system.packages.keys().cloned());
+    query_args.push("rocdxg-roct".to_string());
+    let versions = run_wsl(wsl, query_args.iter().map(String::as_str), None);
+    let versions = versions.context("verify installed ROCm system package versions")?;
     require_success(&versions, "verify installed ROCm system package versions")?;
     let installed = decode_output(&versions.stdout);
     let rocdxg_requirement = format!("rocdxg-roct={}", system.rocdxg.version);
-    for expected in [
-        openmpi_requirement.as_str(),
-        hip_requirement.as_str(),
-        rocminfo_requirement.as_str(),
-        rocdxg_requirement.as_str(),
-    ] {
+    for expected in package_requirements
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(rocdxg_requirement.as_str()))
+    {
         if !installed.lines().any(|line| line.trim() == expected) {
             anyhow::bail!(
                 "installed ROCm system runtime does not match the pinned catalog: missing {expected}"
@@ -917,14 +1713,6 @@ fn verify_wsl_sha256(wsl: &WslContext, path: &str, expected: &str, role: &str) -
         );
     }
     Ok(())
-}
-
-fn required_rocm_package<'a>(system: &'a RocmSystemRuntime, name: &str) -> Result<&'a str> {
-    system
-        .packages
-        .get(name)
-        .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!("ROCm catalog is missing pinned package {name}"))
 }
 
 fn validate_wsl_rocm_gpu(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<()> {
@@ -957,11 +1745,74 @@ fn validate_wsl_rocm_gpu(wsl: &WslContext, system: &RocmSystemRuntime) -> Result
     Ok(())
 }
 
-fn runtime_environment(variant: &PythonRuntimeVariant) -> String {
-    match variant.accelerator.as_str() {
-        "rocm" => "HSA_ENABLE_DXG_DETECTION=1\n".to_string(),
-        _ => String::new(),
+fn runtime_environment(accelerator: &str) -> String {
+    let mut environment = r#"omniinfer_managed_library_path=
+for omniinfer_library_dir in \
+    "$runtime_dir"/venv/lib/python*/site-packages/torch/lib \
+    "$runtime_dir"/venv/lib/python*/site-packages/tvm_ffi/lib \
+    "$runtime_dir"/venv/lib/python*/site-packages/torchaudio/lib \
+    "$runtime_dir"/venv/lib/python*/site-packages/*.libs \
+    "$runtime_dir"/venv/lib/python*/site-packages/nvidia/*/lib
+do
+    [ -d "$omniinfer_library_dir" ] || continue
+    if [ -n "$omniinfer_managed_library_path" ]; then
+        omniinfer_managed_library_path="$omniinfer_managed_library_path:$omniinfer_library_dir"
+    else
+        omniinfer_managed_library_path=$omniinfer_library_dir
+    fi
+done
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    LD_LIBRARY_PATH="$omniinfer_managed_library_path:$LD_LIBRARY_PATH"
+else
+    LD_LIBRARY_PATH=$omniinfer_managed_library_path
+fi
+export LD_LIBRARY_PATH
+unset omniinfer_library_dir omniinfer_managed_library_path
+"#
+    .to_string();
+    if accelerator == "rocm" {
+        environment.push_str(
+            r#"HSA_ENABLE_DXG_DETECTION=1
+CC=/opt/rocm/llvm/bin/clang
+CXX=/opt/rocm/llvm/bin/clang++
+export CC CXX
+PYTHONPATH="$runtime_dir/plugins${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+"#,
+        );
     }
+    environment
+}
+
+fn write_rocm_platform_plugin(wsl: &WslContext, runtime: &str) -> Result<()> {
+    let plugin_root = format!("{runtime}/plugins");
+    let metadata_root =
+        format!("{plugin_root}/omniinfer_vllm_wsl2_rocm-{ROCM_PLATFORM_PLUGIN_VERSION}.dist-info");
+    let metadata = format!(
+        "Metadata-Version: 2.1\n\
+         Name: omniinfer-vllm-wsl2-rocm\n\
+         Version: {ROCM_PLATFORM_PLUGIN_VERSION}\n\
+         Summary: OmniInfer vLLM ROCm platform detection for supported WSL2 GPUs\n"
+    );
+    write_wsl_file(
+        wsl,
+        &format!("{plugin_root}/omniinfer_vllm_wsl2_rocm.py"),
+        ROCM_PLATFORM_PLUGIN.as_bytes(),
+        false,
+    )?;
+    write_wsl_file(
+        wsl,
+        &format!("{metadata_root}/METADATA"),
+        metadata.as_bytes(),
+        false,
+    )?;
+    write_wsl_file(
+        wsl,
+        &format!("{metadata_root}/entry_points.txt"),
+        ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.as_bytes(),
+        false,
+    )?;
+    Ok(())
 }
 
 fn query_nvidia_driver() -> Result<String> {
@@ -1037,13 +1888,34 @@ fn validate_runtime_path(
     reporter: &mut InstallReporter,
 ) -> Result<Value> {
     let python = format!("{runtime}/venv/bin/python");
-    let mut command = Vec::new();
-    if accelerator == "rocm" {
-        command.extend(["env".to_string(), "HSA_ENABLE_DXG_DETECTION=1".to_string()]);
-    }
-    command.extend([python, "-c".to_string(), GPU_PROBE.to_string()]);
-    let output = run_wsl(wsl, command.iter().map(String::as_str), None)
-        .with_context(|| format!("validate managed vLLM runtime {runtime}"))?;
+    validate_native_dependencies(wsl, runtime, reporter)?;
+    let script = r#"set -eu
+runtime=$1
+runtime_dir=$runtime
+python=$2
+probe=$3
+accelerator=$4
+set -a
+. "$runtime/runtime.env"
+set +a
+export OMNIINFER_EXPECTED_ACCELERATOR=$accelerator
+exec "$python" -c "$probe"
+"#;
+    let output = run_wsl(
+        wsl,
+        [
+            "sh",
+            "-c",
+            script,
+            "sh",
+            runtime,
+            &python,
+            GPU_PROBE,
+            accelerator,
+        ],
+        None,
+    )
+    .with_context(|| format!("validate managed vLLM runtime {runtime}"))?;
     append_install_log(&wsl.install_log, "gpu-probe", &output);
     if !output.status.success() {
         anyhow::bail!(
@@ -1084,6 +1956,40 @@ fn validate_runtime_path(
         }),
     );
     Ok(probe)
+}
+
+fn validate_native_dependencies(
+    wsl: &WslContext,
+    runtime: &str,
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let output = run_wsl(
+        wsl,
+        ["sh", "-c", NATIVE_DEPENDENCY_PROBE, "sh", runtime],
+        None,
+    )
+    .with_context(|| format!("validate managed native dependencies {runtime}"))?;
+    append_install_log(&wsl.install_log, "native-dependencies", &output);
+    if !output.status.success() {
+        anyhow::bail!(
+            "managed vLLM native dependency validation failed: {}",
+            decode_output(&output.stderr).trim()
+        );
+    }
+    let checked = decode_output(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("managed native dependency probe returned no count"))?;
+    reporter.event(
+        "native_dependencies_verified",
+        json!({
+            "distribution": wsl.distribution,
+            "runtime": runtime,
+            "extensions_checked": checked,
+        }),
+    );
+    Ok(())
 }
 
 fn ensure_runtime_not_active(wsl: &WslContext, linux_current: &str) -> Result<()> {
@@ -1226,6 +2132,7 @@ fn launcher_manifest_matches(runtime_dir: &Path, expected: &LauncherManifest) ->
                 && actual.wheel_sha256 == expected.wheel_sha256
                 && actual.accelerator == expected.accelerator
                 && actual.runtime_version == expected.runtime_version
+                && actual.runtime_environment_version == expected.runtime_environment_version
                 && actual.linux_launcher == expected.linux_launcher
                 && actual.linux_runner == expected.linux_runner
                 && actual.linux_stopper == expected.linux_stopper
@@ -1332,6 +2239,39 @@ where
     Ok(())
 }
 
+fn run_wsl_as_file_checked<I, S>(
+    wsl: &WslContext,
+    user: Option<&str>,
+    args: I,
+    stdin_path: &Path,
+    reporter: &mut InstallReporter,
+    action: &str,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|value| value.as_ref().to_string())
+        .collect::<Vec<_>>();
+    reporter.event(
+        "command_started",
+        json!({
+            "action": action,
+            "distribution": wsl.distribution,
+            "command": args.first(),
+            "user": user,
+        }),
+    );
+    let output = run_wsl_as_file(wsl, user, args.iter().map(String::as_str), stdin_path)
+        .with_context(|| action.to_string())?;
+    append_install_log(&wsl.install_log, action, &output);
+    require_success(&output, action)?;
+    reporter.event("command_completed", json!({ "action": action }));
+    Ok(())
+}
+
 fn run_wsl<I, S>(wsl: &WslContext, args: I, stdin: Option<&[u8]>) -> Result<Output>
 where
     I: IntoIterator<Item = S>,
@@ -1357,6 +2297,36 @@ where
     full_args.push("--exec".to_string());
     full_args.extend(args.into_iter().map(|value| value.as_ref().to_string()));
     run_command(&wsl.executable, full_args.iter().map(String::as_str), stdin)
+}
+
+fn run_wsl_as_file<I, S>(
+    wsl: &WslContext,
+    user: Option<&str>,
+    args: I,
+    stdin_path: &Path,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut full_args = vec!["--distribution".to_string(), wsl.distribution.clone()];
+    if let Some(user) = user {
+        full_args.extend(["--user".to_string(), user.to_string()]);
+    }
+    full_args.push("--exec".to_string());
+    full_args.extend(args.into_iter().map(|value| value.as_ref().to_string()));
+    let stdin = File::open(stdin_path)
+        .with_context(|| format!("open staged input {}", stdin_path.display()))?;
+    let mut command = Command::new(&wsl.executable);
+    command
+        .args(full_args)
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_child_window(&mut command);
+    command
+        .output()
+        .with_context(|| format!("run {}", wsl.executable.display()))
 }
 
 fn run_wsl_text<I, S>(executable: &Path, distro: &str, args: I) -> Result<String>
@@ -1579,6 +2549,55 @@ mod tests {
         assert!(require_minimum_driver("581.57", "576.02").is_ok());
         let error = require_minimum_driver("575.99", "576.02").unwrap_err();
         assert!(error.to_string().contains("too old"));
+    }
+
+    #[test]
+    fn runtime_environment_exposes_managed_native_libraries() {
+        let cuda = runtime_environment("cuda");
+        assert!(cuda.contains("site-packages/torch/lib"));
+        assert!(cuda.contains("site-packages/nvidia/*/lib"));
+        assert!(cuda.contains("export LD_LIBRARY_PATH"));
+        assert!(!cuda.contains("HSA_ENABLE_DXG_DETECTION"));
+
+        let rocm = runtime_environment("rocm");
+        assert!(rocm.contains("site-packages/torch/lib"));
+        assert!(rocm.contains("HSA_ENABLE_DXG_DETECTION=1"));
+        assert!(rocm.contains("CC=/opt/rocm/llvm/bin/clang"));
+        assert!(rocm.contains("export CC CXX"));
+        assert!(rocm.contains(r#"PYTHONPATH="$runtime_dir/plugins"#));
+    }
+
+    #[test]
+    fn runner_limits_default_rocm_kv_cache_without_overriding_explicit_policy() {
+        assert!(RUNNER_SCRIPT.contains(r#"HSA_ENABLE_DXG_DETECTION:-}" = "1"#));
+        assert!(RUNNER_SCRIPT.contains("--kv-cache-memory-bytes"));
+        assert!(RUNNER_SCRIPT.contains("--gpu-memory-utilization"));
+        assert!(RUNNER_SCRIPT.contains("memory_kib * 1024 / 5"));
+        assert!(RUNNER_SCRIPT.contains("4294967296"));
+    }
+
+    #[test]
+    fn runner_applies_overridable_wsl2_rocm_execution_defaults() {
+        assert!(RUNNER_SCRIPT.contains("--enforce-eager|--no-enforce-eager"));
+        assert!(RUNNER_SCRIPT.contains(
+            "--enable-chunked-prefill|--enable-chunked-prefill=*|--no-enable-chunked-prefill"
+        ));
+        assert!(RUNNER_SCRIPT.contains(r#"set -- "$@" --enforce-eager"#));
+        assert!(RUNNER_SCRIPT.contains(r#"set -- "$@" --no-enable-chunked-prefill"#));
+    }
+
+    #[test]
+    fn rocm_platform_plugin_uses_the_upstream_extension_point() {
+        assert!(ROCM_PLATFORM_PLUGIN.contains("torch.cuda.is_available()"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("_amdsmi_has_gpu()"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("_install_amdsmi_shim(devices)"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("class WslRocmBuffer"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("copy_to_accelerator"));
+        assert!(ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("[vllm.platform_plugins]"));
+        assert!(ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("[vllm.general_plugins]"));
+        assert!(
+            ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("omniinfer_vllm_wsl2_rocm:platform_plugin")
+        );
     }
 
     #[test]
