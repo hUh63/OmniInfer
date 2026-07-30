@@ -22,7 +22,7 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
-const RUNTIME_ENVIRONMENT_VERSION: u32 = 3;
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 4;
 const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.1.0";
 
 const ROCM_PLATFORM_PLUGIN: &str = r#"import os
@@ -277,6 +277,21 @@ fi
 set -a
 . "$runtime/runtime.env"
 set +a
+if [ -n "${CC:-}" ]; then
+    [ -x "$CC" ] || {
+        echo "managed C compiler is not executable: $CC" >&2
+        exit 1
+    }
+    cc_probe="$runtime/run/.cc-probe-$$.so"
+    if ! printf '%s\n' 'int omniinfer_cc_probe(void) { return 0; }' |
+        "$CC" -x c -shared -fPIC -o "$cc_probe" -
+    then
+        echo "managed C compiler probe failed: $CC" >&2
+        rm -f "$cc_probe"
+        exit 1
+    fi
+    rm -f "$cc_probe"
+fi
 checked=0
 missing=0
 for library in \
@@ -1718,6 +1733,9 @@ unset omniinfer_library_dir omniinfer_managed_library_path
     if accelerator == "rocm" {
         environment.push_str(
             r#"HSA_ENABLE_DXG_DETECTION=1
+CC=/opt/rocm/llvm/bin/clang
+CXX=/opt/rocm/llvm/bin/clang++
+export CC CXX
 PYTHONPATH="$runtime_dir/plugins${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 "#,
@@ -2504,6 +2522,8 @@ mod tests {
         let rocm = runtime_environment("rocm");
         assert!(rocm.contains("site-packages/torch/lib"));
         assert!(rocm.contains("HSA_ENABLE_DXG_DETECTION=1"));
+        assert!(rocm.contains("CC=/opt/rocm/llvm/bin/clang"));
+        assert!(rocm.contains("export CC CXX"));
         assert!(rocm.contains(r#"PYTHONPATH="$runtime_dir/plugins"#));
     }
 
