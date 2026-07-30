@@ -524,20 +524,54 @@ fn rocm_detected(host: HostInfo) -> bool {
 }
 
 fn windows_amd_gpu_detected() -> bool {
-    let output = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance Win32_VideoController | ForEach-Object Name",
-        ])
-        .output();
-    output
-        .map(|output| {
-            let names = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-            output.status.success() && (names.contains("amd") || names.contains("radeon"))
-        })
-        .unwrap_or(false)
+    let mut powershell = std::process::Command::new("powershell.exe");
+    powershell.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_VideoController | ForEach-Object Name",
+    ]);
+    hide_child_window(&mut powershell);
+    if powershell
+        .output()
+        .is_ok_and(|output| output.status.success() && output_mentions_amd_gpu(&output.stdout))
+    {
+        return true;
+    }
+
+    let mut registry = std::process::Command::new("reg.exe");
+    registry.args([
+        "query",
+        r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}",
+        "/s",
+        "/v",
+        "DriverDesc",
+    ]);
+    hide_child_window(&mut registry);
+    registry
+        .output()
+        .is_ok_and(|output| output.status.success() && output_mentions_amd_gpu(&output.stdout))
+}
+
+fn output_mentions_amd_gpu(output: &[u8]) -> bool {
+    let names = String::from_utf8_lossy(output).to_ascii_lowercase();
+    names.contains("radeon")
+        || names
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == "amd")
+}
+
+fn hide_child_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
 }
 
 fn vulkan_detected() -> bool {
@@ -1207,6 +1241,24 @@ const IOS_TEMPLATES: &[BackendTemplate] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amd_gpu_output_detection_accepts_vendor_names() {
+        assert!(output_mentions_amd_gpu(
+            b"DriverDesc    REG_SZ    AMD Radeon(TM) 8060S Graphics"
+        ));
+        assert!(output_mentions_amd_gpu(
+            b"Name\nAdvanced Micro Devices Radeon Pro"
+        ));
+    }
+
+    #[test]
+    fn amd_gpu_output_detection_rejects_non_gpu_architecture_text() {
+        assert!(!output_mentions_amd_gpu(
+            b"DriverDesc    REG_SZ    NVIDIA GeForce RTX 4090"
+        ));
+        assert!(!output_mentions_amd_gpu(b"Architecture    REG_SZ    AMD64"));
+    }
 
     #[test]
     fn linux_registry_includes_primary_backends() {
