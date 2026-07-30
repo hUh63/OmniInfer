@@ -14,8 +14,9 @@ use serde_json::{Value, json};
 
 use super::gpu_status::runtime_env_for_backend;
 
-const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(240);
+const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(270);
 const WSL_ROCM_COLD_START_INITIAL_ATTEMPT: Duration = Duration::from_secs(120);
+const WSL_ROCM_COLD_START_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(super) struct RustRuntimeManager {
@@ -535,11 +536,16 @@ fn start_runtime_with_cold_start_policy(
     };
 
     let total_timeout = options.startup_timeout;
-    retry_after_ready_timeout(total_timeout, initial_timeout, |attempt_timeout| {
-        let mut attempt_options = options.clone();
-        attempt_options.startup_timeout = attempt_timeout;
-        RuntimeProcess::start(plan, attempt_options)
-    })
+    retry_after_ready_timeout(
+        total_timeout,
+        initial_timeout,
+        WSL_ROCM_COLD_START_RETRY_COOLDOWN,
+        |attempt_timeout| {
+            let mut attempt_options = options.clone();
+            attempt_options.startup_timeout = attempt_timeout;
+            RuntimeProcess::start(plan, attempt_options)
+        },
+    )
 }
 
 fn wsl_rocm_cold_start_retry_timeout(
@@ -553,18 +559,28 @@ fn wsl_rocm_cold_start_retry_timeout(
 fn retry_after_ready_timeout<T>(
     total_timeout: Duration,
     initial_timeout: Duration,
+    cooldown: Duration,
     mut attempt: impl FnMut(Duration) -> Result<T, RuntimeProcessError>,
 ) -> Result<T, RuntimeProcessError> {
     let started = Instant::now();
     match attempt(initial_timeout) {
         Err(RuntimeProcessError::ReadyTimeout) => {
+            let remaining_before_cooldown = total_timeout.saturating_sub(started.elapsed());
+            if remaining_before_cooldown <= cooldown {
+                return Err(RuntimeProcessError::ReadyTimeout);
+            }
+            eprintln!(
+                "OmniInfer: WSL2 ROCm cold start did not become ready after {} seconds; cooling down for {} seconds before retry",
+                initial_timeout.as_secs(),
+                cooldown.as_secs()
+            );
+            std::thread::sleep(cooldown);
             let remaining = total_timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return Err(RuntimeProcessError::ReadyTimeout);
             }
             eprintln!(
-                "OmniInfer: WSL2 ROCm cold start did not become ready after {} seconds; retrying once with the remaining {} seconds",
-                initial_timeout.as_secs(),
+                "OmniInfer: retrying WSL2 ROCm cold start once with the remaining {} seconds",
                 remaining.as_secs()
             );
             attempt(remaining)
@@ -848,7 +864,7 @@ mod tests {
             Some(Duration::from_secs(120))
         );
         assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(239)),
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(269)),
             None
         );
         assert_eq!(
@@ -861,16 +877,20 @@ mod tests {
     fn ready_timeout_retries_once_with_the_remaining_budget() {
         let total_timeout = Duration::from_secs(300);
         let mut attempts = Vec::new();
-        let result =
-            retry_after_ready_timeout(total_timeout, Duration::from_secs(120), |timeout| {
+        let result = retry_after_ready_timeout(
+            total_timeout,
+            Duration::from_secs(120),
+            Duration::ZERO,
+            |timeout| {
                 attempts.push(timeout);
                 if attempts.len() == 1 {
                     Err(RuntimeProcessError::ReadyTimeout)
                 } else {
                     Ok("ready")
                 }
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert_eq!(result, "ready");
         assert_eq!(attempts.len(), 2);
@@ -882,14 +902,36 @@ mod tests {
     #[test]
     fn cold_start_retry_does_not_mask_early_exit() {
         let mut attempts = 0;
-        let error =
-            retry_after_ready_timeout(Duration::from_secs(300), Duration::from_secs(120), |_| {
+        let error = retry_after_ready_timeout(
+            Duration::from_secs(300),
+            Duration::from_secs(120),
+            Duration::ZERO,
+            |_| {
                 attempts += 1;
                 Err::<(), _>(RuntimeProcessError::EarlyExit)
-            })
-            .unwrap_err();
+            },
+        )
+        .unwrap_err();
 
         assert!(matches!(error, RuntimeProcessError::EarlyExit));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn ready_timeout_does_not_retry_without_post_cooldown_budget() {
+        let mut attempts = 0;
+        let error = retry_after_ready_timeout(
+            Duration::from_millis(1),
+            Duration::ZERO,
+            Duration::from_millis(1),
+            |_| {
+                attempts += 1;
+                Err::<(), _>(RuntimeProcessError::ReadyTimeout)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RuntimeProcessError::ReadyTimeout));
         assert_eq!(attempts, 1);
     }
 }
