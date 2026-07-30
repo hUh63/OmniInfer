@@ -357,6 +357,7 @@ pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::pat
                                         "sha256": key_sha256
                                     },
                                     "packages": {
+                                        "libopenmpi3t64": "4.1.6-7ubuntu2",
                                         "rocm-hip-runtime": "7.2.3.70203-90~24.04",
                                         "rocminfo": "1.0.0.70203-90~24.04"
                                     },

@@ -251,6 +251,7 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
     assert!(invocations.contains("--user\troot\t--exec\tapt-get\tupdate"));
     assert!(invocations.contains("--user\troot\t--exec\t/sbin/ldconfig"));
     assert!(!invocations.contains("--user\troot\t--exec\tldconfig"));
+    assert!(invocations.contains("libopenmpi3t64=4.1.6-7ubuntu2"));
     assert!(invocations.contains("rocm-hip-runtime=7.2.3.70203-90~24.04"));
     assert!(invocations.contains("rocminfo=1.0.0.70203-90~24.04"));
     assert!(invocations.contains("HSA_ENABLE_DXG_DETECTION=1"));
