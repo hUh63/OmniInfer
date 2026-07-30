@@ -236,6 +236,18 @@ pub(super) fn install_wsl_python_runtime(
             system.minimum_windows_release
         ));
     }
+    if variant.reported_version() != variant.version {
+        reporter.human(format!(
+            "  package metadata version: {}",
+            variant.reported_version()
+        ));
+    }
+    if variant.reported_runtime_version() != variant.runtime_version {
+        reporter.human(format!(
+            "  reported accelerator ABI: {}",
+            variant.reported_runtime_version()
+        ));
+    }
     reporter.human(format!("  wheel sha256: {}", variant.sha256));
     reporter.event(
         "compatibility_selected",
@@ -246,9 +258,11 @@ pub(super) fn install_wsl_python_runtime(
             "minimum_driver": variant.minimum_driver,
             "accelerator": variant.accelerator,
             "runtime_version": variant.runtime_version,
+            "reported_runtime_version": variant.reported_runtime_version(),
             "torch_backend": torch_backend,
             "wheel_url": variant.url,
             "package_version": variant.version,
+            "reported_package_version": variant.reported_version(),
             "wheel_sha256": variant.sha256,
             "linux_runtime": linux_current,
         }),
@@ -259,9 +273,9 @@ pub(super) fn install_wsl_python_runtime(
         && validate_installed_runtime(
             &wsl,
             &linux_current,
-            &variant.version,
+            variant.reported_version(),
             &variant.accelerator,
-            &variant.runtime_version,
+            variant.reported_runtime_version(),
             reporter,
         )
         .is_ok()
@@ -316,6 +330,8 @@ pub(super) fn install_wsl_python_runtime(
                 "linux_runtime": linux_current,
                 "wheel_url": variant.url,
                 "package_version": variant.version,
+                "reported_package_version": variant.reported_version(),
+                "reported_runtime_version": variant.reported_runtime_version(),
                 "wheel_sha256": variant.sha256,
             }),
         );
@@ -476,9 +492,11 @@ pub(super) fn install_wsl_python_runtime(
             "uv_sha256": uv.sha256,
             "wheel_url": variant.url,
             "package_version": variant.version,
+            "reported_package_version": variant.reported_version(),
             "wheel_sha256": variant.sha256,
             "accelerator": variant.accelerator,
             "runtime_version": variant.runtime_version,
+            "reported_runtime_version": variant.reported_runtime_version(),
             "torch_backend": torch_backend,
             "minimum_driver": variant.minimum_driver,
             "driver": driver,
@@ -495,9 +513,9 @@ pub(super) fn install_wsl_python_runtime(
         validate_runtime_path(
             &wsl,
             &linux_staging,
-            &variant.version,
+            variant.reported_version(),
             &variant.accelerator,
-            &variant.runtime_version,
+            variant.reported_runtime_version(),
             reporter,
         )?;
         activate_runtime(
@@ -511,9 +529,9 @@ pub(super) fn install_wsl_python_runtime(
         if let Err(error) = validate_runtime_path(
             &wsl,
             &linux_current,
-            &variant.version,
+            variant.reported_version(),
             &variant.accelerator,
-            &variant.runtime_version,
+            variant.reported_runtime_version(),
             reporter,
         ) {
             rollback_runtime(&wsl, &linux_current, &linux_backup, reporter)?;

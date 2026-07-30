@@ -398,8 +398,10 @@ pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::pat
                         "variants": {
                             "x86_64": {
                                 "version": "0.26.0+rocm723",
+                                "reported_version": "0.26.0",
                                 "accelerator": "rocm",
                                 "runtime_version": "7.2.3",
+                                "reported_runtime_version": "7.2.53211",
                                 "torch_backend": "rocm723",
                                 "build_commit": "f2654939e69b4069b13977e9aef3e31d4dcaf051",
                                 "index_url": "https://wheels.vllm.ai/rocm/f2654939e69b4069b13977e9aef3e31d4dcaf051/rocm723",

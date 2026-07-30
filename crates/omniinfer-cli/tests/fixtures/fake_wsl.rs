@@ -172,7 +172,7 @@ fn handle_env(command: &[String]) {
             fail("injected current runtime probe failure");
         }
         println!(
-            r#"{{"vllm_version":"0.26.0+rocm723","torch_version":"2.11.0+rocm7.2.3","torch_cuda":null,"torch_hip":"7.2.3","device":"Fake AMD Radeon 8060S","value":1.0}}"#
+            r#"{{"vllm_version":"0.26.0","torch_version":"2.11.0+rocm7.2.3","torch_cuda":null,"torch_hip":"7.2.53211","device":"Fake AMD Radeon 8060S","value":1.0}}"#
         );
         return;
     }

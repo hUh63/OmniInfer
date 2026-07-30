@@ -101,8 +101,10 @@ pub(crate) struct ToolAsset {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct PythonRuntimeVariant {
     pub(crate) version: String,
+    pub(crate) reported_version: Option<String>,
     pub(crate) accelerator: String,
     pub(crate) runtime_version: String,
+    pub(crate) reported_runtime_version: Option<String>,
     pub(crate) torch_backend: Option<String>,
     pub(crate) minimum_driver: Option<String>,
     pub(crate) build_commit: Option<String>,
@@ -110,6 +112,18 @@ pub(crate) struct PythonRuntimeVariant {
     pub(crate) rocm_system: Option<RocmSystemRuntime>,
     pub(crate) url: String,
     pub(crate) sha256: String,
+}
+
+impl PythonRuntimeVariant {
+    pub(crate) fn reported_version(&self) -> &str {
+        self.reported_version.as_deref().unwrap_or(&self.version)
+    }
+
+    pub(crate) fn reported_runtime_version(&self) -> &str {
+        self.reported_runtime_version
+            .as_deref()
+            .unwrap_or(&self.runtime_version)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -355,7 +369,12 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                     || !variant
                         .version
                         .starts_with(entry.tag.trim_start_matches('v'))
+                    || variant.reported_version().trim().is_empty()
+                    || !variant
+                        .reported_version()
+                        .starts_with(entry.tag.trim_start_matches('v'))
                     || variant.runtime_version.trim().is_empty()
+                    || variant.reported_runtime_version().trim().is_empty()
                 {
                     anyhow::bail!(
                         "{platform}/{backend} {architecture} has invalid accelerator compatibility metadata"

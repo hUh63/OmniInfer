@@ -235,6 +235,14 @@ fn backend_install_vllm_wsl2_rocm_pins_system_runtime_and_gpu_probe() {
             "missing event {event}"
         );
     }
+    let compatibility = events
+        .iter()
+        .find(|row| row["event"] == "compatibility_selected")
+        .expect("compatibility event");
+    assert_eq!(compatibility["package_version"], "0.26.0+rocm723");
+    assert_eq!(compatibility["reported_package_version"], "0.26.0");
+    assert_eq!(compatibility["runtime_version"], "7.2.3");
+    assert_eq!(compatibility["reported_runtime_version"], "7.2.53211");
     let manifest_path = runtime_root
         .join("vllm-wsl2-rocm")
         .join("bin")

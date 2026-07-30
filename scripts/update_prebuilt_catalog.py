@@ -127,6 +127,16 @@ def validate(
                     errors.append(
                         f"{platform}/{backend} {architecture}: Python package version must match {entry.get('tag')!r}"
                     )
+                reported_version = variant.get("reported_version", version)
+                if (
+                    not isinstance(reported_version, str)
+                    or not reported_version
+                    or not reported_version.startswith(expected_base)
+                ):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: reported Python package version "
+                        f"must match {entry.get('tag')!r}"
+                    )
                 accelerator = variant.get("accelerator")
                 if accelerator not in ("cuda", "rocm"):
                     errors.append(
@@ -135,6 +145,17 @@ def validate(
                 if not isinstance(variant.get("runtime_version"), str):
                     errors.append(
                         f"{platform}/{backend} {architecture}: runtime_version is required"
+                    )
+                reported_runtime_version = variant.get(
+                    "reported_runtime_version", variant.get("runtime_version")
+                )
+                if (
+                    not isinstance(reported_runtime_version, str)
+                    or not reported_runtime_version
+                ):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: "
+                        "reported_runtime_version must be a non-empty string"
                     )
                 if accelerator == "cuda" and not isinstance(
                     variant.get("minimum_driver"), str
