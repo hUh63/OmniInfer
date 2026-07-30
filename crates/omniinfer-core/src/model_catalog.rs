@@ -335,6 +335,7 @@ fn is_gpu_backend(backend_id: &str) -> bool {
             | "ik_llama.cpp-linux-cuda"
             | "vllm-linux-cuda"
             | "vllm-wsl2-cuda"
+            | "vllm-wsl2-rocm"
             | "llama.cpp-cuda"
             | "llama.cpp-vulkan"
             | "llama.cpp-sycl"

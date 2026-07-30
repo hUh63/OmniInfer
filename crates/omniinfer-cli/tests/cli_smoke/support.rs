@@ -276,7 +276,8 @@ pub(super) fn write_wsl_python_runtime_fixture(root: &std::path::Path) -> std::p
                         "variants": {
                             "x86_64": {
                                 "version": "0.24.0+cu129",
-                                "cuda": "12.9",
+                                "accelerator": "cuda",
+                                "runtime_version": "12.9",
                                 "torch_backend": "cu129",
                                 "minimum_driver": "576.02",
                                 "url": "https://github.com/vllm-project/vllm/releases/download/v0.24.0/fake.whl",
@@ -291,6 +292,92 @@ pub(super) fn write_wsl_python_runtime_fixture(root: &std::path::Path) -> std::p
         .expect("serialize WSL Python catalog"),
     )
     .expect("write WSL Python catalog");
+    catalog
+}
+
+#[cfg(windows)]
+pub(super) fn write_wsl_rocm_runtime_fixture(root: &std::path::Path) -> std::path::PathBuf {
+    use sha2::Digest;
+
+    let catalog = write_wsl_python_runtime_fixture(root);
+    let fixture = root.join("wsl-python-fixture");
+    let archive = fixture.join("uv.tar.gz");
+    let uv_sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(fs::read(&archive).expect("read fake uv archive"))
+    );
+    let key = fixture.join("rocm.gpg.key");
+    let rocdxg = fixture.join("rocdxg.deb");
+    fs::write(&key, b"fake verified ROCm key").expect("write fake ROCm key");
+    fs::write(&rocdxg, b"fake verified ROCDXG package").expect("write fake ROCDXG");
+    let key_sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(fs::read(&key).expect("read fake ROCm key"))
+    );
+    let rocdxg_sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(fs::read(&rocdxg).expect("read fake ROCDXG"))
+    );
+    fs::write(
+        &catalog,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 2,
+            "mirrors": [],
+            "sources": {},
+            "python_runtimes": {
+                "windows": {
+                    "vllm-wsl2-rocm": {
+                        "source": "vllm-project/vllm",
+                        "tag": "v0.26.0",
+                        "package": "vllm",
+                        "python": "3.12",
+                        "launcher": "vllm",
+                        "uv": {
+                            "x86_64": {
+                                "version": "0.11.16",
+                                "url": format!("file://{}", archive.display()),
+                                "sha256": uv_sha256
+                            }
+                        },
+                        "variants": {
+                            "x86_64": {
+                                "version": "0.26.0+rocm723",
+                                "accelerator": "rocm",
+                                "runtime_version": "7.2.3",
+                                "torch_backend": "rocm723",
+                                "build_commit": "f2654939e69b4069b13977e9aef3e31d4dcaf051",
+                                "index_url": "https://wheels.vllm.ai/rocm/f2654939e69b4069b13977e9aef3e31d4dcaf051/rocm723",
+                                "url": "https://wheels.vllm.ai/rocm/f2654939e69b4069b13977e9aef3e31d4dcaf051/fake.whl",
+                                "sha256": "2".repeat(64),
+                                "rocm_system": {
+                                    "apt_repository": "https://repo.radeon.com/rocm/apt/7.2.3 noble main",
+                                    "repository_key": {
+                                        "version": "7.2.3",
+                                        "url": format!("file://{}", key.display()),
+                                        "sha256": key_sha256
+                                    },
+                                    "packages": {
+                                        "rocm-hip-runtime": "7.2.3.70203-90~24.04",
+                                        "rocminfo": "1.0.0.70203-90~24.04"
+                                    },
+                                    "rocdxg": {
+                                        "version": "1.2.0",
+                                        "url": format!("file://{}", rocdxg.display()),
+                                        "sha256": rocdxg_sha256
+                                    },
+                                    "required_gfx": ["gfx1151", "gfx1150"],
+                                    "minimum_windows_release": "26.2.2"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "platforms": {}
+        }))
+        .expect("serialize WSL ROCm catalog"),
+    )
+    .expect("write WSL ROCm catalog");
     catalog
 }
 

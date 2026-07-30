@@ -254,6 +254,7 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "llama.cpp-linux-s390x" => 1,
         "vllm-linux-cuda" => 2,
         "vllm-wsl2-cuda" => 2,
+        "vllm-wsl2-rocm" => 2,
         "llama.cpp-cpu" => 1,
         "llama.cpp-windows-arm64" => 1,
         "llama.cpp-ios" => 0,
@@ -484,7 +485,7 @@ fn is_hardware_compatible(host: HostInfo, spec: &BackendSpec) -> bool {
         return cuda_detected();
     }
     if caps.contains(&"rocm") || caps.contains(&"hip") {
-        return rocm_detected();
+        return rocm_detected(host);
     }
     if caps.contains(&"metal") {
         return host.system == HostSystem::Mac || host.system == HostSystem::Ios;
@@ -511,11 +512,31 @@ fn cuda_detected() -> bool {
         .unwrap_or(false)
 }
 
-fn rocm_detected() -> bool {
+fn rocm_detected(host: HostInfo) -> bool {
+    if host.system == HostSystem::Windows {
+        return windows_amd_gpu_detected();
+    }
     std::process::Command::new("rocm-smi")
         .arg("--showmeminfo")
         .output()
         .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn windows_amd_gpu_detected() -> bool {
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | ForEach-Object Name",
+        ])
+        .output();
+    output
+        .map(|output| {
+            let names = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+            output.status.success() && (names.contains("amd") || names.contains("radeon"))
+        })
         .unwrap_or(false)
 }
 
@@ -641,6 +662,7 @@ fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
             "llama.cpp-hip",
             "ik_llama.cpp-cuda",
             "vllm-wsl2-cuda",
+            "vllm-wsl2-rocm",
         ],
         _ => &[],
     }
@@ -1012,6 +1034,31 @@ const WINDOWS_TEMPLATES: &[BackendTemplate] = &[
             "OMNIINFER_VLLM_WSL2_CUDA",
         )
     },
+    BackendTemplate {
+        model_artifact: "reference",
+        supports_mmproj: false,
+        external_server_protocol: Some("vllm-wsl2-openai-server"),
+        log_file_name: "vllm-wsl2-rocm-server.log",
+        ..template(
+            "vllm-wsl2-rocm",
+            "vLLM WSL2 ROCm",
+            "vllm",
+            "vllm-wsl2-rocm",
+            Some("vllm-wsl2.json"),
+            "Official vLLM Linux ROCm runtime for Ryzen AI managed by OmniInfer through WSL2",
+            &[
+                "chat",
+                "stream",
+                "gpu",
+                "rocm",
+                "amd",
+                "windows",
+                "wsl2",
+                "openai-compatible",
+            ],
+            "OMNIINFER_VLLM_WSL2_ROCM",
+        )
+    },
 ];
 
 const MAC_TEMPLATES: &[BackendTemplate] = &[
@@ -1236,6 +1283,20 @@ mod tests {
         assert!(
             gpu_backend_ids(registry.host).contains(&backend.id.as_str()),
             "managed WSL2 vLLM must participate in Windows GPU detection"
+        );
+        let rocm = registry.get("vllm-wsl2-rocm").unwrap();
+        assert_eq!(rocm.family, "vllm");
+        assert_eq!(rocm.model_artifact, "reference");
+        assert!(!rocm.supports_mmproj);
+        for capability in ["gpu", "rocm", "amd", "windows", "wsl2", "openai-compatible"] {
+            assert!(
+                rocm.capabilities.iter().any(|value| value == capability),
+                "missing capability {capability}"
+            );
+        }
+        assert!(
+            gpu_backend_ids(registry.host).contains(&rocm.id.as_str()),
+            "managed WSL2 ROCm vLLM must participate in Windows GPU detection"
         );
     }
 

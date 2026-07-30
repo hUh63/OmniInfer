@@ -1023,6 +1023,117 @@ fn windows_vllm_wsl2_install_and_smoke_cover_managed_lifecycle() {
     fs::remove_dir_all(fake_root).ok();
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_vllm_wsl2_rocm_smoke_stops_process_tree_and_releases_ports() {
+    let source_root = temp_repo_root("serve-vllm-wsl2-rocm-source");
+    let state_root = temp_repo_root("serve-vllm-wsl2-rocm-state");
+    let runtime_root = temp_repo_root("serve-vllm-wsl2-rocm-runtime");
+    let fake_root = temp_repo_root("serve-vllm-wsl2-rocm-fake");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create state config");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        r#"{"host":"127.0.0.1","startup_timeout":10}"#,
+    )
+    .expect("write state config");
+    let fake_wsl = compile_fake_wsl(&state_root.join("tools"));
+    let catalog = write_wsl_rocm_runtime_fixture(&state_root);
+
+    let mut install = Command::cargo_bin("omniinfer").expect("binary exists");
+    install
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_PREBUILT_CATALOG", &catalog)
+        .env("OMNIINFER_WSL_EXE", &fake_wsl)
+        .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+        .args([
+            "backend",
+            "install",
+            "vllm-wsl2-rocm",
+            "--wsl-distro",
+            "Ubuntu-24.04",
+            "--state-root",
+        ])
+        .arg(&state_root)
+        .arg("--runtime-root")
+        .arg(&runtime_root)
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"completed\""));
+
+    let gateway_port = free_port();
+    let mut backend_port = free_port();
+    while backend_port == gateway_port {
+        backend_port = free_port();
+    }
+    let stdout_path = state_root.join("vllm-rocm-smoke.stdout.txt");
+    let stderr_path = state_root.join("vllm-rocm-smoke.stderr.txt");
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin("omniinfer"));
+    command
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_WSL_EXE", &fake_wsl)
+        .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
+        .args([
+            "serve",
+            "--smoke-test",
+            "--backend",
+            "vllm-wsl2-rocm",
+            "--model",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "--backend-port",
+        ])
+        .arg(backend_port.to_string())
+        .arg("--port")
+        .arg(gateway_port.to_string())
+        .arg("--state-root")
+        .arg(&state_root)
+        .arg("--runtime-root")
+        .arg(&runtime_root)
+        .stdout(Stdio::from(
+            fs::File::create(&stdout_path).expect("create smoke stdout"),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(&stderr_path).expect("create smoke stderr"),
+        ));
+    let mut child = command.spawn().expect("spawn ROCm WSL2 smoke test");
+    let Some(status) = wait_for_process_exit(&mut child, Duration::from_secs(30)) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("ROCm WSL2 smoke test did not exit");
+    };
+    let stdout = fs::read_to_string(&stdout_path).expect("read smoke stdout");
+    let stderr = fs::read_to_string(&stderr_path).expect("read smoke stderr");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "ROCm WSL2 smoke failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("Smoke: fake vLLM WSL2"));
+    assert!(stdout.contains("Smoke test cleanup complete"));
+    assert!(wait_for_port_closed(gateway_port));
+    assert!(wait_for_port_closed(backend_port));
+    assert!(
+        !state_root
+            .join(".local")
+            .join("run")
+            .join(format!("serve-{gateway_port}.json"))
+            .exists()
+    );
+    let invocations =
+        fs::read_to_string(fake_root.join("invocations.log")).expect("read fake WSL invocations");
+    assert!(invocations.contains("HSA_ENABLE_DXG_DETECTION=1"));
+    assert!(invocations.contains("/omniinfer-vllm-stop"));
+    assert!(!invocations.contains("--terminate"));
+
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+    fs::remove_dir_all(runtime_root).ok();
+    fs::remove_dir_all(fake_root).ok();
+}
+
 #[test]
 fn serve_rejects_an_occupied_port_before_spawning_gateway() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind occupied port");

@@ -11,16 +11,26 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::backend_installer::{InstallReporter, download_verified_asset};
-use crate::prebuilt_catalog::{PrebuiltCatalog, PythonRuntimeEntry};
+use crate::prebuilt_catalog::{
+    PrebuiltCatalog, PythonRuntimeEntry, PythonRuntimeVariant, RocmSystemRuntime,
+};
 
-const BACKEND_ID: &str = "vllm-wsl2-cuda";
+const CUDA_BACKEND_ID: &str = "vllm-wsl2-cuda";
+const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
+const RUNTIME_ENV: &str = "runtime.env";
 
 const RUNNER_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 pid_file=$1
 shift
+runtime_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -f "$runtime_dir/runtime.env" ]; then
+    set -a
+    . "$runtime_dir/runtime.env"
+    set +a
+fi
 mkdir -p "$(dirname "$pid_file")"
 if [ -s "$pid_file" ]; then
     old_pid=$(cat "$pid_file")
@@ -87,6 +97,7 @@ print(json.dumps({
     "vllm_version": vllm.__version__,
     "torch_version": torch.__version__,
     "torch_cuda": torch.version.cuda,
+    "torch_hip": torch.version.hip,
     "device": torch.cuda.get_device_name(0),
     "value": float(x.item()),
 }))
@@ -109,6 +120,8 @@ struct LauncherManifest {
     uv_sha256: String,
     package_version: String,
     wheel_sha256: String,
+    accelerator: String,
+    runtime_version: String,
 }
 
 #[derive(Debug)]
@@ -140,13 +153,13 @@ pub(super) fn install_wsl_python_runtime(
     reporter: &mut InstallReporter,
     catalog: &PrebuiltCatalog,
 ) -> Result<()> {
-    if backend != BACKEND_ID {
+    if !matches!(backend, CUDA_BACKEND_ID | ROCM_BACKEND_ID) {
         anyhow::bail!("unsupported managed WSL2 backend: {backend}");
     }
     if std::env::consts::OS != "windows"
         && std::env::var_os("OMNIINFER_TEST_WSL_PLATFORM").is_none()
     {
-        anyhow::bail!("vllm-wsl2-cuda is supported only by the Windows OmniInfer CLI");
+        anyhow::bail!("{backend} is supported only by the Windows OmniInfer CLI");
     }
     let architecture = "x86_64";
     let uv = entry
@@ -157,11 +170,26 @@ pub(super) fn install_wsl_python_runtime(
         .variants
         .get(architecture)
         .ok_or_else(|| anyhow::anyhow!("{backend} has no managed vLLM wheel for {architecture}"))?;
-    let driver = query_nvidia_driver()?;
-    require_minimum_driver(&driver, &variant.minimum_driver)?;
+    validate_backend_accelerator(backend, variant)?;
+    let torch_backend = variant
+        .torch_backend
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{backend} has no pinned PyTorch accelerator index"))?;
     let mut wsl = detect_wsl_context(requested_distro)?;
     wsl.install_log = runtime_dir.join("logs").join("install.log");
-    validate_wsl_gpu(&wsl)?;
+    let driver = if variant.accelerator == "cuda" {
+        let driver = query_nvidia_driver()?;
+        let minimum_driver = variant
+            .minimum_driver
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("{backend} has no minimum NVIDIA driver"))?;
+        require_minimum_driver(&driver, minimum_driver)?;
+        validate_wsl_cuda_gpu(&wsl)?;
+        Some(driver)
+    } else {
+        validate_rocm_distro(&wsl)?;
+        None
+    };
     let runtime_key = runtime_key(runtime_dir);
     let linux_base = format!(
         "{}/.local/share/omniinfer/runtimes/{backend}/{runtime_key}",
@@ -184,17 +212,28 @@ pub(super) fn install_wsl_python_runtime(
         uv_sha256: uv.sha256.clone(),
         package_version: variant.version.clone(),
         wheel_sha256: variant.sha256.clone(),
+        accelerator: variant.accelerator.clone(),
+        runtime_version: variant.runtime_version.clone(),
     };
 
     reporter.human(format!("Managed WSL2 Python runtime: windows/{backend}"));
     reporter.human(format!("  distribution: {}", wsl.distribution));
     reporter.human(format!("  Windows runtime: {}", runtime_dir.display()));
     reporter.human(format!("  Linux runtime: {linux_current}"));
-    reporter.human(format!("  NVIDIA driver: {driver}"));
+    if let Some(driver) = driver.as_deref() {
+        reporter.human(format!("  NVIDIA driver: {driver}"));
+    }
     reporter.human(format!(
-        "  selected CUDA ABI: {} ({})",
-        variant.cuda, variant.torch_backend
+        "  selected {} runtime: {} ({torch_backend})",
+        variant.accelerator.to_ascii_uppercase(),
+        variant.runtime_version,
     ));
+    if let Some(system) = variant.rocm_system.as_ref() {
+        reporter.human(format!(
+            "  minimum AMD Software release: {}",
+            system.minimum_windows_release
+        ));
+    }
     reporter.human(format!("  wheel sha256: {}", variant.sha256));
     reporter.event(
         "compatibility_selected",
@@ -203,8 +242,9 @@ pub(super) fn install_wsl_python_runtime(
             "distribution": wsl.distribution,
             "driver": driver,
             "minimum_driver": variant.minimum_driver,
-            "cuda": variant.cuda,
-            "torch_backend": variant.torch_backend,
+            "accelerator": variant.accelerator,
+            "runtime_version": variant.runtime_version,
+            "torch_backend": torch_backend,
             "wheel_url": variant.url,
             "package_version": variant.version,
             "wheel_sha256": variant.sha256,
@@ -213,11 +253,13 @@ pub(super) fn install_wsl_python_runtime(
     );
 
     if launcher_manifest_matches(runtime_dir, &expected)
+        && validate_existing_system_runtime(&wsl, variant, reporter).is_ok()
         && validate_installed_runtime(
             &wsl,
             &linux_current,
             &variant.version,
-            &variant.cuda,
+            &variant.accelerator,
+            &variant.runtime_version,
             reporter,
         )
         .is_ok()
@@ -246,6 +288,24 @@ pub(super) fn install_wsl_python_runtime(
                 "expected_sha256": uv.sha256,
             }),
         );
+        if let Some(system) = variant.rocm_system.as_ref() {
+            reporter.event(
+                "asset_planned",
+                json!({
+                    "role": "ROCm repository key",
+                    "url": system.repository_key.url,
+                    "expected_sha256": system.repository_key.sha256,
+                }),
+            );
+            reporter.event(
+                "asset_planned",
+                json!({
+                    "role": "ROCDXG runtime",
+                    "url": system.rocdxg.url,
+                    "expected_sha256": system.rocdxg.sha256,
+                }),
+            );
+        }
         reporter.event(
             "dry_run_completed",
             json!({
@@ -290,6 +350,10 @@ pub(super) fn install_wsl_python_runtime(
         reporter,
         "prepare WSL runtime directories",
     )?;
+    if let Some(system) = variant.rocm_system.as_ref() {
+        ensure_rocm_system_runtime(&wsl, system, catalog, reporter)?;
+        validate_wsl_rocm_gpu(&wsl, system)?;
+    }
     run_wsl_checked(
         &wsl,
         ["cp", wsl_uv_source.as_str(), linux_uv.as_str()],
@@ -336,20 +400,37 @@ pub(super) fn install_wsl_python_runtime(
             "create managed WSL Python environment",
         )?;
         let requirement = format!("{}#sha256={}", variant.url, variant.sha256);
+        let python = format!("{linux_staging}/venv/bin/python");
+        let mut install_args = vec![
+            linux_uv.clone(),
+            "pip".to_string(),
+            "install".to_string(),
+            "--python".to_string(),
+            python,
+        ];
+        if variant.accelerator == "cuda" {
+            install_args.extend([
+                "--torch-backend".to_string(),
+                torch_backend.to_string(),
+                "--index-strategy".to_string(),
+                "first-index".to_string(),
+            ]);
+        } else {
+            let index_url = variant
+                .index_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("{backend} has no pinned ROCm wheel index"))?;
+            install_args.extend([
+                "--extra-index-url".to_string(),
+                index_url.to_string(),
+                "--index-strategy".to_string(),
+                "unsafe-best-match".to_string(),
+            ]);
+        }
+        install_args.push(requirement);
         run_wsl_checked(
             &wsl,
-            [
-                linux_uv.as_str(),
-                "pip",
-                "install",
-                "--python",
-                format!("{linux_staging}/venv/bin/python").as_str(),
-                "--torch-backend",
-                variant.torch_backend.as_str(),
-                "--index-strategy",
-                "first-index",
-                requirement.as_str(),
-            ],
+            install_args.iter().map(String::as_str),
             reporter,
             "install pinned vLLM wheel",
         )?;
@@ -377,6 +458,12 @@ pub(super) fn install_wsl_python_runtime(
             STOPPER_SCRIPT.as_bytes(),
             true,
         )?;
+        write_wsl_file(
+            &wsl,
+            &format!("{linux_staging}/{RUNTIME_ENV}"),
+            runtime_environment(variant).as_bytes(),
+            false,
+        )?;
         let managed_manifest = json!({
             "schema_version": 1,
             "backend": backend,
@@ -388,10 +475,14 @@ pub(super) fn install_wsl_python_runtime(
             "wheel_url": variant.url,
             "package_version": variant.version,
             "wheel_sha256": variant.sha256,
-            "cuda": variant.cuda,
-            "torch_backend": variant.torch_backend,
+            "accelerator": variant.accelerator,
+            "runtime_version": variant.runtime_version,
+            "torch_backend": torch_backend,
             "minimum_driver": variant.minimum_driver,
             "driver": driver,
+            "build_commit": variant.build_commit,
+            "index_url": variant.index_url,
+            "rocm_system": variant.rocm_system,
         });
         write_wsl_file(
             &wsl,
@@ -403,7 +494,8 @@ pub(super) fn install_wsl_python_runtime(
             &wsl,
             &linux_staging,
             &variant.version,
-            &variant.cuda,
+            &variant.accelerator,
+            &variant.runtime_version,
             reporter,
         )?;
         activate_runtime(
@@ -418,7 +510,8 @@ pub(super) fn install_wsl_python_runtime(
             &wsl,
             &linux_current,
             &variant.version,
-            &variant.cuda,
+            &variant.accelerator,
+            &variant.runtime_version,
             reporter,
         ) {
             rollback_runtime(&wsl, &linux_current, &linux_backup, reporter)?;
@@ -458,7 +551,7 @@ fn detect_wsl_context(requested_distro: Option<&str>) -> Result<WslContext> {
         .with_context(|| format!("run {} --list --quiet", executable.display()))?;
     if !quiet.status.success() {
         anyhow::bail!(
-            "WSL is unavailable. Enable WSL2 and install Ubuntu before installing {BACKEND_ID}: {}",
+            "WSL is unavailable. Enable WSL2 and install Ubuntu before installing a managed vLLM backend: {}",
             decode_output(&quiet.stderr).trim()
         );
     }
@@ -527,7 +620,7 @@ fn detect_wsl_context(requested_distro: Option<&str>) -> Result<WslContext> {
     let arch = run_wsl_text(&executable, &distribution, ["uname", "-m"])?;
     if arch.trim() != "x86_64" {
         anyhow::bail!(
-            "{BACKEND_ID} requires an x86_64 WSL2 distribution, found {}",
+            "managed vLLM requires an x86_64 WSL2 distribution, found {}",
             arch.trim()
         );
     }
@@ -540,7 +633,7 @@ fn detect_wsl_context(requested_distro: Option<&str>) -> Result<WslContext> {
     })
 }
 
-fn validate_wsl_gpu(wsl: &WslContext) -> Result<()> {
+fn validate_wsl_cuda_gpu(wsl: &WslContext) -> Result<()> {
     let output = run_wsl(
         wsl,
         [
@@ -559,6 +652,307 @@ fn validate_wsl_gpu(wsl: &WslContext) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_backend_accelerator(backend: &str, variant: &PythonRuntimeVariant) -> Result<()> {
+    let expected = match backend {
+        CUDA_BACKEND_ID => "cuda",
+        ROCM_BACKEND_ID => "rocm",
+        _ => anyhow::bail!("unsupported managed WSL2 backend: {backend}"),
+    };
+    if variant.accelerator != expected {
+        anyhow::bail!(
+            "{backend} catalog accelerator mismatch: expected {expected}, found {}",
+            variant.accelerator
+        );
+    }
+    Ok(())
+}
+
+fn validate_rocm_distro(wsl: &WslContext) -> Result<()> {
+    let release = run_wsl_text(
+        &wsl.executable,
+        &wsl.distribution,
+        [
+            "sh",
+            "-c",
+            ". /etc/os-release; printf '%s %s' \"$ID\" \"$VERSION_ID\"",
+        ],
+    )
+    .context("query WSL2 Linux release for ROCm")?;
+    if release.trim() != "ubuntu 24.04" {
+        anyhow::bail!(
+            "{ROCM_BACKEND_ID} requires an Ubuntu 24.04 WSL2 distribution because its ROCm packages are pinned to noble; found {release:?}"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_rocm_system_runtime(
+    wsl: &WslContext,
+    system: &RocmSystemRuntime,
+    catalog: &PrebuiltCatalog,
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let repository_key = download_verified_asset(
+        catalog,
+        &system.repository_key.url,
+        &system.repository_key.sha256,
+        "ROCm repository key",
+        reporter,
+    )?;
+    let rocdxg = download_verified_asset(
+        catalog,
+        &system.rocdxg.url,
+        &system.rocdxg.sha256,
+        "ROCDXG runtime",
+        reporter,
+    )?;
+    let key_source = format!(
+        "/var/cache/omniinfer/rocm-{}.asc",
+        system.repository_key.sha256
+    );
+    let rocdxg_source = format!("/var/cache/omniinfer/rocdxg-{}.deb", system.rocdxg.sha256);
+    let key_output = format!("of={key_source}");
+    let rocdxg_output = format!("of={rocdxg_source}");
+
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        [
+            "install",
+            "-d",
+            "-m",
+            "0755",
+            "/etc/apt/keyrings",
+            "/var/cache/omniinfer",
+        ],
+        None,
+        reporter,
+        "prepare protected ROCm system directories",
+    )?;
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        ["dd", key_output.as_str(), "status=none"],
+        Some(&repository_key),
+        reporter,
+        "stage verified ROCm repository key",
+    )?;
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        ["dd", rocdxg_output.as_str(), "status=none"],
+        Some(&rocdxg),
+        reporter,
+        "stage verified ROCDXG runtime",
+    )?;
+    verify_wsl_sha256(
+        wsl,
+        &key_source,
+        &system.repository_key.sha256,
+        "ROCm repository key",
+    )?;
+    verify_wsl_sha256(wsl, &rocdxg_source, &system.rocdxg.sha256, "ROCDXG runtime")?;
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        [
+            "install",
+            "-m",
+            "0644",
+            key_source.as_str(),
+            "/etc/apt/keyrings/omniinfer-rocm.asc",
+        ],
+        None,
+        reporter,
+        "install verified ROCm repository key",
+    )?;
+    let apt_source = format!(
+        "deb [arch=amd64 signed-by=/etc/apt/keyrings/omniinfer-rocm.asc] {}\n",
+        system.apt_repository
+    );
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        ["tee", "/etc/apt/sources.list.d/omniinfer-rocm.list"],
+        Some(apt_source.as_bytes()),
+        reporter,
+        "configure pinned ROCm apt repository",
+    )?;
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        ["apt-get", "update"],
+        None,
+        reporter,
+        "refresh ROCm package metadata",
+    )?;
+    let hip_version = required_rocm_package(system, "rocm-hip-runtime")?;
+    let rocminfo_version = required_rocm_package(system, "rocminfo")?;
+    let hip_requirement = format!("rocm-hip-runtime={hip_version}");
+    let rocminfo_requirement = format!("rocminfo={rocminfo_version}");
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        [
+            "env",
+            "DEBIAN_FRONTEND=noninteractive",
+            "apt-get",
+            "install",
+            "--no-install-recommends",
+            "--allow-downgrades",
+            "-y",
+            hip_requirement.as_str(),
+            rocminfo_requirement.as_str(),
+        ],
+        None,
+        reporter,
+        "install pinned ROCm runtime packages",
+    )?;
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        ["dpkg", "-i", rocdxg_source.as_str()],
+        None,
+        reporter,
+        "install verified ROCDXG runtime",
+    )?;
+    run_wsl_as_checked(
+        wsl,
+        Some("root"),
+        ["ldconfig"],
+        None,
+        reporter,
+        "refresh ROCm runtime linker cache",
+    )?;
+    let installed = validate_rocm_system_versions(wsl, system)?;
+    reporter.event(
+        "system_runtime_verified",
+        json!({
+            "accelerator": "rocm",
+            "packages": installed.lines().collect::<Vec<_>>(),
+        }),
+    );
+    Ok(())
+}
+
+fn validate_existing_system_runtime(
+    wsl: &WslContext,
+    variant: &PythonRuntimeVariant,
+    reporter: &mut InstallReporter,
+) -> Result<()> {
+    let Some(system) = variant.rocm_system.as_ref() else {
+        return Ok(());
+    };
+    let installed = validate_rocm_system_versions(wsl, system)?;
+    validate_wsl_rocm_gpu(wsl, system)?;
+    reporter.event(
+        "system_runtime_verified",
+        json!({
+            "accelerator": "rocm",
+            "packages": installed.lines().collect::<Vec<_>>(),
+        }),
+    );
+    Ok(())
+}
+
+fn validate_rocm_system_versions(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<String> {
+    let hip_requirement = format!(
+        "rocm-hip-runtime={}",
+        required_rocm_package(system, "rocm-hip-runtime")?
+    );
+    let rocminfo_requirement = format!("rocminfo={}", required_rocm_package(system, "rocminfo")?);
+    let versions = run_wsl(
+        wsl,
+        [
+            "dpkg-query",
+            "-W",
+            "-f=${Package}=${Version}\n",
+            "rocm-hip-runtime",
+            "rocminfo",
+            "rocdxg-roct",
+        ],
+        None,
+    )
+    .context("verify installed ROCm system package versions")?;
+    require_success(&versions, "verify installed ROCm system package versions")?;
+    let installed = decode_output(&versions.stdout);
+    let rocdxg_requirement = format!("rocdxg-roct={}", system.rocdxg.version);
+    for expected in [
+        hip_requirement.as_str(),
+        rocminfo_requirement.as_str(),
+        rocdxg_requirement.as_str(),
+    ] {
+        if !installed.lines().any(|line| line.trim() == expected) {
+            anyhow::bail!(
+                "installed ROCm system runtime does not match the pinned catalog: missing {expected}"
+            );
+        }
+    }
+    Ok(installed)
+}
+
+fn verify_wsl_sha256(wsl: &WslContext, path: &str, expected: &str, role: &str) -> Result<()> {
+    let output = run_wsl_as(wsl, Some("root"), ["sha256sum", path], None)
+        .with_context(|| format!("verify staged {role} in WSL2"))?;
+    require_success(&output, &format!("verify staged {role} in WSL2"))?;
+    let actual = decode_output(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if actual != expected.to_ascii_lowercase() {
+        anyhow::bail!(
+            "staged {role} checksum mismatch inside WSL2: expected {expected}, got {actual}"
+        );
+    }
+    Ok(())
+}
+
+fn required_rocm_package<'a>(system: &'a RocmSystemRuntime, name: &str) -> Result<&'a str> {
+    system
+        .packages
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!("ROCm catalog is missing pinned package {name}"))
+}
+
+fn validate_wsl_rocm_gpu(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<()> {
+    let output = run_wsl(
+        wsl,
+        [
+            "env",
+            "HSA_ENABLE_DXG_DETECTION=1",
+            "/opt/rocm/bin/rocminfo",
+        ],
+        None,
+    )
+    .context("query AMD GPU through ROCDXG in WSL2")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "AMD ROCm is not available inside WSL2 distribution {:?}; install AMD Software {} or newer and retry: {}",
+            wsl.distribution,
+            system.minimum_windows_release,
+            decode_output(&output.stderr).trim()
+        );
+    }
+    let text = decode_output(&output.stdout);
+    if !system.required_gfx.iter().any(|gfx| text.contains(gfx)) {
+        anyhow::bail!(
+            "ROCm detected no supported Ryzen GPU target (expected one of {}); install AMD Software {} or newer and verify Ryzen WSL support",
+            system.required_gfx.join(", "),
+            system.minimum_windows_release
+        );
+    }
+    Ok(())
+}
+
+fn runtime_environment(variant: &PythonRuntimeVariant) -> String {
+    match variant.accelerator.as_str() {
+        "rocm" => "HSA_ENABLE_DXG_DETECTION=1\n".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn query_nvidia_driver() -> Result<String> {
@@ -610,7 +1004,8 @@ fn validate_installed_runtime(
     wsl: &WslContext,
     linux_current: &str,
     expected_version: &str,
-    expected_cuda: &str,
+    accelerator: &str,
+    expected_runtime: &str,
     reporter: &mut InstallReporter,
 ) -> Result<Value> {
     ensure_runtime_not_active(wsl, linux_current)?;
@@ -618,7 +1013,8 @@ fn validate_installed_runtime(
         wsl,
         linux_current,
         expected_version,
-        expected_cuda,
+        accelerator,
+        expected_runtime,
         reporter,
     )
 }
@@ -627,11 +1023,17 @@ fn validate_runtime_path(
     wsl: &WslContext,
     runtime: &str,
     expected_version: &str,
-    expected_cuda: &str,
+    accelerator: &str,
+    expected_runtime: &str,
     reporter: &mut InstallReporter,
 ) -> Result<Value> {
     let python = format!("{runtime}/venv/bin/python");
-    let output = run_wsl(wsl, [python.as_str(), "-c", GPU_PROBE], None)
+    let mut command = Vec::new();
+    if accelerator == "rocm" {
+        command.extend(["env".to_string(), "HSA_ENABLE_DXG_DETECTION=1".to_string()]);
+    }
+    command.extend([python, "-c".to_string(), GPU_PROBE.to_string()]);
+    let output = run_wsl(wsl, command.iter().map(String::as_str), None)
         .with_context(|| format!("validate managed vLLM runtime {runtime}"))?;
     append_install_log(&wsl.install_log, "gpu-probe", &output);
     if !output.status.success() {
@@ -653,10 +1055,15 @@ fn validate_runtime_path(
             probe["vllm_version"]
         );
     }
-    if probe["torch_cuda"].as_str() != Some(expected_cuda) {
+    let (field, label) = if accelerator == "rocm" {
+        ("torch_hip", "ROCm")
+    } else {
+        ("torch_cuda", "CUDA")
+    };
+    if probe[field].as_str() != Some(expected_runtime) {
         anyhow::bail!(
-            "managed vLLM CUDA ABI mismatch: expected {expected_cuda}, got {}",
-            probe["torch_cuda"]
+            "managed vLLM {label} ABI mismatch: expected {expected_runtime}, got {}",
+            probe[field]
         );
     }
     reporter.event(
@@ -808,6 +1215,8 @@ fn launcher_manifest_matches(runtime_dir: &Path, expected: &LauncherManifest) ->
                 && actual.uv_sha256 == expected.uv_sha256
                 && actual.package_version == expected.package_version
                 && actual.wheel_sha256 == expected.wheel_sha256
+                && actual.accelerator == expected.accelerator
+                && actual.runtime_version == expected.runtime_version
                 && actual.linux_launcher == expected.linux_launcher
                 && actual.linux_runner == expected.linux_runner
                 && actual.linux_stopper == expected.linux_stopper
@@ -878,6 +1287,21 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    run_wsl_as_checked(wsl, None, args, None, reporter, action)
+}
+
+fn run_wsl_as_checked<I, S>(
+    wsl: &WslContext,
+    user: Option<&str>,
+    args: I,
+    stdin: Option<&[u8]>,
+    reporter: &mut InstallReporter,
+    action: &str,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let args = args
         .into_iter()
         .map(|value| value.as_ref().to_string())
@@ -888,10 +1312,11 @@ where
             "action": action,
             "distribution": wsl.distribution,
             "command": args.first(),
+            "user": user,
         }),
     );
-    let output =
-        run_wsl(wsl, args.iter().map(String::as_str), None).with_context(|| action.to_string())?;
+    let output = run_wsl_as(wsl, user, args.iter().map(String::as_str), stdin)
+        .with_context(|| action.to_string())?;
     append_install_log(&wsl.install_log, action, &output);
     require_success(&output, action)?;
     reporter.event("command_completed", json!({ "action": action }));
@@ -903,11 +1328,24 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut full_args = vec![
-        "--distribution".to_string(),
-        wsl.distribution.clone(),
-        "--exec".to_string(),
-    ];
+    run_wsl_as(wsl, None, args, stdin)
+}
+
+fn run_wsl_as<I, S>(
+    wsl: &WslContext,
+    user: Option<&str>,
+    args: I,
+    stdin: Option<&[u8]>,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut full_args = vec!["--distribution".to_string(), wsl.distribution.clone()];
+    if let Some(user) = user {
+        full_args.extend(["--user".to_string(), user.to_string()]);
+    }
+    full_args.push("--exec".to_string());
     full_args.extend(args.into_iter().map(|value| value.as_ref().to_string()));
     run_command(&wsl.executable, full_args.iter().map(String::as_str), stdin)
 }

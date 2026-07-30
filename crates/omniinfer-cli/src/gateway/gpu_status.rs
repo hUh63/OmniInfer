@@ -57,7 +57,7 @@ pub(super) fn runtime_env_for_backend(
             selection.visible_devices.clone(),
         ));
     }
-    if backend.id == "vllm-wsl2-cuda" {
+    if matches!(backend.id.as_str(), "vllm-wsl2-cuda" | "vllm-wsl2-rocm") {
         let wslenv = merge_wslenv(&std::env::var("WSLENV").unwrap_or_default(), &env);
         env.push(("WSLENV".to_string(), wslenv));
     }

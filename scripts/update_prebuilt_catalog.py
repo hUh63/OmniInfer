@@ -26,7 +26,7 @@ def load_catalog(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def iter_source_assets(catalog: dict[str, Any], source_name: str):
+def iter_source_release_assets(catalog: dict[str, Any], source_name: str):
     for platform, entries in catalog.get("platforms", {}).items():
         for backend, entry in entries.items():
             if entry.get("source") != source_name:
@@ -34,28 +34,29 @@ def iter_source_assets(catalog: dict[str, Any], source_name: str):
             yield platform, backend, "runtime", entry
             for index, asset in enumerate(entry.get("companion_assets", []), start=1):
                 yield platform, backend, f"companion {index}", asset
-    for platform, entries in catalog.get("python_runtimes", {}).items():
-        for backend, entry in entries.items():
-            if entry.get("source") != source_name:
-                continue
-            for architecture, variant in entry.get("variants", {}).items():
-                yield platform, backend, f"Python wheel ({architecture})", variant
 
-
-def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[str]:
+def validate(
+    catalog: dict[str, Any],
+    *,
+    require_gitlink_match: bool,
+    verify_upstream_tags: bool,
+) -> list[str]:
     errors: list[str] = []
-    if catalog.get("schema_version") != 4:
-        errors.append("schema_version must be 4")
+    if catalog.get("schema_version") != 5:
+        errors.append("schema_version must be 5")
     sources = catalog.get("sources", {})
     if not isinstance(sources, dict) or not sources:
         errors.append("sources must be a non-empty object")
         return errors
     for source_name, source in sources.items():
         tag = source.get("tag")
+        submodule_tag = source.get("submodule_tag")
         submodule_path = source.get("submodule_path")
         submodule_commit = source.get("submodule_commit")
         if not isinstance(tag, str) or not tag:
             errors.append(f"{source_name}: tag is required")
+        if not isinstance(submodule_tag, str) or not submodule_tag:
+            errors.append(f"{source_name}: submodule_tag is required")
         if not isinstance(submodule_path, str) or not submodule_path:
             errors.append(f"{source_name}: submodule_path is required")
         if not isinstance(submodule_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", submodule_commit):
@@ -66,6 +67,23 @@ def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[st
                 errors.append(
                     f"{source_name}: catalog commit {submodule_commit} does not match gitlink {actual}"
                 )
+        if (
+            verify_upstream_tags
+            and isinstance(submodule_tag, str)
+            and isinstance(submodule_commit, str)
+        ):
+            try:
+                upstream_commit = github_tag_commit(source_name, submodule_tag)
+            except Exception as error:
+                errors.append(
+                    f"{source_name}: failed to resolve upstream tag {submodule_tag}: {error}"
+                )
+            else:
+                if upstream_commit != submodule_commit:
+                    errors.append(
+                        f"{source_name}: upstream tag {submodule_tag} resolves to {upstream_commit}, "
+                        f"not catalog commit {submodule_commit}"
+                    )
     for platform, entries in catalog.get("platforms", {}).items():
         for backend, entry in entries.items():
             source_name = entry.get("source")
@@ -92,22 +110,12 @@ def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[st
                 errors.append(f"{platform}/{backend}: managed uv assets are required")
                 continue
             for architecture, variant in variants.items():
-                source = sources.get(entry.get("source"))
-                if source is None:
+                if sources.get(entry.get("source")) is None:
                     errors.append(
                         f"{platform}/{backend}: unknown Python runtime source {entry.get('source')!r}"
                     )
-                elif entry.get("tag") != source.get("tag"):
-                    errors.append(
-                        f"{platform}/{backend}: Python runtime tag does not match source"
-                    )
-                validate_asset(
-                    errors,
-                    platform,
-                    backend,
-                    f"Python wheel ({architecture})",
-                    variant,
-                    entry.get("tag"),
+                validate_python_asset(
+                    errors, platform, backend, architecture, variant, entry.get("tag")
                 )
                 version = variant.get("version")
                 expected_base = str(entry.get("tag", "")).removeprefix("v")
@@ -119,9 +127,26 @@ def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[st
                     errors.append(
                         f"{platform}/{backend} {architecture}: Python package version must match {entry.get('tag')!r}"
                     )
-                if not isinstance(variant.get("minimum_driver"), str):
+                accelerator = variant.get("accelerator")
+                if accelerator not in ("cuda", "rocm"):
                     errors.append(
-                        f"{platform}/{backend} {architecture}: minimum_driver is required"
+                        f"{platform}/{backend} {architecture}: accelerator must be cuda or rocm"
+                    )
+                if not isinstance(variant.get("runtime_version"), str):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: runtime_version is required"
+                    )
+                if accelerator == "cuda" and not isinstance(
+                    variant.get("minimum_driver"), str
+                ):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: minimum_driver is required for CUDA"
+                    )
+                if accelerator == "rocm" and not isinstance(
+                    variant.get("rocm_system"), dict
+                ):
+                    errors.append(
+                        f"{platform}/{backend} {architecture}: rocm_system is required for ROCm"
                     )
                 uv = uv_assets.get(architecture)
                 if not isinstance(uv, dict):
@@ -138,6 +163,41 @@ def validate(catalog: dict[str, Any], *, require_gitlink_match: bool) -> list[st
                     uv.get("version"),
                 )
     return errors
+
+
+def validate_python_asset(
+    errors: list[str],
+    platform: str,
+    backend: str,
+    architecture: str,
+    variant: dict[str, Any],
+    tag: Any,
+) -> None:
+    role = f"Python wheel ({architecture})"
+    digest = variant.get("sha256")
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        errors.append(f"{platform}/{backend} {role}: missing or invalid sha256")
+    url = variant.get("url")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        errors.append(f"{platform}/{backend} {role}: canonical HTTPS URL is required")
+        return
+    if url.startswith("https://github.com/"):
+        if isinstance(tag, str) and f"/download/{tag}/" not in url:
+            errors.append(f"{platform}/{backend} {role}: URL does not match tag {tag}")
+        return
+    build_commit = variant.get("build_commit")
+    index_url = variant.get("index_url")
+    if (
+        not isinstance(build_commit, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", build_commit)
+        or not url.startswith("https://wheels.vllm.ai/rocm/")
+        or build_commit not in url
+        or not isinstance(index_url, str)
+        or build_commit not in index_url
+    ):
+        errors.append(
+            f"{platform}/{backend} {role}: invalid independent wheel build provenance"
+        )
 
 
 def validate_asset(
@@ -172,14 +232,51 @@ def gitlink_commit(submodule_path: str) -> str:
     return fields[1]
 
 
-def release_assets(source_name: str, tag: str) -> dict[str, dict[str, Any]]:
-    url = f"https://api.github.com/repos/{source_name}/releases/tags/{tag}"
+def github_json(url: str) -> Any:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "OmniInfer-catalog-updater",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "OmniInfer-catalog-updater"},
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=60) as response:
-        payload = json.load(response)
+        return json.load(response)
+
+
+def github_tag_commit(source_name: str, tag: str) -> str:
+    result = subprocess.run(
+        [
+            "git",
+            "ls-remote",
+            "--tags",
+            f"https://github.com/{source_name}.git",
+            f"refs/tags/{tag}",
+            f"refs/tags/{tag}^{{}}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    refs = {
+        ref: commit
+        for line in result.stdout.splitlines()
+        if len(fields := line.split()) == 2
+        for commit, ref in [fields]
+    }
+    commit = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+    if commit is None or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise RuntimeError("upstream tag does not exist or has an invalid target")
+    return commit
+
+
+def release_assets(source_name: str, tag: str) -> dict[str, dict[str, Any]]:
+    url = f"https://api.github.com/repos/{source_name}/releases/tags/{tag}"
+    payload = github_json(url)
     return {asset["name"]: asset for asset in payload.get("assets", [])}
 
 
@@ -199,8 +296,14 @@ def update_source(
         submodule_commit = gitlink_commit(source["submodule_path"])
     if not re.fullmatch(r"[0-9a-f]{40}", submodule_commit):
         raise SystemExit("--submodule-commit must be 'current' or a 40-character lowercase commit")
+    tag_commit = github_tag_commit(source_name, tag)
+    if tag_commit != submodule_commit:
+        raise SystemExit(
+            f"{source_name}: tag {tag} resolves to {tag_commit}, "
+            f"but --submodule-commit resolved to {submodule_commit}"
+        )
     assets = release_assets(source_name, tag)
-    for platform, backend, role, asset in iter_source_assets(catalog, source_name):
+    for platform, backend, role, asset in iter_source_release_assets(catalog, source_name):
         old_url = asset["url"]
         old_name = unquote(Path(urlparse(old_url).path).name)
         new_name = old_name.replace(old_tag, tag).replace(
@@ -215,17 +318,8 @@ def update_source(
         asset["url"] = upstream["browser_download_url"]
         asset["sha256"] = digest.removeprefix("sha256:")
     source["tag"] = tag
+    source["submodule_tag"] = tag
     source["submodule_commit"] = submodule_commit
-    for entries in catalog.get("python_runtimes", {}).values():
-        for entry in entries.values():
-            if entry.get("source") == source_name:
-                entry["tag"] = tag
-                for variant in entry.get("variants", {}).values():
-                    old_version = str(variant.get("version", ""))
-                    local_suffix = old_version.partition("+")[2]
-                    variant["version"] = tag.removeprefix("v") + (
-                        f"+{local_suffix}" if local_suffix else ""
-                    )
 
 
 def write_catalog_atomically(path: Path, catalog: dict[str, Any]) -> None:
@@ -259,6 +353,11 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser("check", help="validate local catalog metadata")
     check_parser.add_argument("--require-gitlink-match", action="store_true")
+    check_parser.add_argument(
+        "--verify-upstream-tags",
+        action="store_true",
+        help="resolve every GitHub tag and verify that it matches the pinned source commit",
+    )
     update_parser = subparsers.add_parser("update", help="update one source from an upstream release")
     update_parser.add_argument("--source", required=True)
     update_parser.add_argument("--tag", required=True)
@@ -271,6 +370,7 @@ def main() -> int:
     errors = validate(
         catalog,
         require_gitlink_match=getattr(args, "require_gitlink_match", False),
+        verify_upstream_tags=getattr(args, "verify_upstream_tags", False),
     )
     if errors:
         for error in errors:
