@@ -51,6 +51,24 @@ Windows and macOS clients share the same architecture: OmniStudio bundles a plat
 - At least one model file downloaded
 - Sufficient RAM/VRAM for the target model
 
+### Windows vLLM Integration
+
+Official vLLM does not support native Windows. OmniStudio must use OmniInfer's managed `vllm-wsl2-cuda` backend, which runs the pinned official Linux CUDA runtime inside a user WSL2 distribution. Do not bundle a community native-Windows vLLM fork.
+
+The client should first let the user install and initialize Ubuntu (`wsl --install -d Ubuntu`), then run:
+
+```powershell
+omniinfer.exe backend install vllm-wsl2-cuda `
+  --wsl-distro Ubuntu `
+  --state-root <state> `
+  --runtime-root <runtimes> `
+  --json
+```
+
+Parse stdout as JSONL using the same forward-compatible install contract as other backends. vLLM installation additionally emits `compatibility_selected`, `command_started`, `command_completed`, and `validation_passed`. It may download and consume several GB. A non-zero exit or final `error` event is a failed install even if earlier phases succeeded.
+
+`<runtimes>\vllm-wsl2-cuda` stores the Windows launcher manifest, installer tool cache, and logs; the large Python environment remains in the selected WSL2 filesystem. Use the same explicit roots for `serve` and all lifecycle commands. HuggingFace model IDs can be sent directly. Absolute local drive paths are translated into WSL automount paths; UNC model paths are unsupported. Unload/shutdown stops only OmniInfer's vLLM process group and must not terminate the whole distribution.
+
 ### Step 1: Load a Model
 
 Open the OmniStudio chat interface and select a model. Once the model finishes loading, the API service is automatically started.
@@ -204,6 +222,7 @@ Backends vary by platform. OmniStudio automatically selects the best available b
 | `llama.cpp-cpu` | CPU | None |
 | `llama.cpp-cuda` | NVIDIA GPU | CUDA runtime |
 | `llama.cpp-vulkan` | GPU (vendor-agnostic) | Vulkan driver |
+| `vllm-wsl2-cuda` | NVIDIA GPU | WSL2 user distribution, NVIDIA driver 576.02+ |
 
 **macOS:**
 

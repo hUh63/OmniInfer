@@ -51,6 +51,24 @@ Windows 和 macOS 客户端架构一致：OmniStudio 内置对应平台的 OmniI
 - 已下载至少一个模型文件
 - 足够的内存 / 显存以加载目标模型
 
+### Windows vLLM 接入
+
+官方 vLLM 不支持原生 Windows。OmniStudio 必须使用 OmniInfer 托管的 `vllm-wsl2-cuda` 后端，在用户 WSL2 发行版内运行固定版本的官方 Linux CUDA runtime；不要捆绑社区原生 Windows vLLM fork。
+
+客户端应先引导用户安装并初始化 Ubuntu（`wsl --install -d Ubuntu`），然后执行：
+
+```powershell
+omniinfer.exe backend install vllm-wsl2-cuda `
+  --wsl-distro Ubuntu `
+  --state-root <state> `
+  --runtime-root <runtimes> `
+  --json
+```
+
+stdout 按与其他后端相同的前向兼容 JSONL 安装契约解析。vLLM 安装还会发出 `compatibility_selected`、`command_started`、`command_completed` 和 `validation_passed`。下载量和磁盘占用可能达到数 GB。命令非零退出或最后收到 `error` 事件都表示安装失败，即使前面的阶段已经成功。
+
+`<runtimes>\vllm-wsl2-cuda` 保存 Windows launcher manifest、安装器工具缓存和日志；体积较大的 Python 环境保留在所选 WSL2 文件系统中。`serve` 与所有生命周期命令必须继续使用相同的显式 roots。HuggingFace 模型 ID 可直接传入；本地盘符绝对路径会转换为 WSL automount 路径，UNC 模型路径不支持。卸载模型或关闭服务只停止 OmniInfer 管理的 vLLM 进程组，不得终止整个发行版。
+
 ### 第一步：加载模型
 
 打开 OmniStudio 对话界面，选择并加载一个模型。模型加载完成后，API 服务会自动启动。
@@ -204,6 +222,7 @@ console.log(data.choices[0].message.content);
 | `llama.cpp-cpu` | CPU | 无 |
 | `llama.cpp-cuda` | NVIDIA GPU | CUDA 运行时 |
 | `llama.cpp-vulkan` | GPU（跨厂商） | Vulkan 驱动 |
+| `vllm-wsl2-cuda` | NVIDIA GPU | WSL2 用户发行版、NVIDIA 576.02+ 驱动 |
 
 **macOS：**
 
