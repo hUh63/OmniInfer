@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use omniinfer_core::backend_args::parse_backend_load_extra_args;
@@ -9,10 +9,13 @@ use omniinfer_core::local_state;
 use omniinfer_core::model_artifacts::{discover_llama_cpp_model_artifacts, maybe_auto_mmproj};
 use omniinfer_core::model_load::DEFAULT_LOAD_CONTEXT_SIZE;
 use omniinfer_core::runtime_plan::{ExternalRuntimeRequest, build_external_runtime_plan};
-use omniinfer_core::runtime_process::{RuntimeProcess, RuntimeProcessOptions};
+use omniinfer_core::runtime_process::{RuntimeProcess, RuntimeProcessError, RuntimeProcessOptions};
 use serde_json::{Value, json};
 
 use super::gpu_status::runtime_env_for_backend;
+
+const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(240);
+const WSL_ROCM_COLD_START_INITIAL_ATTEMPT: Duration = Duration::from_secs(120);
 
 #[derive(Default)]
 pub(super) struct RustRuntimeManager {
@@ -240,7 +243,8 @@ impl RustRuntimeManager {
             ));
         let (runtime_env, cuda_selection) =
             runtime_env_for_backend(backend, &effective_launch_args);
-        let process = RuntimeProcess::start(
+        let process = start_runtime_with_cold_start_policy(
+            &backend.id,
             &plan,
             RuntimeProcessOptions {
                 log_path,
@@ -519,6 +523,56 @@ impl RustRuntimeManager {
     }
 }
 
+fn start_runtime_with_cold_start_policy(
+    backend_id: &str,
+    plan: &omniinfer_core::runtime_plan::ExternalRuntimePlan,
+    options: RuntimeProcessOptions,
+) -> Result<RuntimeProcess, RuntimeProcessError> {
+    let Some(initial_timeout) =
+        wsl_rocm_cold_start_retry_timeout(backend_id, options.startup_timeout)
+    else {
+        return RuntimeProcess::start(plan, options);
+    };
+
+    let total_timeout = options.startup_timeout;
+    retry_after_ready_timeout(total_timeout, initial_timeout, |attempt_timeout| {
+        let mut attempt_options = options.clone();
+        attempt_options.startup_timeout = attempt_timeout;
+        RuntimeProcess::start(plan, attempt_options)
+    })
+}
+
+fn wsl_rocm_cold_start_retry_timeout(
+    backend_id: &str,
+    total_timeout: Duration,
+) -> Option<Duration> {
+    (backend_id == "vllm-wsl2-rocm" && total_timeout >= WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET)
+        .then_some(WSL_ROCM_COLD_START_INITIAL_ATTEMPT)
+}
+
+fn retry_after_ready_timeout<T>(
+    total_timeout: Duration,
+    initial_timeout: Duration,
+    mut attempt: impl FnMut(Duration) -> Result<T, RuntimeProcessError>,
+) -> Result<T, RuntimeProcessError> {
+    let started = Instant::now();
+    match attempt(initial_timeout) {
+        Err(RuntimeProcessError::ReadyTimeout) => {
+            let remaining = total_timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(RuntimeProcessError::ReadyTimeout);
+            }
+            eprintln!(
+                "OmniInfer: WSL2 ROCm cold start did not become ready after {} seconds; retrying once with the remaining {} seconds",
+                initial_timeout.as_secs(),
+                remaining.as_secs()
+            );
+            attempt(remaining)
+        }
+        result => result,
+    }
+}
+
 fn annotate_restore_state(
     payload: &mut Value,
     persistent_state: &local_state::LocalState,
@@ -785,5 +839,57 @@ mod tests {
             "vllm",
             &["--gpu-memory-utilization".to_string(), "0.9".to_string()]
         ));
+    }
+
+    #[test]
+    fn wsl_rocm_cold_start_retry_requires_a_safe_total_budget() {
+        assert_eq!(
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(300)),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(239)),
+            None
+        );
+        assert_eq!(
+            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-cuda", Duration::from_secs(300)),
+            None
+        );
+    }
+
+    #[test]
+    fn ready_timeout_retries_once_with_the_remaining_budget() {
+        let total_timeout = Duration::from_secs(300);
+        let mut attempts = Vec::new();
+        let result =
+            retry_after_ready_timeout(total_timeout, Duration::from_secs(120), |timeout| {
+                attempts.push(timeout);
+                if attempts.len() == 1 {
+                    Err(RuntimeProcessError::ReadyTimeout)
+                } else {
+                    Ok("ready")
+                }
+            })
+            .unwrap();
+
+        assert_eq!(result, "ready");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0], Duration::from_secs(120));
+        assert!(attempts[1] <= total_timeout);
+        assert!(attempts[1] >= Duration::from_secs(299));
+    }
+
+    #[test]
+    fn cold_start_retry_does_not_mask_early_exit() {
+        let mut attempts = 0;
+        let error =
+            retry_after_ready_timeout(Duration::from_secs(300), Duration::from_secs(120), |_| {
+                attempts += 1;
+                Err::<(), _>(RuntimeProcessError::EarlyExit)
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeProcessError::EarlyExit));
+        assert_eq!(attempts, 1);
     }
 }

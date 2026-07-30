@@ -45,7 +45,7 @@ impl Default for AppConfig {
             default_backend: String::new(),
             default_thinking: "off".to_string(),
             window_mode: "hidden".to_string(),
-            startup_timeout: 60.0,
+            startup_timeout: 300.0,
             runtime_root: "runtime".to_string(),
         }
     }
