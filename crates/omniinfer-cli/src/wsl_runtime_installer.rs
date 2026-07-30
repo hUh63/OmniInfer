@@ -22,12 +22,13 @@ const ROCM_BACKEND_ID: &str = "vllm-wsl2-rocm";
 const LAUNCHER_MANIFEST: &str = "vllm-wsl2.json";
 const MANAGED_MANIFEST: &str = "managed-runtime.json";
 const RUNTIME_ENV: &str = "runtime.env";
-const RUNTIME_ENVIRONMENT_VERSION: u32 = 2;
-const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.0.0";
+const RUNTIME_ENVIRONMENT_VERSION: u32 = 3;
+const ROCM_PLATFORM_PLUGIN_VERSION: &str = "1.1.0";
 
 const ROCM_PLATFORM_PLUGIN: &str = r#"import os
 
 _shim_active = False
+_uva_fallback_active = False
 
 
 def _is_wsl():
@@ -125,16 +126,49 @@ def platform_plugin():
     except Exception:
         pass
     return None
-"#;
 
-const ROCM_PLATFORM_PLUGIN_METADATA: &str = r#"Metadata-Version: 2.1
-Name: omniinfer-vllm-wsl2-rocm
-Version: 1.0.0
-Summary: OmniInfer vLLM ROCm platform detection for supported WSL2 GPUs
+
+def general_plugin():
+    global _uva_fallback_active
+    if _uva_fallback_active:
+        return
+    if not _shim_active:
+        platform_plugin()
+    if not _shim_active:
+        return
+
+    from vllm.utils.platform_utils import is_uva_available
+
+    if is_uva_available():
+        return
+
+    import torch
+    from vllm.v1.worker.gpu import buffer_utils
+
+    class WslRocmBuffer:
+        def __init__(self, size, dtype):
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+            self.np = self.cpu.numpy()
+            self.uva = torch.zeros(size, dtype=dtype, device="cuda")
+
+    def copy_to_accelerator(self, value):
+        self._curr = (self._curr + 1) % self.max_concurrency
+        buffer = self._uva_bufs[self._curr]
+        destination = buffer.cpu if isinstance(value, torch.Tensor) else buffer.np
+        count = len(value)
+        destination[:count] = value
+        return buffer.uva[:count].copy_(buffer.cpu[:count])
+
+    buffer_utils.UvaBuffer = WslRocmBuffer
+    buffer_utils.UvaBufferPool.copy_to_uva = copy_to_accelerator
+    _uva_fallback_active = True
 "#;
 
 const ROCM_PLATFORM_PLUGIN_ENTRY_POINTS: &str = r#"[vllm.platform_plugins]
 omniinfer_wsl2_rocm = omniinfer_vllm_wsl2_rocm:platform_plugin
+
+[vllm.general_plugins]
+omniinfer_wsl2_rocm = omniinfer_vllm_wsl2_rocm:general_plugin
 "#;
 
 const RUNNER_SCRIPT: &str = r#"#!/bin/sh
@@ -1696,6 +1730,12 @@ fn write_rocm_platform_plugin(wsl: &WslContext, runtime: &str) -> Result<()> {
     let plugin_root = format!("{runtime}/plugins");
     let metadata_root =
         format!("{plugin_root}/omniinfer_vllm_wsl2_rocm-{ROCM_PLATFORM_PLUGIN_VERSION}.dist-info");
+    let metadata = format!(
+        "Metadata-Version: 2.1\n\
+         Name: omniinfer-vllm-wsl2-rocm\n\
+         Version: {ROCM_PLATFORM_PLUGIN_VERSION}\n\
+         Summary: OmniInfer vLLM ROCm platform detection for supported WSL2 GPUs\n"
+    );
     write_wsl_file(
         wsl,
         &format!("{plugin_root}/omniinfer_vllm_wsl2_rocm.py"),
@@ -1705,7 +1745,7 @@ fn write_rocm_platform_plugin(wsl: &WslContext, runtime: &str) -> Result<()> {
     write_wsl_file(
         wsl,
         &format!("{metadata_root}/METADATA"),
-        ROCM_PLATFORM_PLUGIN_METADATA.as_bytes(),
+        metadata.as_bytes(),
         false,
     )?;
     write_wsl_file(
@@ -2472,7 +2512,10 @@ mod tests {
         assert!(ROCM_PLATFORM_PLUGIN.contains("torch.cuda.is_available()"));
         assert!(ROCM_PLATFORM_PLUGIN.contains("_amdsmi_has_gpu()"));
         assert!(ROCM_PLATFORM_PLUGIN.contains("_install_amdsmi_shim(devices)"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("class WslRocmBuffer"));
+        assert!(ROCM_PLATFORM_PLUGIN.contains("copy_to_accelerator"));
         assert!(ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("[vllm.platform_plugins]"));
+        assert!(ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("[vllm.general_plugins]"));
         assert!(
             ROCM_PLATFORM_PLUGIN_ENTRY_POINTS.contains("omniinfer_vllm_wsl2_rocm:platform_plugin")
         );
