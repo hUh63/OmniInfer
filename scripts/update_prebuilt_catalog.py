@@ -183,8 +183,10 @@ def validate(
                             "hipsparselt",
                             "hsa-rocr",
                             "libopenmpi3t64",
+                            "libpython3.12-dev",
                             "miopen-hip",
                             "openmp-extras-runtime",
+                            "python3.12-dev",
                             "rccl",
                             "rocblas",
                             "rocfft",
@@ -219,6 +221,9 @@ def validate(
                         repository_url = (
                             repository[0].rstrip("/") if repository else ""
                         )
+                        ubuntu_python_pool = (
+                            "https://security.ubuntu.com/ubuntu/pool/main/p/python3.12/"
+                        )
                         if (
                             not isinstance(package_assets, dict)
                             or set(package_assets) != required_assets
@@ -238,6 +243,14 @@ def validate(
                                 filename = asset.get("filename")
                                 digest = asset.get("sha256")
                                 url = asset.get("url")
+                                valid_origin = isinstance(url, str) and (
+                                    url.startswith(f"{repository_url}/")
+                                    or (
+                                        package
+                                        in {"python3.12-dev", "libpython3.12-dev"}
+                                        and url.startswith(ubuntu_python_pool)
+                                    )
+                                )
                                 if (
                                     asset.get("version") != packages.get(package)
                                     or not isinstance(filename, str)
@@ -248,8 +261,7 @@ def validate(
                                     or asset["size"] <= 0
                                     or not isinstance(digest, str)
                                     or not SHA256_RE.fullmatch(digest)
-                                    or not isinstance(url, str)
-                                    or not url.startswith(f"{repository_url}/")
+                                    or not valid_origin
                                     or not url.endswith(filename)
                                 ):
                                     errors.append(
