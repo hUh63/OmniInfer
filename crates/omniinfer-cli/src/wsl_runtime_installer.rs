@@ -790,8 +790,10 @@ fn ensure_rocm_system_runtime(
     )?;
     let hip_version = required_rocm_package(system, "rocm-hip-runtime")?;
     let rocminfo_version = required_rocm_package(system, "rocminfo")?;
+    let openmpi_version = required_rocm_package(system, "libopenmpi3t64")?;
     let hip_requirement = format!("rocm-hip-runtime={hip_version}");
     let rocminfo_requirement = format!("rocminfo={rocminfo_version}");
+    let openmpi_requirement = format!("libopenmpi3t64={openmpi_version}");
     run_wsl_as_checked(
         wsl,
         Some("root"),
@@ -803,6 +805,7 @@ fn ensure_rocm_system_runtime(
             "--no-install-recommends",
             "--allow-downgrades",
             "-y",
+            openmpi_requirement.as_str(),
             hip_requirement.as_str(),
             rocminfo_requirement.as_str(),
         ],
@@ -858,6 +861,10 @@ fn validate_existing_system_runtime(
 }
 
 fn validate_rocm_system_versions(wsl: &WslContext, system: &RocmSystemRuntime) -> Result<String> {
+    let openmpi_requirement = format!(
+        "libopenmpi3t64={}",
+        required_rocm_package(system, "libopenmpi3t64")?
+    );
     let hip_requirement = format!(
         "rocm-hip-runtime={}",
         required_rocm_package(system, "rocm-hip-runtime")?
@@ -869,6 +876,7 @@ fn validate_rocm_system_versions(wsl: &WslContext, system: &RocmSystemRuntime) -
             "dpkg-query",
             "-W",
             "-f=${Package}=${Version}\n",
+            "libopenmpi3t64",
             "rocm-hip-runtime",
             "rocminfo",
             "rocdxg-roct",
@@ -880,6 +888,7 @@ fn validate_rocm_system_versions(wsl: &WslContext, system: &RocmSystemRuntime) -
     let installed = decode_output(&versions.stdout);
     let rocdxg_requirement = format!("rocdxg-roct={}", system.rocdxg.version);
     for expected in [
+        openmpi_requirement.as_str(),
         hip_requirement.as_str(),
         rocminfo_requirement.as_str(),
         rocdxg_requirement.as_str(),

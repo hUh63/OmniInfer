@@ -324,7 +324,8 @@ fn validate_catalog(catalog: &PrebuiltCatalog) -> Result<()> {
                                 !value.starts_with("https://wheels.vllm.ai/rocm/")
                             })
                             || system.apt_repository.trim().is_empty()
-                            || system.packages.len() != 2
+                            || system.packages.len() != 3
+                            || !system.packages.contains_key("libopenmpi3t64")
                             || !system.packages.contains_key("rocm-hip-runtime")
                             || !system.packages.contains_key("rocminfo")
                             || system.required_gfx.is_empty()

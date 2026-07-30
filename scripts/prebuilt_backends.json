@@ -75,6 +75,7 @@
                 "sha256": "2de99e2354646a90d9903e2a669fc4e36b02c1bbff7075c481e12d7edab2c88b"
               },
               "packages": {
+                "libopenmpi3t64": "4.1.6-7ubuntu2",
                 "rocm-hip-runtime": "7.2.3.70203-90~24.04",
                 "rocminfo": "1.0.0.70203-90~24.04"
               },

@@ -38,6 +38,7 @@ fn main() {
         "env" => handle_env(command),
         "install" | "apt-get" | "dpkg" | "/sbin/ldconfig" => {}
         "dpkg-query" => {
+            println!("libopenmpi3t64=4.1.6-7ubuntu2");
             println!("rocm-hip-runtime=7.2.3.70203-90~24.04");
             println!("rocminfo=1.0.0.70203-90~24.04");
             println!("rocdxg-roct=1.2.0");

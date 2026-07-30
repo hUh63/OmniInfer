@@ -142,12 +142,31 @@ def validate(
                     errors.append(
                         f"{platform}/{backend} {architecture}: minimum_driver is required for CUDA"
                     )
-                if accelerator == "rocm" and not isinstance(
-                    variant.get("rocm_system"), dict
-                ):
-                    errors.append(
-                        f"{platform}/{backend} {architecture}: rocm_system is required for ROCm"
-                    )
+                if accelerator == "rocm":
+                    rocm_system = variant.get("rocm_system")
+                    if not isinstance(rocm_system, dict):
+                        errors.append(
+                            f"{platform}/{backend} {architecture}: rocm_system is required for ROCm"
+                        )
+                    else:
+                        packages = rocm_system.get("packages")
+                        required_packages = {
+                            "libopenmpi3t64",
+                            "rocm-hip-runtime",
+                            "rocminfo",
+                        }
+                        if (
+                            not isinstance(packages, dict)
+                            or set(packages) != required_packages
+                            or not all(
+                                isinstance(version, str) and version
+                                for version in packages.values()
+                            )
+                        ):
+                            errors.append(
+                                f"{platform}/{backend} {architecture}: ROCm system packages must pin "
+                                "libopenmpi3t64, rocm-hip-runtime, and rocminfo"
+                            )
                 uv = uv_assets.get(architecture)
                 if not isinstance(uv, dict):
                     errors.append(
