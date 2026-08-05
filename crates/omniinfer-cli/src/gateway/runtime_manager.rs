@@ -157,9 +157,12 @@ impl RustRuntimeManager {
                     .map(str::to_string)
                     .collect::<Vec<_>>()
             });
-        let effective_launch_args = launch_args
-            .clone()
-            .unwrap_or_else(|| backend.default_args.clone());
+        let effective_launch_args = merged_launch_args(
+            &backend.id,
+            &backend.family,
+            &backend.default_args,
+            launch_args.as_deref(),
+        );
         let launch_args_have_ctx =
             launch_args_have_ctx_size(&backend.family, &effective_launch_args);
         let launch_args_ctx_size =
@@ -234,7 +237,7 @@ impl RustRuntimeManager {
             host: backend_host.clone(),
             port,
             ctx_size,
-            launch_args,
+            launch_args: Some(effective_launch_args.clone()),
         })?;
         let log_path = PathBuf::from(&backend.runtime_dir)
             .join("logs")
@@ -820,6 +823,21 @@ fn launch_args_have_ctx_size(family: &str, args: &[String]) -> bool {
     })
 }
 
+fn merged_launch_args(
+    backend_id: &str,
+    family: &str,
+    defaults: &[String],
+    requested: Option<&[String]>,
+) -> Vec<String> {
+    let Some(requested) = requested else {
+        return defaults.to_vec();
+    };
+    if family != "llama.cpp" || !backend_id.starts_with("llama.cpp-") {
+        return requested.to_vec();
+    }
+    defaults.iter().chain(requested).cloned().collect()
+}
+
 pub(super) fn pick_runtime_port(host: &str) -> Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
     Ok(listener.local_addr()?.port())
@@ -855,6 +873,63 @@ mod tests {
             "vllm",
             &["--gpu-memory-utilization".to_string(), "0.9".to_string()]
         ));
+    }
+
+    #[test]
+    fn official_llama_launch_args_extend_defaults_with_user_overrides_last() {
+        let defaults = vec![
+            "--slot-prompt-similarity".to_string(),
+            "0".to_string(),
+            "--cache-idle-slots".to_string(),
+            "--cache-ram".to_string(),
+            "8192".to_string(),
+        ];
+        let requested = vec![
+            "-np".to_string(),
+            "5".to_string(),
+            "--cache-ram".to_string(),
+            "32768".to_string(),
+        ];
+
+        assert_eq!(
+            merged_launch_args(
+                "llama.cpp-linux-cuda",
+                "llama.cpp",
+                &defaults,
+                Some(&requested)
+            ),
+            vec![
+                "--slot-prompt-similarity",
+                "0",
+                "--cache-idle-slots",
+                "--cache-ram",
+                "8192",
+                "-np",
+                "5",
+                "--cache-ram",
+                "32768"
+            ]
+        );
+        assert_eq!(
+            merged_launch_args("llama.cpp-linux-cuda", "llama.cpp", &defaults, None),
+            defaults
+        );
+    }
+
+    #[test]
+    fn non_official_llama_launch_args_keep_replacement_semantics() {
+        let defaults = vec!["--jinja".to_string(), "-ngl".to_string(), "999".to_string()];
+        let requested = vec!["-ngl".to_string(), "12".to_string()];
+
+        assert_eq!(
+            merged_launch_args(
+                "ik_llama.cpp-linux-cuda",
+                "llama.cpp",
+                &defaults,
+                Some(&requested)
+            ),
+            requested
+        );
     }
 
     #[test]
