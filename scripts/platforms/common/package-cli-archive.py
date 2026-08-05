@@ -123,7 +123,7 @@ def smoke_test(portable_root: Path, platform_name: str) -> None:
             )
             events = [json.loads(line) for line in output.splitlines()]
             planned = next(event for event in events if event["event"] == "asset_planned")
-            if planned.get("expected_sha256") != "9d04ebc1af723cb11be09a0ec1f9a375934697e8d7fe57439e508a636c197a28":
+            if planned.get("expected_sha256") != "ea872f3b979e5d94b2c0ea5edf4bac9c905386482d13b60c89ee7f0194e57d3f":
                 raise SystemExit("Packaged Windows CPU catalog digest is missing or incorrect.")
             advisor = json.loads(
                 run_capture(
