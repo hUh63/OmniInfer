@@ -612,9 +612,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_rejects_unpinned_companion_url() {
+    fn rejects_companion_url_with_mismatched_source_tag() {
         let mut value: serde_json::Value =
             serde_json::from_str(DEFAULT_CATALOG).expect("parse built-in catalog");
+        let source_tag = value["sources"]["ggml-org/llama.cpp"]["tag"]
+            .as_str()
+            .expect("llama.cpp source tag")
+            .to_string();
         value["platforms"]["windows"]["llama.cpp-cuda"]["companion_assets"][0]["url"] =
             serde_json::Value::String(
                 "https://github.com/ggml-org/llama.cpp/releases/download/b9999/runtime.zip"
@@ -625,7 +629,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not match source tag b9500")
+                .contains(&format!("does not match source tag {source_tag}"))
         );
     }
 }

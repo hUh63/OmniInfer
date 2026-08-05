@@ -129,6 +129,33 @@ For configuration screens that must reject unsupported settings, send
 
 ## Backend-Specific Notes
 
+Official `llama.cpp-*` backends use the following cache-safety defaults:
+
+```text
+--slot-prompt-similarity 0 --cache-idle-slots --cache-ram 8192
+```
+
+Disabling slot-similarity selection makes an available slot an LRU scheduling
+decision, after which llama.cpp can search its RAM prompt cache for a better
+compatible state. The RAM value is a MiB capacity limit, not an eager
+allocation. Backend-specific `launch_args` extend these defaults and appear
+after them, so an explicit later value overrides the matching default.
+
+For five concurrent slots on a host with sufficient memory, a typical override
+is:
+
+```json
+{
+  "launch_args": ["-np", "5", "--cache-ram", "32768"]
+}
+```
+
+Size the RAM cache for the model architecture, context length, and number of
+warm sessions. Cache reuse remains best-effort: when no recurrent/KV checkpoint
+exists at or before the common-prefix boundary, llama.cpp rejects the unsafe
+state and performs a full prefill. This preserves session semantics but does
+not guarantee a cache hit for every warm request.
+
 `vllm-linux-cuda` and Windows `vllm-wsl2-cuda` / `vllm-wsl2-rocm` run the official vLLM
 OpenAI-compatible server. OmniInfer starts the Linux backend as:
 

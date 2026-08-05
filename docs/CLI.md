@@ -197,13 +197,19 @@ Example:
   "backend": "llama.cpp-vulkan",
   "family": "llama.cpp",
   "load": {
-    "extra_args": ["-ngl", "99", "-t", "8"]
+    "extra_args": ["-ngl", "99", "-t", "8", "-np", "5", "--cache-ram", "32768"]
   },
   "infer": {
     "extra_args": ["--top-k", "40", "--top-p", "0.9"]
   }
 }
 ```
+
+For official `llama.cpp-*` backends, profile load arguments extend OmniInfer's
+safe RAM-cache defaults instead of replacing them. Explicit values appear last
+and therefore override the matching default. See
+[Model Load Parameters](model-load.md#backend-specific-notes) for cache sizing
+and checkpoint fallback semantics.
 
 ### 3.5. Ask the advisor before loading, optional
 

@@ -6,6 +6,10 @@ use serde_json::{Value, json};
 
 use crate::{config, local_state, paths};
 
+const LLAMA_CPP_CACHE_RAM_MIB: &str = "8192";
+const LLAMA_CPP_CACHE_SAFETY_ARGS: &[&str] =
+    &["--slot-prompt-similarity", "0", "--cache-idle-slots"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendScope {
     Installed,
@@ -369,11 +373,22 @@ fn resolve_models_dir(template: &BackendTemplate, override_value: &Value) -> Opt
 }
 
 fn backend_server_args(template: &BackendTemplate, override_value: &Value) -> Vec<String> {
-    let mut args = template
-        .default_extra_args
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let official_llama_cpp =
+        template.family == "llama.cpp" && template.id.starts_with("llama.cpp-");
+    let mut args = if official_llama_cpp {
+        LLAMA_CPP_CACHE_SAFETY_ARGS
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    args.extend(
+        template
+            .default_extra_args
+            .iter()
+            .map(|value| value.to_string()),
+    );
     if let Some(default_ngl) = template.default_ngl {
         let ngl = env_value(&format!("{}_NGL", template.env_prefix))
             .or_else(|| override_string(override_value, "ngl"))
@@ -394,12 +409,10 @@ fn backend_server_args(template: &BackendTemplate, override_value: &Value) -> Ve
         env_value(&format!("{}_PARALLEL", template.env_prefix))
             .or_else(|| override_string(override_value, "parallel")),
     );
-    push_optional_int_arg(
-        &mut args,
-        "-cram",
-        env_value(&format!("{}_CACHE_RAM", template.env_prefix))
-            .or_else(|| override_string(override_value, "cache_ram")),
-    );
+    let cache_ram = env_value(&format!("{}_CACHE_RAM", template.env_prefix))
+        .or_else(|| override_string(override_value, "cache_ram"))
+        .or_else(|| official_llama_cpp.then(|| LLAMA_CPP_CACHE_RAM_MIB.to_string()));
+    push_optional_int_arg(&mut args, "--cache-ram", cache_ram);
     args.extend(parse_extra_args(override_value.get("extra_args")));
     args
 }
@@ -1276,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_backend_has_default_ngl() {
+    fn official_llama_backend_has_safe_cache_defaults() {
         let registry = BackendRegistry::build(
             HostInfo {
                 system: HostSystem::Linux,
@@ -1286,7 +1299,21 @@ mod tests {
             &Value::Null,
         );
         let backend = registry.get("llama.cpp-linux-cuda").unwrap();
-        assert_eq!(backend.default_args, vec!["-ngl", "999"]);
+        assert_eq!(
+            backend.default_args,
+            vec![
+                "--slot-prompt-similarity",
+                "0",
+                "--cache-idle-slots",
+                "-ngl",
+                "999",
+                "--cache-ram",
+                "8192"
+            ]
+        );
+
+        let ik = registry.get("ik_llama.cpp-linux-cuda").unwrap();
+        assert_eq!(ik.default_args, vec!["--jinja", "-ngl", "999"]);
     }
 
     #[test]
@@ -1376,13 +1403,16 @@ mod tests {
         assert_eq!(
             backend.default_args,
             vec![
+                "--slot-prompt-similarity",
+                "0",
+                "--cache-idle-slots",
                 "-ngl",
                 "12",
                 "-c",
                 "4096",
                 "-np",
                 "2",
-                "-cram",
+                "--cache-ram",
                 "0",
                 "--flash-attn",
                 "on"

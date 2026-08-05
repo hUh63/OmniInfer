@@ -351,7 +351,8 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
                     "backend": backend_id,
                     "model": model.display().to_string(),
                     "ctx_size": 512,
-                    "backend_port": backend_port
+                    "backend_port": backend_port,
+                    "launch_args": ["-np", "5", "--cache-ram", "2048"]
                 }))
                 .unwrap()
         }
@@ -364,6 +365,26 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     assert_eq!(load_body["selected_ctx_size"], 512);
     assert_eq!(load_body["backend_port"], backend_port);
     assert!(load_body["backend_pid"].as_u64().unwrap() > 0);
+    let launch_command = load_body["launch_command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .unwrap();
+    assert!(
+        launch_command
+            .windows(2)
+            .any(|args| args == ["--slot-prompt-similarity", "0"])
+    );
+    assert!(launch_command.contains(&"--cache-idle-slots"));
+    assert!(launch_command.windows(2).any(|args| args == ["-np", "5"]));
+    let cache_ram_values = launch_command
+        .windows(2)
+        .filter(|args| args[0] == "--cache-ram")
+        .map(|args| args[1])
+        .collect::<Vec<_>>();
+    assert_eq!(cache_ram_values, vec!["8192", "2048"]);
 
     let chat_response = tokio::task::spawn_blocking(move || {
         ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))

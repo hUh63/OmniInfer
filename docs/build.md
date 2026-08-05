@@ -82,7 +82,7 @@ Prebuilt versioning is explicit:
 - `scripts/prebuilt_backends.json` schema 3 keeps each upstream release tag and expected submodule commit once under `sources`, while platform entries record primary archives, companion assets, pinned SHA256 values, required runtime files, and launcher names.
 - A prebuilt llama.cpp runtime is an upstream release artifact. It is only source-aligned when the catalog tag and `framework/llama.cpp` submodule are pinned to the same upstream release tag or commit.
 - If a source checkout has a different `framework/llama.cpp` commit than the catalog entry, the Rust installer prints a version note and records the catalog metadata in `prebuilt.json`.
-- If no official asset exists, leave the catalog entry absent. For example, llama.cpp `b9500` publishes Linux CPU, ROCm, Vulkan, OpenVINO, macOS, and Windows CUDA assets, but not a Linux CUDA archive.
+- If no official asset exists, leave the catalog entry absent. For example, llama.cpp `b10280` publishes Linux CPU, ROCm, Vulkan, OpenVINO, macOS, and Windows CUDA assets, but not a Linux CUDA archive.
 - Each prebuilt install writes `.local/runtime/<platform>/<backend>/prebuilt.json` with the source tag and all downloaded URLs and digests.
 - Windows `llama.cpp-cuda` requires the matching llama.cpp CUDA runtime companion asset. The three required CUDA DLLs are validated before activation, and an incomplete older install is repaired on the next `backend install` invocation.
 - Existing `prebuilt.json` archive digests are compared with newly pinned catalog digests before an installed runtime is accepted. A mismatched or malformed managed manifest triggers a transactional reinstall; an unmanaged/source-built runtime without `prebuilt.json` is not overwritten merely because it exists.
@@ -288,12 +288,12 @@ Linux backend script behavior:
 
 | Backend | Default action | Source build action |
 |---|---|---|
-| `llama.cpp-linux` | Downloads official `b9500` Linux CPU archive | `--from-source` builds `framework/llama.cpp` with CPU settings |
-| `llama.cpp-linux-rocm` | Downloads official `b9500` ROCm archive | `--from-source` builds `framework/llama.cpp` with ROCm settings |
-| `llama.cpp-linux-vulkan` | Downloads official `b9500` Vulkan archive | `--from-source` builds `framework/llama.cpp` with Vulkan settings |
-| `llama.cpp-linux-s390x` | Downloads official `b9500` s390x archive | `--from-source` builds `framework/llama.cpp` for s390x |
-| `llama.cpp-linux-openvino` | Downloads official `b9500` OpenVINO archive | `--from-source` builds `framework/llama.cpp` with OpenVINO settings |
-| `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b9500` has no Linux CUDA archive | `--from-source` builds `framework/llama.cpp` with CUDA settings |
+| `llama.cpp-linux` | Downloads official `b10280` Linux CPU archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with CPU settings |
+| `llama.cpp-linux-rocm` | Downloads official `b10280` ROCm archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with ROCm settings |
+| `llama.cpp-linux-vulkan` | Downloads official `b10280` Vulkan archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with Vulkan settings |
+| `llama.cpp-linux-s390x` | Downloads official `b10280` s390x archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` for s390x |
+| `llama.cpp-linux-openvino` | Downloads official `b10280` OpenVINO archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with OpenVINO settings |
+| `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b10280` has no Linux CUDA archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with CUDA settings |
 | `vllm-linux-cuda` | Creates an OmniInfer-managed venv and installs vLLM wheels | Not a C++ source build path |
 | `mnn-linux` | Creates an OmniInfer-managed venv and installs the official `MNN==3.5.0` wheel | `--from-source` builds PyMNN from `framework/mnn` |
 | `ik_llama.cpp-linux` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/ik_llama.cpp` CPU |
