@@ -387,6 +387,8 @@ mod tests {
             ctx_size: None,
             log_file_name: "runtime.log".to_string(),
             proxy_model_ref: None,
+            protocol: crate::runtime_plan::ExternalServerProtocol::LlamaCppServer,
+            client_endpoint: format!("http://127.0.0.1:{port}"),
             readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
         let process = RuntimeProcess::start(
@@ -418,6 +420,8 @@ mod tests {
             ctx_size: None,
             log_file_name: "runtime.log".to_string(),
             proxy_model_ref: None,
+            protocol: crate::runtime_plan::ExternalServerProtocol::LlamaCppServer,
+            client_endpoint: "http://127.0.0.1:9".to_string(),
             readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
         let error = RuntimeProcess::start(
@@ -449,6 +453,8 @@ mod tests {
             ctx_size: None,
             log_file_name: "runtime.log".to_string(),
             proxy_model_ref: None,
+            protocol: crate::runtime_plan::ExternalServerProtocol::LlamaCppServer,
+            client_endpoint: "http://127.0.0.1:9".to_string(),
             readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
         let error = RuntimeProcess::start(

@@ -21,6 +21,47 @@ pub enum RuntimeReadinessProbe {
     TcpConnect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalServerProtocol {
+    LlamaCppServer,
+    VlaCppZmqServer,
+    VllmOpenAiServer,
+    VllmWsl2OpenAiServer,
+}
+
+impl ExternalServerProtocol {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "llama.cpp-server" => Some(Self::LlamaCppServer),
+            "vla.cpp-zmq-server" => Some(Self::VlaCppZmqServer),
+            "vllm-openai-server" => Some(Self::VllmOpenAiServer),
+            "vllm-wsl2-openai-server" => Some(Self::VllmWsl2OpenAiServer),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlamaCppServer => "llama.cpp-server",
+            Self::VlaCppZmqServer => "vla.cpp-zmq-server",
+            Self::VllmOpenAiServer => "vllm-openai-server",
+            Self::VllmWsl2OpenAiServer => "vllm-wsl2-openai-server",
+        }
+    }
+
+    pub fn is_openai_compatible(self) -> bool {
+        !matches!(self, Self::VlaCppZmqServer)
+    }
+
+    pub fn client_endpoint(self, host: &str, port: u16) -> String {
+        if matches!(self, Self::VlaCppZmqServer) {
+            format!("tcp://{host}:{port}")
+        } else {
+            format!("http://{host}:{port}")
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRuntimePlan {
     pub command: Vec<String>,
@@ -30,6 +71,8 @@ pub struct ExternalRuntimePlan {
     pub ctx_size: Option<u32>,
     pub log_file_name: String,
     pub proxy_model_ref: Option<String>,
+    pub protocol: ExternalServerProtocol,
+    pub client_endpoint: String,
     pub readiness_probe: RuntimeReadinessProbe,
 }
 
@@ -70,8 +113,14 @@ pub fn build_external_runtime_plan(
         return Err(RuntimePlanError::InvalidPort);
     }
     let backend_id = required_str(&request.backend, "id")?;
-    let protocol =
+    let protocol_text =
         optional_str(&request.backend, "external_server_protocol").unwrap_or("llama.cpp-server");
+    let protocol = ExternalServerProtocol::parse(protocol_text).ok_or_else(|| {
+        RuntimePlanError::UnsupportedProtocol {
+            backend: backend_id.to_string(),
+            protocol: protocol_text.to_string(),
+        }
+    })?;
     let launcher = optional_str(&request.backend, "launcher_path")
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| RuntimePlanError::MissingLauncher(backend_id.to_string()))?;
@@ -81,7 +130,7 @@ pub fn build_external_runtime_plan(
         .clone()
         .unwrap_or_else(|| string_array(&request.backend, "default_args"));
     validate_launch_args(&server_args)?;
-    let ctx_flags = ctx_size_flags(protocol);
+    let ctx_flags = ctx_size_flags(protocol.as_str());
     if let Some(ctx_size) = request.ctx_size
         && !ctx_flags[0].is_empty()
     {
@@ -94,7 +143,7 @@ pub fn build_external_runtime_plan(
         .to_string();
 
     match protocol {
-        "llama.cpp-server" => build_llama_cpp_plan(
+        ExternalServerProtocol::LlamaCppServer => build_llama_cpp_plan(
             backend_id,
             &launcher_path,
             request,
@@ -102,21 +151,21 @@ pub fn build_external_runtime_plan(
             effective_ctx_size,
             log_file_name,
         ),
-        "vla.cpp-zmq-server" => build_vla_cpp_plan(
+        ExternalServerProtocol::VlaCppZmqServer => build_vla_cpp_plan(
             &launcher_path,
             request,
             server_args,
             effective_ctx_size,
             log_file_name,
         ),
-        "vllm-openai-server" => build_vllm_plan(
+        ExternalServerProtocol::VllmOpenAiServer => build_vllm_plan(
             &launcher_path,
             request,
             server_args,
             effective_ctx_size,
             log_file_name,
         ),
-        "vllm-wsl2-openai-server" => build_wsl_vllm_plan(
+        ExternalServerProtocol::VllmWsl2OpenAiServer => build_wsl_vllm_plan(
             backend_id,
             &launcher_path,
             request,
@@ -124,10 +173,6 @@ pub fn build_external_runtime_plan(
             effective_ctx_size,
             log_file_name,
         ),
-        other => Err(RuntimePlanError::UnsupportedProtocol {
-            backend: backend_id.to_string(),
-            protocol: other.to_string(),
-        }),
     }
 }
 
@@ -177,6 +222,9 @@ fn build_llama_cpp_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref: None,
+        protocol: ExternalServerProtocol::LlamaCppServer,
+        client_endpoint: ExternalServerProtocol::LlamaCppServer
+            .client_endpoint(&request.host, request.port),
         readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
@@ -214,6 +262,9 @@ fn build_vla_cpp_plan(
         ctx_size: None,
         log_file_name,
         proxy_model_ref: None,
+        protocol: ExternalServerProtocol::VlaCppZmqServer,
+        client_endpoint: ExternalServerProtocol::VlaCppZmqServer
+            .client_endpoint(&request.host, request.port),
         readiness_probe: RuntimeReadinessProbe::TcpConnect,
     })
 }
@@ -263,6 +314,9 @@ fn build_vllm_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref,
+        protocol: ExternalServerProtocol::VllmOpenAiServer,
+        client_endpoint: ExternalServerProtocol::VllmOpenAiServer
+            .client_endpoint(&request.host, request.port),
         readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
@@ -337,6 +391,9 @@ fn build_wsl_vllm_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref,
+        protocol: ExternalServerProtocol::VllmWsl2OpenAiServer,
+        client_endpoint: ExternalServerProtocol::VllmWsl2OpenAiServer
+            .client_endpoint(&request.host, request.port),
         readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
@@ -510,6 +567,9 @@ mod tests {
             .to_string();
         assert_eq!(plan.ctx_size, Some(8192));
         assert_eq!(plan.cwd, PathBuf::from("/runtime/llama.cpp-linux-cuda/bin"));
+        assert_eq!(plan.protocol, ExternalServerProtocol::LlamaCppServer);
+        assert_eq!(plan.client_endpoint, "http://127.0.0.1:12345");
+        assert!(plan.protocol.is_openai_compatible());
         assert_eq!(plan.readiness_probe, RuntimeReadinessProbe::HttpHealth);
         assert_eq!(
             plan.command,
@@ -582,6 +642,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(plan.ctx_size, None);
+        assert_eq!(plan.protocol, ExternalServerProtocol::VlaCppZmqServer);
+        assert_eq!(plan.client_endpoint, "tcp://127.0.0.1:15555");
+        assert!(!plan.protocol.is_openai_compatible());
         assert_eq!(plan.readiness_probe, RuntimeReadinessProbe::TcpConnect);
         assert_eq!(
             plan.command,
@@ -641,6 +704,9 @@ mod tests {
         .unwrap();
         assert_eq!(plan.ctx_size, Some(4096));
         assert_eq!(plan.proxy_model_ref.as_deref(), Some("local"));
+        assert_eq!(plan.protocol, ExternalServerProtocol::VllmOpenAiServer);
+        assert_eq!(plan.client_endpoint, "http://127.0.0.1:23456");
+        assert!(plan.protocol.is_openai_compatible());
         assert_eq!(
             plan.command,
             vec![
