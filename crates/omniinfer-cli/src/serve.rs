@@ -969,14 +969,30 @@ fn print_serve_ready(
 ) {
     println!();
     println!("OmniInfer service is ready");
+    let openai_compatible = json_bool(state, "openai_compatible").unwrap_or(true);
     if let Some(public_url) = public_url {
-        println!("OpenAI Base URL: {}/v1", public_url.trim_end_matches('/'));
+        if openai_compatible {
+            println!("OpenAI Base URL: {}/v1", public_url.trim_end_matches('/'));
+        } else {
+            println!("Public Gateway URL: {}", public_url.trim_end_matches('/'));
+        }
         println!("Health URL: {}/health", public_url.trim_end_matches('/'));
     }
     for lan_base_url in lan_base_urls {
-        println!("LAN Base URL: {lan_base_url}");
+        if openai_compatible {
+            println!("LAN Base URL: {lan_base_url}");
+        } else {
+            println!("LAN Gateway URL: {}", lan_base_url.trim_end_matches("/v1"));
+        }
     }
-    println!("Local Base URL: http://127.0.0.1:{port}/v1");
+    if openai_compatible {
+        println!("Local Base URL: http://127.0.0.1:{port}/v1");
+    } else {
+        println!("Local Gateway URL: http://127.0.0.1:{port}");
+        if let Some(endpoint) = json_str(state, "client_endpoint") {
+            println!("VLA Client Endpoint: {endpoint}");
+        }
+    }
     if let Some(api_key) = api_key.filter(|_| print_api_key) {
         println!("API Key: {api_key}");
     }
@@ -994,6 +1010,9 @@ fn print_serve_ready(
         }
     }
     println!("Backend: {}", json_str(state, "backend").unwrap_or("-"));
+    if let Some(protocol) = json_str(state, "external_server_protocol") {
+        println!("Backend protocol: {protocol}");
+    }
     println!(
         "Backend ready: {}",
         yes_no(json_bool(state, "backend_ready").unwrap_or(false))
@@ -1014,9 +1033,13 @@ fn print_serve_ready(
         return;
     }
     println!("Stop: ./omniinfer serve stop --port {port}");
-    let remote_base_url = public_url
-        .map(|url| format!("{}/v1", url.trim_end_matches('/')))
-        .or_else(|| lan_base_urls.first().cloned());
+    let remote_base_url = if openai_compatible {
+        public_url
+            .map(|url| format!("{}/v1", url.trim_end_matches('/')))
+            .or_else(|| lan_base_urls.first().cloned())
+    } else {
+        None
+    };
     if let Some(remote_base_url) = remote_base_url {
         println!("Curl:");
         let auth = if let Some(api_key) = api_key.filter(|_| print_api_key) {
@@ -1158,6 +1181,12 @@ pub(crate) fn print_serve_status(port: u16) {
         Ok(response) if response.status == 200 => {
             let state = response.body.get("omni").unwrap_or(&response.body);
             println!("Backend: {}", json_str(state, "backend").unwrap_or("-"));
+            if let Some(protocol) = json_str(state, "external_server_protocol") {
+                println!("Backend protocol: {protocol}");
+            }
+            if let Some(endpoint) = json_str(state, "client_endpoint") {
+                println!("Client endpoint: {endpoint}");
+            }
             println!(
                 "Backend ready: {}",
                 yes_no(json_bool(state, "backend_ready").unwrap_or(false))

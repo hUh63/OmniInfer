@@ -476,6 +476,91 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     std::fs::remove_dir_all(temp).ok();
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn vla_runtime_exposes_zmq_contract_and_rejects_openai_proxying() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("vla-runtime-protocol-contract");
+    let model = temp.join("smolvla.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, "GGUF").unwrap();
+    install_fake_vla_server(&temp, "vla.cpp-linux");
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let gateway = spawn_test_gateway_with_options(GatewayAccessPolicy::default(), None).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+
+    let load = tokio::task::spawn_blocking({
+        let model = model.clone();
+        move || {
+            ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+                .send_json(json!({
+                    "backend": "vla.cpp-linux",
+                    "model": model.display().to_string(),
+                    "backend_port": backend_port,
+                }))
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(load.status().as_u16(), 200);
+    let load: Value = load.into_body().read_json().unwrap();
+    assert_eq!(load["external_server_protocol"], "vla.cpp-zmq-server");
+    assert_eq!(
+        load["client_endpoint"],
+        format!("tcp://127.0.0.1:{backend_port}")
+    );
+    assert_eq!(load["openai_compatible"], false);
+
+    let state = tokio::task::spawn_blocking(move || {
+        ureq::get(format!("http://127.0.0.1:{port}/omni/state"))
+            .call()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let state: Value = state.into_body().read_json().unwrap();
+    assert_eq!(state["external_server_protocol"], "vla.cpp-zmq-server");
+    assert_eq!(state["openai_compatible"], false);
+    assert_eq!(
+        state["runtime"]["client_endpoint"],
+        format!("tcp://127.0.0.1:{backend_port}")
+    );
+
+    for endpoint in ["/v1/chat/completions", "/v1/messages"] {
+        let response = tokio::task::spawn_blocking(move || {
+            ureq::post(format!("http://127.0.0.1:{port}{endpoint}"))
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send_json(json!({
+                    "model": "omniinfer",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 422);
+        let body: Value = response.into_body().read_json().unwrap();
+        assert_eq!(body["error"]["code"], "backend_protocol_not_supported");
+        assert_eq!(
+            body["error"]["external_server_protocol"],
+            "vla.cpp-zmq-server"
+        );
+        assert_eq!(
+            body["error"]["client_endpoint"],
+            format!("tcp://127.0.0.1:{backend_port}")
+        );
+    }
+
+    gateway.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
 #[tokio::test]
 async fn gateway_uses_configured_runtime_startup_timeout() {
     let _env_lock = TEST_ENV_LOCK.lock().await;
@@ -1939,6 +2024,51 @@ PY
             std::fs::set_permissions(&launcher, permissions).unwrap();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn install_fake_vla_server(root: &std::path::Path, backend_id: &str) {
+    let launcher = root
+        .join(".local")
+        .join("runtime")
+        .join(test_runtime_platform_dir())
+        .join(backend_id)
+        .join("bin")
+        .join("vla-server");
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::write(
+        &launcher,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+bind=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --bind) bind="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'vla-server: bound to %s. ready.\n' "$bind"
+python3 - "$bind" <<'PY'
+import socket
+import sys
+
+endpoint = sys.argv[1].removeprefix("tcp://")
+host, port = endpoint.rsplit(":", 1)
+with socket.socket() as server:
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((host, int(port)))
+    server.listen()
+    while True:
+        connection, _ = server.accept()
+        connection.close()
+PY
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&launcher, permissions).unwrap();
 }
 
 #[cfg(target_os = "linux")]

@@ -16,6 +16,59 @@ pub struct ExternalRuntimeRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeReadinessProbe {
+    HttpHealth,
+    TcpConnectAndLog { marker: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalServerProtocol {
+    LlamaCppServer,
+    VlaCppZmqServer,
+    VllmOpenAiServer,
+    VllmWsl2OpenAiServer,
+}
+
+impl ExternalServerProtocol {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "llama.cpp-server" => Some(Self::LlamaCppServer),
+            "vla.cpp-zmq-server" => Some(Self::VlaCppZmqServer),
+            "vllm-openai-server" => Some(Self::VllmOpenAiServer),
+            "vllm-wsl2-openai-server" => Some(Self::VllmWsl2OpenAiServer),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlamaCppServer => "llama.cpp-server",
+            Self::VlaCppZmqServer => "vla.cpp-zmq-server",
+            Self::VllmOpenAiServer => "vllm-openai-server",
+            Self::VllmWsl2OpenAiServer => "vllm-wsl2-openai-server",
+        }
+    }
+
+    pub fn is_openai_compatible(self) -> bool {
+        !matches!(self, Self::VlaCppZmqServer)
+    }
+
+    pub fn client_endpoint(self, host: &str, port: u16) -> String {
+        let endpoint_host = host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .filter(std::net::IpAddr::is_ipv6)
+            .map(|_| format!("[{host}]"))
+            .unwrap_or_else(|| host.to_string());
+        if matches!(self, Self::VlaCppZmqServer) {
+            format!("tcp://{endpoint_host}:{port}")
+        } else {
+            format!("http://{endpoint_host}:{port}")
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRuntimePlan {
     pub command: Vec<String>,
     pub stop_command: Option<Vec<String>>,
@@ -24,6 +77,9 @@ pub struct ExternalRuntimePlan {
     pub ctx_size: Option<u32>,
     pub log_file_name: String,
     pub proxy_model_ref: Option<String>,
+    pub protocol: ExternalServerProtocol,
+    pub client_endpoint: String,
+    pub readiness_probe: RuntimeReadinessProbe,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -38,6 +94,8 @@ pub enum RuntimePlanError {
     UnsupportedProtocol { backend: String, protocol: String },
     #[error("port must be in 1-65535")]
     InvalidPort,
+    #[error("vla.cpp ZeroMQ runtime must bind to a loopback host, got: {0}")]
+    NonLoopbackVlaBind(String),
     #[error("invalid WSL2 launcher manifest {path}: {message}")]
     InvalidWslLauncherManifest { path: String, message: String },
     #[error("WSL2 vLLM does not support this Windows model path: {0}")]
@@ -63,8 +121,14 @@ pub fn build_external_runtime_plan(
         return Err(RuntimePlanError::InvalidPort);
     }
     let backend_id = required_str(&request.backend, "id")?;
-    let protocol =
+    let protocol_text =
         optional_str(&request.backend, "external_server_protocol").unwrap_or("llama.cpp-server");
+    let protocol = ExternalServerProtocol::parse(protocol_text).ok_or_else(|| {
+        RuntimePlanError::UnsupportedProtocol {
+            backend: backend_id.to_string(),
+            protocol: protocol_text.to_string(),
+        }
+    })?;
     let launcher = optional_str(&request.backend, "launcher_path")
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| RuntimePlanError::MissingLauncher(backend_id.to_string()))?;
@@ -74,8 +138,10 @@ pub fn build_external_runtime_plan(
         .clone()
         .unwrap_or_else(|| string_array(&request.backend, "default_args"));
     validate_launch_args(&server_args)?;
-    let ctx_flags = ctx_size_flags(protocol);
-    if let Some(ctx_size) = request.ctx_size {
+    let ctx_flags = ctx_size_flags(protocol.as_str());
+    if let Some(ctx_size) = request.ctx_size
+        && !ctx_flags[0].is_empty()
+    {
         server_args = with_server_arg(server_args, &ctx_flags, ctx_size.to_string());
     }
     let effective_ctx_size =
@@ -85,7 +151,7 @@ pub fn build_external_runtime_plan(
         .to_string();
 
     match protocol {
-        "llama.cpp-server" => build_llama_cpp_plan(
+        ExternalServerProtocol::LlamaCppServer => build_llama_cpp_plan(
             backend_id,
             &launcher_path,
             request,
@@ -93,14 +159,21 @@ pub fn build_external_runtime_plan(
             effective_ctx_size,
             log_file_name,
         ),
-        "vllm-openai-server" => build_vllm_plan(
+        ExternalServerProtocol::VlaCppZmqServer => build_vla_cpp_plan(
             &launcher_path,
             request,
             server_args,
             effective_ctx_size,
             log_file_name,
         ),
-        "vllm-wsl2-openai-server" => build_wsl_vllm_plan(
+        ExternalServerProtocol::VllmOpenAiServer => build_vllm_plan(
+            &launcher_path,
+            request,
+            server_args,
+            effective_ctx_size,
+            log_file_name,
+        ),
+        ExternalServerProtocol::VllmWsl2OpenAiServer => build_wsl_vllm_plan(
             backend_id,
             &launcher_path,
             request,
@@ -108,10 +181,6 @@ pub fn build_external_runtime_plan(
             effective_ctx_size,
             log_file_name,
         ),
-        other => Err(RuntimePlanError::UnsupportedProtocol {
-            backend: backend_id.to_string(),
-            protocol: other.to_string(),
-        }),
     }
 }
 
@@ -161,7 +230,74 @@ fn build_llama_cpp_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref: None,
+        protocol: ExternalServerProtocol::LlamaCppServer,
+        client_endpoint: ExternalServerProtocol::LlamaCppServer
+            .client_endpoint(&request.host, request.port),
+        readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
+}
+
+fn build_vla_cpp_plan(
+    launcher_path: &Path,
+    request: &ExternalRuntimeRequest,
+    mut server_args: Vec<String>,
+    _effective_ctx_size: Option<u32>,
+    log_file_name: String,
+) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    if !is_loopback_host(&request.host) {
+        return Err(RuntimePlanError::NonLoopbackVlaBind(request.host.clone()));
+    }
+    validate_vla_cpp_launch_args(&server_args)?;
+    let client_endpoint =
+        ExternalServerProtocol::VlaCppZmqServer.client_endpoint(&request.host, request.port);
+    let mut command = vec![
+        launcher_path.display().to_string(),
+        "--bind".to_string(),
+        client_endpoint.clone(),
+    ];
+    command.append(&mut server_args);
+    if let Some(mmproj) = request
+        .mmproj_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        command.push(mmproj.to_string());
+    }
+    command.push(request.model_path.clone());
+    Ok(ExternalRuntimePlan {
+        command,
+        stop_command: None,
+        cwd: launcher_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        port: request.port,
+        ctx_size: None,
+        log_file_name,
+        proxy_model_ref: None,
+        protocol: ExternalServerProtocol::VlaCppZmqServer,
+        client_endpoint: client_endpoint.clone(),
+        readiness_probe: RuntimeReadinessProbe::TcpConnectAndLog {
+            marker: format!("vla-server: bound to {client_endpoint}. ready."),
+        },
+    })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn validate_vla_cpp_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
+    for token in args {
+        let flag = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+        if matches!(flag, "-c" | "--ctx-size" | "--max-model-len") {
+            return Err(RuntimePlanError::ReservedLaunchArg(flag.to_string()));
+        }
+    }
+    Ok(())
 }
 
 fn build_vllm_plan(
@@ -199,6 +335,10 @@ fn build_vllm_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref,
+        protocol: ExternalServerProtocol::VllmOpenAiServer,
+        client_endpoint: ExternalServerProtocol::VllmOpenAiServer
+            .client_endpoint(&request.host, request.port),
+        readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
 
@@ -272,6 +412,10 @@ fn build_wsl_vllm_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref,
+        protocol: ExternalServerProtocol::VllmWsl2OpenAiServer,
+        client_endpoint: ExternalServerProtocol::VllmWsl2OpenAiServer
+            .client_endpoint(&request.host, request.port),
+        readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
 
@@ -335,7 +479,7 @@ fn validate_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
         let flag = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
         if matches!(
             flag,
-            "-m" | "--model" | "-mm" | "--mmproj" | "--host" | "--port" | "--no-webui"
+            "-m" | "--model" | "-mm" | "--mmproj" | "--host" | "--port" | "--bind" | "--no-webui"
         ) {
             return Err(RuntimePlanError::ReservedLaunchArg(flag.to_string()));
         }
@@ -377,10 +521,10 @@ fn extract_server_arg_value(args: &[String], flags: &[&str]) -> Option<String> {
 }
 
 fn ctx_size_flags(protocol: &str) -> [&'static str; 2] {
-    if matches!(protocol, "vllm-openai-server" | "vllm-wsl2-openai-server") {
-        ["--max-model-len", ""]
-    } else {
-        ["-c", "--ctx-size"]
+    match protocol {
+        "vllm-openai-server" | "vllm-wsl2-openai-server" => ["--max-model-len", ""],
+        "vla.cpp-zmq-server" => ["", ""],
+        _ => ["-c", "--ctx-size"],
     }
 }
 
@@ -444,6 +588,10 @@ mod tests {
             .to_string();
         assert_eq!(plan.ctx_size, Some(8192));
         assert_eq!(plan.cwd, PathBuf::from("/runtime/llama.cpp-linux-cuda/bin"));
+        assert_eq!(plan.protocol, ExternalServerProtocol::LlamaCppServer);
+        assert_eq!(plan.client_endpoint, "http://127.0.0.1:12345");
+        assert!(plan.protocol.is_openai_compatible());
+        assert_eq!(plan.readiness_probe, RuntimeReadinessProbe::HttpHealth);
         assert_eq!(
             plan.command,
             vec![
@@ -495,6 +643,106 @@ mod tests {
     }
 
     #[test]
+    fn builds_vla_cpp_zmq_server_shape() {
+        let backend = json!({
+            "id": "vla.cpp-linux-cuda",
+            "launcher_path": "/runtime/vla.cpp-linux-cuda/bin/vla-server",
+            "runtime_dir": "/runtime/vla.cpp-linux-cuda",
+            "default_args": ["--timing-detail", "phase"],
+            "external_server_protocol": "vla.cpp-zmq-server",
+            "log_file_name": "vla-server.log"
+        });
+        let plan = build_external_runtime_plan(&ExternalRuntimeRequest {
+            backend,
+            model_path: "/models/smolvla.gguf".to_string(),
+            mmproj_path: Some("/models/mmproj.gguf".to_string()),
+            host: "127.0.0.1".to_string(),
+            port: 15555,
+            ctx_size: Some(8192),
+            launch_args: None,
+        })
+        .unwrap();
+        assert_eq!(plan.ctx_size, None);
+        assert_eq!(plan.protocol, ExternalServerProtocol::VlaCppZmqServer);
+        assert_eq!(plan.client_endpoint, "tcp://127.0.0.1:15555");
+        assert!(!plan.protocol.is_openai_compatible());
+        assert_eq!(
+            plan.readiness_probe,
+            RuntimeReadinessProbe::TcpConnectAndLog {
+                marker: "vla-server: bound to tcp://127.0.0.1:15555. ready.".to_string(),
+            }
+        );
+        assert_eq!(
+            plan.command,
+            vec![
+                "/runtime/vla.cpp-linux-cuda/bin/vla-server".to_string(),
+                "--bind".to_string(),
+                "tcp://127.0.0.1:15555".to_string(),
+                "--timing-detail".to_string(),
+                "phase".to_string(),
+                "/models/mmproj.gguf".to_string(),
+                "/models/smolvla.gguf".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_vla_cpp_context_launch_arg() {
+        let backend = json!({
+            "id": "vla.cpp-linux",
+            "launcher_path": "/runtime/vla.cpp-linux/bin/vla-server",
+            "runtime_dir": "/runtime/vla.cpp-linux",
+            "default_args": ["-c", "4096"],
+            "external_server_protocol": "vla.cpp-zmq-server"
+        });
+        let error = build_external_runtime_plan(&ExternalRuntimeRequest {
+            backend,
+            model_path: "/models/smolvla.gguf".to_string(),
+            mmproj_path: None,
+            host: "127.0.0.1".to_string(),
+            port: 15555,
+            ctx_size: None,
+            launch_args: None,
+        })
+        .unwrap_err();
+        assert_eq!(error, RuntimePlanError::ReservedLaunchArg("-c".to_string()));
+    }
+
+    #[test]
+    fn rejects_unauthenticated_non_loopback_vla_bind() {
+        let backend = json!({
+            "id": "vla.cpp-linux",
+            "launcher_path": "/runtime/vla.cpp-linux/bin/vla-server",
+            "runtime_dir": "/runtime/vla.cpp-linux",
+            "external_server_protocol": "vla.cpp-zmq-server"
+        });
+        for host in ["0.0.0.0", "192.0.2.10", "::"] {
+            let error = build_external_runtime_plan(&ExternalRuntimeRequest {
+                backend: backend.clone(),
+                model_path: "/models/smolvla.gguf".to_string(),
+                mmproj_path: None,
+                host: host.to_string(),
+                port: 15555,
+                ctx_size: None,
+                launch_args: None,
+            })
+            .unwrap_err();
+            assert_eq!(
+                error,
+                RuntimePlanError::NonLoopbackVlaBind(host.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn formats_ipv6_loopback_client_endpoint() {
+        assert_eq!(
+            ExternalServerProtocol::VlaCppZmqServer.client_endpoint("::1", 15555),
+            "tcp://[::1]:15555"
+        );
+    }
+
+    #[test]
     fn vllm_uses_openai_server_shape() {
         let backend = json!({
             "id": "vllm-linux-cuda",
@@ -516,6 +764,9 @@ mod tests {
         .unwrap();
         assert_eq!(plan.ctx_size, Some(4096));
         assert_eq!(plan.proxy_model_ref.as_deref(), Some("local"));
+        assert_eq!(plan.protocol, ExternalServerProtocol::VllmOpenAiServer);
+        assert_eq!(plan.client_endpoint, "http://127.0.0.1:23456");
+        assert!(plan.protocol.is_openai_compatible());
         assert_eq!(
             plan.command,
             vec![

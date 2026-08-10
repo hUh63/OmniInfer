@@ -178,7 +178,7 @@ Windows:
 
 Examples:
 
-- Linux: `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, or `vllm-linux-cuda`
+- Linux: `llama.cpp-linux`, `llama.cpp-linux-rocm`, `llama.cpp-linux-vulkan`, `llama.cpp-linux-s390x`, `llama.cpp-linux-openvino`, `vllm-linux-cuda`, `vla.cpp-linux`, or `vla.cpp-linux-cuda`
 - macOS: `llama.cpp-mac`, `llama.cpp-mac-intel`, `turboquant-mac`, or `mlx-mac`
 - Windows: `llama.cpp-cpu`, `llama.cpp-cuda`, `llama.cpp-vulkan`, `llama.cpp-windows-arm64`, `llama.cpp-sycl`, `llama.cpp-hip`, or managed `vllm-wsl2-cuda` / `vllm-wsl2-rocm`
 
@@ -278,6 +278,13 @@ For `llama.cpp-*`, OmniInfer accepts either a model file or a model directory. I
 
 For `mlx-mac`, OmniInfer passes the model directory directly to the embedded backend.
 For `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm`, OmniInfer passes HuggingFace model IDs and other non-path references directly to `vllm serve`. On Windows, an absolute drive path such as `D:\models\Qwen` is translated to the selected distribution's automount path such as `/mnt/d/models/Qwen`. UNC paths are rejected; copy or download the model into a local Windows drive or the selected WSL2 filesystem.
+
+For `vla.cpp-*`, OmniInfer starts and supervises the managed `vla-server` process. vla.cpp uses its own ZeroMQ/protobuf action-prediction protocol instead of the OpenAI chat API, so VLA clients should connect to the reported loopback endpoint with vla.cpp's `src/serving/vla.proto` contract. The gateway does not translate or publish that unauthenticated protocol: `/v1/chat/completions` and `/v1/messages` return `422` while a VLA runtime is loaded. The model must be a VLA checkpoint file path, such as a GGUF or safetensors file. Pass `--mmproj` when the selected VLA architecture requires a separate vision tower GGUF. vla.cpp server-native flags such as `--config` and `--timing-detail phase` can be passed after `--`.
+
+```sh
+./omniinfer backend select vla.cpp-linux-cuda
+./omniinfer load -m /models/smolvla/smolvla-libero.gguf --mmproj /models/smolvla/mmproj.gguf -- --timing-detail phase
+```
 
 Explicit file path:
 

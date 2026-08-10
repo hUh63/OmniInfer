@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import re
 import shutil
 import stat
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -42,6 +44,8 @@ BACKEND_PRIORITY = {
     "llama.cpp-linux": 1,
     "llama.cpp-linux-s390x": 1,
     "ik_llama.cpp-linux": 1,
+    "vla.cpp-linux-cuda": 1,
+    "vla.cpp-linux": 2,
     "vllm-linux-cuda": 2,
 }
 
@@ -64,6 +68,8 @@ LINUX_TEMPLATES = (
     BackendTemplate("ik_llama.cpp-linux-cuda", "llama.cpp", "ik_llama.cpp-linux-cuda", (), "llama-server", "external_server"),
     BackendTemplate("mnn-linux", "mnn", "mnn-linux", (), None, "embedded", ("MNN", "MNN.llm", "MNN.cv")),
     BackendTemplate("vllm-linux-cuda", "vllm", "vllm-linux-cuda", (), "vllm", "external_server"),
+    BackendTemplate("vla.cpp-linux", "vla.cpp", "vla.cpp-linux", (), "vla-server", "external_server"),
+    BackendTemplate("vla.cpp-linux-cuda", "vla.cpp", "vla.cpp-linux-cuda", (), "vla-server", "external_server"),
 )
 
 
@@ -88,6 +94,8 @@ def _has_embedded_python_runtime(runtime_dir: Path) -> bool:
 
 def _copy_mode(template: BackendTemplate) -> str:
     if template.family == "llama.cpp" and template.launcher_name == "llama-server":
+        return "binary-bin"
+    if template.family == "vla.cpp" and template.launcher_name == "vla-server":
         return "binary-bin"
     return "full-runtime"
 
@@ -192,6 +200,67 @@ def copy_runtime_package(package: RuntimePackage, target_root: Path) -> None:
         _rewrite_runtime_path_references(source_dir, target_dir)
     else:
         raise ValueError(f"unsupported copy mode: {package.copy_mode}")
+    if package.id.startswith("vla.cpp-"):
+        _validate_elf_dependency_closure(target_dir / "bin")
+
+
+def _validate_elf_dependency_closure(bin_dir: Path) -> None:
+    if not bin_dir.is_dir():
+        raise ValueError(f"runtime bin directory is missing: {bin_dir}")
+    elf_files = sorted(
+        path
+        for path in bin_dir.iterdir()
+        if path.is_file() and _is_elf(path)
+    )
+    if not elf_files:
+        return
+    environment = {"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": str(bin_dir)}
+    for path in elf_files:
+        _validate_elf_runtime_paths(path, environment)
+        result = subprocess.run(
+            ["ldd", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 0 or "=> not found" in output:
+            raise ValueError(
+                f"unresolved ELF dependency in packaged runtime: {path.name}\n{output}"
+            )
+
+
+def _validate_elf_runtime_paths(path: Path, environment: dict[str, str]) -> None:
+    try:
+        result = subprocess.run(
+            ["readelf", "-d", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    except OSError as error:
+        raise ValueError(f"failed to inspect ELF runtime paths: {path.name}: {error}") from error
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    if result.returncode != 0:
+        raise ValueError(f"failed to inspect ELF runtime paths: {path.name}\n{output}")
+    for value in re.findall(r"\((?:RPATH|RUNPATH)\).*?\[(.*?)\]", output):
+        for entry in value.split(":"):
+            if entry not in {"$ORIGIN", "${ORIGIN}"} and not entry.startswith(
+                ("$ORIGIN/", "${ORIGIN}/")
+            ):
+                raise ValueError(
+                    f"unsafe ELF runtime path in packaged runtime: {path.name}: {entry or '<empty>'}"
+                )
+
+
+def _is_elf(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(4) == b"\x7fELF"
+    except OSError:
+        return False
 
 
 def _default_backend(packages: list[RuntimePackage]) -> str:

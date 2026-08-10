@@ -8,7 +8,9 @@ use omniinfer_core::backend_registry::{self, BackendRegistry, BackendScope};
 use omniinfer_core::local_state;
 use omniinfer_core::model_artifacts::{discover_llama_cpp_model_artifacts, maybe_auto_mmproj};
 use omniinfer_core::model_load::DEFAULT_LOAD_CONTEXT_SIZE;
-use omniinfer_core::runtime_plan::{ExternalRuntimeRequest, build_external_runtime_plan};
+use omniinfer_core::runtime_plan::{
+    ExternalRuntimeRequest, ExternalServerProtocol, build_external_runtime_plan,
+};
 use omniinfer_core::runtime_process::{RuntimeProcess, RuntimeProcessError, RuntimeProcessOptions};
 use serde_json::{Value, json};
 
@@ -27,7 +29,9 @@ pub(super) struct RustRuntimeManager {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RuntimeProxyTarget {
-    pub(super) base_url: String,
+    pub(super) base_url: Option<String>,
+    pub(super) client_endpoint: String,
+    pub(super) protocol: ExternalServerProtocol,
     pub(super) backend_id: String,
     pub(super) model: Option<String>,
 }
@@ -43,6 +47,8 @@ struct LoadedRustRuntime {
     launch_args: Vec<String>,
     cuda_visible_devices: Option<String>,
     cuda_warning: Option<String>,
+    external_server_protocol: ExternalServerProtocol,
+    client_endpoint: String,
     process: RuntimeProcess,
     proxy_model_ref: Option<String>,
 }
@@ -281,6 +287,8 @@ impl RustRuntimeManager {
                 cuda_warning: cuda_selection
                     .as_ref()
                     .and_then(|selection| selection.warning.clone()),
+                external_server_protocol: plan.protocol,
+                client_endpoint: plan.client_endpoint.clone(),
                 proxy_model_ref: plan.proxy_model_ref.clone(),
                 process,
             },
@@ -346,7 +354,7 @@ impl RustRuntimeManager {
 
     pub(super) fn proxy_base_for_model(&self, requested_model: Option<&str>) -> Option<String> {
         self.proxy_target_for_model(requested_model)
-            .map(|target| target.base_url)
+            .and_then(|target| target.base_url)
     }
 
     pub(super) fn proxy_target_for_model(
@@ -356,7 +364,12 @@ impl RustRuntimeManager {
         let key = self.resolve_proxy_model_key(requested_model)?;
         let loaded = self.loaded.get(&key)?;
         Some(RuntimeProxyTarget {
-            base_url: format!("http://127.0.0.1:{}", loaded.process.info().port),
+            base_url: loaded
+                .external_server_protocol
+                .is_openai_compatible()
+                .then(|| loaded.client_endpoint.clone()),
+            client_endpoint: loaded.client_endpoint.clone(),
+            protocol: loaded.external_server_protocol,
             backend_id: loaded.backend_id.clone(),
             model: loaded.proxy_model_ref.clone(),
         })
@@ -482,6 +495,9 @@ impl RustRuntimeManager {
                     "warning": loaded.cuda_warning,
                     "launch_command": info.command,
                     "proxy_model": loaded.proxy_model_ref,
+                    "external_server_protocol": loaded.external_server_protocol.as_str(),
+                    "client_endpoint": loaded.client_endpoint,
+                    "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
                     "backend_log": info.log_path.display().to_string(),
                     "effective_parameters": {},
                     "runtime": {
@@ -493,6 +509,9 @@ impl RustRuntimeManager {
                         "launch_command": info.command,
                         "log_path": info.log_path.display().to_string(),
                         "proxy_model_ref": loaded.proxy_model_ref,
+                        "external_server_protocol": loaded.external_server_protocol.as_str(),
+                        "client_endpoint": loaded.client_endpoint,
+                        "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
                     },
                     "log_path": info.log_path.display().to_string(),
                     "loaded_models": loaded_models,
@@ -515,6 +534,9 @@ impl RustRuntimeManager {
                 "warning": null,
                 "launch_command": [],
                 "proxy_model": null,
+                "external_server_protocol": null,
+                "client_endpoint": null,
+                "openai_compatible": false,
                 "backend_log": null,
                 "effective_parameters": {},
                 "runtime": null,
@@ -654,6 +676,9 @@ fn model_load_response(loaded: &LoadedRustRuntime, already_loaded: bool) -> Valu
         "backend_port": info.port,
         "launch_command": info.command,
         "log_path": info.log_path.display().to_string(),
+        "external_server_protocol": loaded.external_server_protocol.as_str(),
+        "client_endpoint": loaded.client_endpoint,
+        "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
     });
     if let Some(visible_devices) = loaded.cuda_visible_devices.as_deref() {
         response["cuda_visible_devices"] = json!(visible_devices);
@@ -729,6 +754,9 @@ fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
         "warning": loaded.cuda_warning,
         "launch_command": info.command,
         "proxy_model": loaded.proxy_model_ref,
+        "external_server_protocol": loaded.external_server_protocol.as_str(),
+        "client_endpoint": loaded.client_endpoint,
+        "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
         "backend_log": info.log_path.display().to_string(),
     })
 }
@@ -771,6 +799,21 @@ fn resolve_model_for_backend(
         });
     }
     let path = resolve_path_for_backend(model, backend, "model")?;
+    if backend.model_artifact == "vla-artifact" {
+        let path = PathBuf::from(&path);
+        if path.is_dir() {
+            anyhow::bail!(
+                "vla.cpp model must be a checkpoint file, not a directory: {}",
+                path.display()
+            );
+        }
+        if !is_vla_checkpoint_path(&path) {
+            anyhow::bail!(
+                "vla.cpp model must be a .gguf or .safetensors checkpoint: {}",
+                path.display()
+            );
+        }
+    }
     if backend.model_artifact == "file" && PathBuf::from(&path).is_dir() {
         return Ok(discover_llama_cpp_model_artifacts(&PathBuf::from(path))?);
     }
@@ -778,6 +821,14 @@ fn resolve_model_for_backend(
         model_path: path,
         mmproj_path: None,
     })
+}
+
+fn is_vla_checkpoint_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("gguf") || extension.eq_ignore_ascii_case("safetensors")
+        })
 }
 
 fn resolve_path_for_backend(
@@ -873,6 +924,20 @@ mod tests {
             "vllm",
             &["--gpu-memory-utilization".to_string(), "0.9".to_string()]
         ));
+    }
+
+    #[test]
+    fn recognizes_only_supported_vla_checkpoint_extensions() {
+        assert!(is_vla_checkpoint_path(
+            PathBuf::from("model.gguf").as_path()
+        ));
+        assert!(is_vla_checkpoint_path(
+            PathBuf::from("model.SAFETENSORS").as_path()
+        ));
+        assert!(!is_vla_checkpoint_path(
+            PathBuf::from("model.bin").as_path()
+        ));
+        assert!(!is_vla_checkpoint_path(PathBuf::from("model").as_path()));
     }
 
     #[test]

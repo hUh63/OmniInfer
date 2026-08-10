@@ -221,6 +221,7 @@ fn normalize_backends(payload: Value) -> Vec<Value> {
 fn recommended_installed_backend(backends: &[Value]) -> Option<String> {
     backends
         .iter()
+        .filter(|backend| backend_has_capability(backend, "chat"))
         .filter(|backend| json_bool(backend, "installed").unwrap_or(false))
         .filter(|backend| json_bool(backend, "hardware_compatible").unwrap_or(false))
         .min_by(|left, right| compare_backend_candidates(left, right))
@@ -231,12 +232,23 @@ fn recommended_installed_backend(backends: &[Value]) -> Option<String> {
 fn recommended_backend_to_install(backends: &[Value]) -> Option<String> {
     backends
         .iter()
+        .filter(|backend| backend_has_capability(backend, "chat"))
         .filter(|backend| !json_bool(backend, "installed").unwrap_or(false))
         .filter(|backend| json_bool(backend, "hardware_compatible").unwrap_or(false))
         .filter(|backend| json_bool(backend, "prebuilt_installable").unwrap_or(false))
         .min_by(|left, right| compare_backend_candidates(left, right))
         .and_then(|backend| json_str(backend, "id"))
         .map(str::to_string)
+}
+
+fn backend_has_capability(backend: &Value, wanted: &str) -> bool {
+    backend
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|capability| capability == wanted)
 }
 
 fn compare_backend_candidates(left: &Value, right: &Value) -> std::cmp::Ordering {
@@ -274,11 +286,13 @@ mod tests {
             "data": [
                 {
                     "id": "ik_llama.cpp-cuda",
+                    "capabilities": ["chat"],
                     "binary_exists": false,
                     "compatibility": "compatible"
                 },
                 {
                     "id": "llama.cpp-cuda",
+                    "capabilities": ["chat"],
                     "binary_exists": false,
                     "compatibility": "compatible"
                 }
@@ -310,6 +324,7 @@ mod tests {
         let backends = vec![
             json!({
                 "id": "llama.cpp-mac-intel",
+                "capabilities": ["chat"],
                 "installed": false,
                 "hardware_compatible": false,
                 "prebuilt_installable": true,
@@ -317,6 +332,7 @@ mod tests {
             }),
             json!({
                 "id": "llama.cpp-mac",
+                "capabilities": ["chat"],
                 "installed": true,
                 "hardware_compatible": true,
                 "prebuilt_installable": true,
@@ -335,6 +351,7 @@ mod tests {
         let backends = vec![
             json!({
                 "id": "llama.cpp-mac",
+                "capabilities": ["chat"],
                 "installed": false,
                 "hardware_compatible": false,
                 "prebuilt_installable": true,
@@ -342,6 +359,7 @@ mod tests {
             }),
             json!({
                 "id": "llama.cpp-mac-intel",
+                "capabilities": ["chat"],
                 "installed": false,
                 "hardware_compatible": true,
                 "prebuilt_installable": true,
@@ -360,6 +378,7 @@ mod tests {
         let backends = vec![
             json!({
                 "id": "backend-z",
+                "capabilities": ["chat"],
                 "installed": false,
                 "hardware_compatible": true,
                 "prebuilt_installable": true,
@@ -367,6 +386,7 @@ mod tests {
             }),
             json!({
                 "id": "backend-a",
+                "capabilities": ["chat"],
                 "installed": false,
                 "hardware_compatible": true,
                 "prebuilt_installable": true,
@@ -377,5 +397,33 @@ mod tests {
             recommended_backend_to_install(&backends).as_deref(),
             Some("backend-a")
         );
+    }
+
+    #[test]
+    fn system_recommendations_exclude_action_only_backends() {
+        let backends = vec![
+            json!({
+                "id": "vla.cpp-linux-cuda",
+                "capabilities": ["vision", "action", "robotics"],
+                "installed": true,
+                "hardware_compatible": true,
+                "prebuilt_installable": true,
+                "priority": 0,
+            }),
+            json!({
+                "id": "llama.cpp-linux",
+                "capabilities": ["chat"],
+                "installed": true,
+                "hardware_compatible": true,
+                "prebuilt_installable": true,
+                "priority": 1,
+            }),
+        ];
+
+        assert_eq!(
+            recommended_installed_backend(&backends).as_deref(),
+            Some("llama.cpp-linux")
+        );
+        assert_eq!(recommended_installed_backend(&backends[..1]), None);
     }
 }

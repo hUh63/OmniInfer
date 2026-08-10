@@ -256,6 +256,8 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "llama.cpp-linux-openvino" => 0,
         "llama.cpp-linux" => 1,
         "llama.cpp-linux-s390x" => 1,
+        "vla.cpp-linux-cuda" => 1,
+        "vla.cpp-linux" => 2,
         "vllm-linux-cuda" => 2,
         "vllm-wsl2-cuda" => 2,
         "vllm-wsl2-rocm" => 2,
@@ -664,6 +666,7 @@ fn module_path_exists(site_root: &Path, module_name: &str) -> bool {
 
 fn recommended_backend(rows: &[Value]) -> Option<String> {
     rows.iter()
+        .filter(|row| backend_payload_has_capability(row, "chat"))
         .filter(|row| {
             row.get("binary_exists")
                 .and_then(Value::as_bool)
@@ -692,6 +695,15 @@ fn recommended_backend(rows: &[Value]) -> Option<String> {
         .map(str::to_string)
 }
 
+fn backend_payload_has_capability(row: &Value, wanted: &str) -> bool {
+    row.get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|capability| capability == wanted)
+}
+
 fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
     match host.system {
         HostSystem::Linux => &[
@@ -701,6 +713,7 @@ fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
             "omniinfer-native-linux",
             "ik_llama.cpp-linux-cuda",
             "vllm-linux-cuda",
+            "vla.cpp-linux-cuda",
         ],
         HostSystem::Windows => &[
             "llama.cpp-cuda",
@@ -951,6 +964,42 @@ const LINUX_TEMPLATES: &[BackendTemplate] = &[
                 "openai-compatible",
             ],
             "OMNIINFER_VLLM_LINUX_CUDA",
+        )
+    },
+    BackendTemplate {
+        model_artifact: "vla-artifact",
+        supports_ctx_size: false,
+        external_server_protocol: Some("vla.cpp-zmq-server"),
+        log_file_name: "vla-server.log",
+        ..template(
+            "vla.cpp-linux",
+            "vla.cpp Linux",
+            "vla.cpp",
+            "vla.cpp-linux",
+            Some("vla-server"),
+            "vla.cpp ZeroMQ/protobuf VLA action server managed by OmniInfer on Linux CPU",
+            &[
+                "vision", "action", "robotics", "cpu", "linux", "zeromq", "protobuf",
+            ],
+            "OMNIINFER_VLA_CPP_LINUX",
+        )
+    },
+    BackendTemplate {
+        model_artifact: "vla-artifact",
+        supports_ctx_size: false,
+        external_server_protocol: Some("vla.cpp-zmq-server"),
+        log_file_name: "vla-server.log",
+        ..template(
+            "vla.cpp-linux-cuda",
+            "vla.cpp Linux CUDA",
+            "vla.cpp",
+            "vla.cpp-linux-cuda",
+            Some("vla-server"),
+            "vla.cpp ZeroMQ/protobuf VLA action server managed by OmniInfer on Linux CUDA",
+            &[
+                "vision", "action", "robotics", "gpu", "cuda", "linux", "zeromq", "protobuf",
+            ],
+            "OMNIINFER_VLA_CPP_LINUX_CUDA",
         )
     },
 ];
@@ -1286,6 +1335,32 @@ mod tests {
         assert!(registry.get("llama.cpp-linux-cuda").is_some());
         assert!(registry.get("vllm-linux-cuda").is_some());
         assert!(registry.get("mnn-linux").is_some());
+    }
+
+    #[test]
+    fn generic_recommendation_excludes_action_only_backends() {
+        let rows = vec![
+            json!({
+                "id": "vla.cpp-linux-cuda",
+                "binary_exists": true,
+                "hardware_compatible": true,
+                "priority": 0,
+                "capabilities": ["vision", "action", "robotics"],
+            }),
+            json!({
+                "id": "llama.cpp-linux",
+                "binary_exists": true,
+                "hardware_compatible": true,
+                "priority": 1,
+                "capabilities": ["chat"],
+            }),
+        ];
+
+        assert_eq!(
+            recommended_backend(&rows).as_deref(),
+            Some("llama.cpp-linux")
+        );
+        assert_eq!(recommended_backend(&rows[..1]), None);
     }
 
     #[test]

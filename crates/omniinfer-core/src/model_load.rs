@@ -44,6 +44,8 @@ pub enum ModelLoadError {
     EmptyModel,
     #[error("Model path does not exist: {0}")]
     ModelMissing(String),
+    #[error("vla.cpp model must be a checkpoint file, not a directory: {0}")]
+    VlaModelMustBeFile(String),
     #[error("mmproj file does not exist: {0}")]
     MmprojMissing(String),
     #[error("--ctx-size must be a positive integer")]
@@ -104,6 +106,9 @@ pub fn build_model_load_payload(
     let load_args = parse_backend_load_extra_args(&backend_id, family, &load_tokens)?;
 
     let model = resolve_model_reference(&request.model, family, cwd)?;
+    if family == "vla.cpp" && Path::new(&model).is_dir() {
+        return Err(ModelLoadError::VlaModelMustBeFile(model));
+    }
     let mmproj = match request.mmproj.as_deref() {
         Some(mmproj) => Some(resolve_existing_path(mmproj, cwd, "mmproj file")?),
         None => None,
@@ -326,6 +331,61 @@ mod tests {
             "binary_exists": installed,
             "supports_ctx_size": false
         })
+    }
+
+    #[test]
+    fn rejects_vla_model_directory() {
+        let cwd = temp_dir("vla-model-directory");
+        let model_dir = cwd.join("smolvla");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let backend = backend_without_ctx("vla.cpp-linux", "vla.cpp", true);
+        let error = build_model_load_payload(
+            &ModelLoadRequest {
+                model: model_dir.display().to_string(),
+                ..ModelLoadRequest::default()
+            },
+            &[backend],
+            None,
+            Some("vla.cpp-linux"),
+            None,
+            &cwd,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ModelLoadError::VlaModelMustBeFile(_)));
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn builds_vla_payload_without_default_ctx() {
+        let cwd = temp_dir("vla-payload");
+        let model = cwd.join("smolvla.gguf");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(&model, "").unwrap();
+        let backend = backend_without_ctx("vla.cpp-linux", "vla.cpp", true);
+        let plan = build_model_load_payload(
+            &ModelLoadRequest {
+                model: model.display().to_string(),
+                backend_extra_args: vec!["--timing-detail".to_string(), "phase".to_string()],
+                ..ModelLoadRequest::default()
+            },
+            &[backend],
+            None,
+            Some("vla.cpp-linux"),
+            None,
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(plan.payload["backend"], serde_json::json!("vla.cpp-linux"));
+        assert_eq!(
+            plan.payload["model"],
+            serde_json::json!(model.display().to_string())
+        );
+        assert_eq!(
+            plan.payload["launch_args"],
+            serde_json::json!(["--timing-detail", "phase"])
+        );
+        assert!(plan.payload.get("ctx_size").is_none());
+        std::fs::remove_dir_all(cwd).ok();
     }
 
     #[test]

@@ -44,7 +44,7 @@ use access_policy::DynamicAccessPolicy;
 use gpu_status::{gpu_status_payload, query_nvidia_smi_gpu_status};
 use request_history::{RequestHistoryRecord, query_from_pairs};
 use response::{add_cors_headers, cors_response, json_response, should_forward_response_header};
-use runtime_manager::{LoadModelOutcome, RustRuntimeManager};
+use runtime_manager::{LoadModelOutcome, RuntimeProxyTarget, RustRuntimeManager};
 
 const MAX_STREAM_HISTORY_CAPTURE_CHARS: usize = 12_000;
 
@@ -576,6 +576,12 @@ async fn try_handle_rust_endpoint(
                     json!({"error": {"message": message}}),
                 )));
             };
+            let Some(base_url) = target.base_url.as_deref() else {
+                return Ok(Some(backend_protocol_not_supported(
+                    &target,
+                    "/v1/chat/completions",
+                )));
+            };
             let response_model = requested_model
                 .clone()
                 .unwrap_or_else(|| "omniinfer".to_string());
@@ -602,7 +608,7 @@ async fn try_handle_rust_endpoint(
                 if should_proxy_vllm_nonstream_via_stream(&target.backend_id, stream_requested) {
                     let (payload, status) = proxy_openai_nonstream_via_stream(
                         &state.client,
-                        &format!("{}/v1/chat/completions", target.base_url),
+                        &format!("{base_url}/v1/chat/completions"),
                         normalized_payload.payload,
                         &response_model,
                     )
@@ -616,7 +622,7 @@ async fn try_handle_rust_endpoint(
                 } else {
                     proxy_openai_chat_to_runtime(
                         &state.client,
-                        &format!("{}/v1/chat/completions", target.base_url),
+                        &format!("{base_url}/v1/chat/completions"),
                         HyperBytes::from(serde_json::to_vec(&normalized_payload.payload)?),
                         Some(history_context.clone()),
                     )
@@ -702,11 +708,17 @@ async fn try_handle_rust_endpoint(
                     json!({"error": {"message": "no model is loaded"}}),
                 )));
             };
+            let Some(base_url) = target.base_url.as_deref() else {
+                return Ok(Some(backend_protocol_not_supported(
+                    &target,
+                    "/v1/messages",
+                )));
+            };
             let response_model = response_model.unwrap_or_else(|| "omniinfer".to_string());
             apply_proxy_model(&mut normalized.payload, target.model.as_deref());
             let response = proxy_anthropic_to_runtime(
                 &state.client,
-                &format!("{}/v1/chat/completions", target.base_url),
+                &format!("{base_url}/v1/chat/completions"),
                 HyperBytes::from(serde_json::to_vec(&normalized.payload)?),
                 &response_model,
                 normalized
@@ -1479,6 +1491,24 @@ fn backend_health(snapshot: &Value) -> Value {
     } else {
         json!({"status": "not_loaded"})
     }
+}
+
+fn backend_protocol_not_supported(target: &RuntimeProxyTarget, endpoint: &str) -> Response<Body> {
+    json_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({
+            "error": {
+                "code": "backend_protocol_not_supported",
+                "message": format!(
+                    "{endpoint} is not supported by backend protocol {}",
+                    target.protocol.as_str(),
+                ),
+                "backend": target.backend_id,
+                "external_server_protocol": target.protocol.as_str(),
+                "client_endpoint": target.client_endpoint,
+            }
+        }),
+    )
 }
 
 fn normalize_public_model_select(
