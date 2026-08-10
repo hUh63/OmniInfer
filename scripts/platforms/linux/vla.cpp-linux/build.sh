@@ -328,7 +328,7 @@ write_vla_launcher_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="${SCRIPT_DIR}:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${SCRIPT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 exec "${SCRIPT_DIR}/vla-server.bin" "$@"
 EOF
   chmod +x "${BIN_ROOT}/vla-server"
