@@ -6,6 +6,7 @@ import fnmatch
 import json
 import shutil
 import stat
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -198,6 +199,42 @@ def copy_runtime_package(package: RuntimePackage, target_root: Path) -> None:
         _rewrite_runtime_path_references(source_dir, target_dir)
     else:
         raise ValueError(f"unsupported copy mode: {package.copy_mode}")
+    if package.id.startswith("vla.cpp-"):
+        _validate_elf_dependency_closure(target_dir / "bin")
+
+
+def _validate_elf_dependency_closure(bin_dir: Path) -> None:
+    if not bin_dir.is_dir():
+        raise ValueError(f"runtime bin directory is missing: {bin_dir}")
+    elf_files = sorted(
+        path
+        for path in bin_dir.iterdir()
+        if path.is_file() and _is_elf(path)
+    )
+    if not elf_files:
+        return
+    environment = {"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": str(bin_dir)}
+    for path in elf_files:
+        result = subprocess.run(
+            ["ldd", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 0 or "=> not found" in output:
+            raise ValueError(
+                f"unresolved ELF dependency in packaged runtime: {path.name}\n{output}"
+            )
+
+
+def _is_elf(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(4) == b"\x7fELF"
+    except OSError:
+        return False
 
 
 def _default_backend(packages: list[RuntimePackage]) -> str:

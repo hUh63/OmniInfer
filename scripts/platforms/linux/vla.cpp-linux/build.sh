@@ -202,17 +202,105 @@ prepare_runtime_dirs() {
   touch "${BIN_ROOT}/.gitkeep" "${LOG_ROOT}/.gitkeep" "${MODELS_ROOT}/.gitkeep"
 }
 
-copy_dependency_runtime_libs() {
-  if [[ -z "${DEPENDENCY_PREFIX}" || ! -d "${DEPENDENCY_PREFIX}/lib" ]]; then
-    return
+dependency_library_path() {
+  local value="${BIN_ROOT}"
+  if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
+    for candidate in "${DEPENDENCY_PREFIX}/lib" "${DEPENDENCY_PREFIX}/lib64"; do
+      if [[ -d "${candidate}" ]]; then
+        value="${value}:${candidate}"
+      fi
+    done
   fi
+  printf '%s\n' "${value}"
+}
+
+dependency_is_bundleable() {
+  local name="$1" path="$2"
+  if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
+    local prefix
+    prefix="$(readlink -f "${DEPENDENCY_PREFIX}")"
+    if [[ "${path}" == "${prefix}/"* ]]; then
+      return 0
+    fi
+  fi
+  case "${name}" in
+    libzmq.so*|libprotobuf.so*|libabsl_*.so*|libsodium.so*|libpgm*.so*|libnorm.so*|libutf8_*.so*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+collect_runtime_dependency_closure() {
+  local root_binary="$1"
+  local library_path
+  library_path="$(dependency_library_path)"
+  local -a queue=("${root_binary}")
+  local index=0
+  declare -A copied=()
+  while ((index < ${#queue[@]})); do
+    local object="${queue[${index}]}"
+    index=$((index + 1))
+    local output
+    if ! output="$(LD_LIBRARY_PATH="${library_path}" ldd "${object}" 2>&1)"; then
+      echo "Failed to inspect runtime dependencies for ${object}:" >&2
+      echo "${output}" >&2
+      exit 1
+    fi
+    if grep -Fq '=> not found' <<<"${output}"; then
+      echo "Unresolved runtime dependency for ${object}:" >&2
+      echo "${output}" >&2
+      exit 1
+    fi
+    while read -r name arrow path _rest; do
+      if [[ "${arrow}" != "=>" || "${path}" != /* ]]; then
+        continue
+      fi
+      if [[ ! "${name}" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+        echo "Unsafe dependency name reported by ldd: ${name}" >&2
+        exit 1
+      fi
+      if ! dependency_is_bundleable "${name}" "${path}"; then
+        continue
+      fi
+      if [[ -n "${copied[${name}]:-}" ]]; then
+        continue
+      fi
+      local resolved
+      resolved="$(readlink -f "${path}")"
+      if [[ ! -f "${resolved}" ]]; then
+        echo "Resolved dependency is not a regular file: ${path}" >&2
+        exit 1
+      fi
+      cp -L "${resolved}" "${BIN_ROOT}/${name}"
+      chmod 0644 "${BIN_ROOT}/${name}"
+      copied["${name}"]=1
+      queue+=("${BIN_ROOT}/${name}")
+    done <<<"${output}"
+  done
+}
+
+validate_runtime_dependency_closure() {
+  local library_path="${BIN_ROOT}"
+  local -a objects=("${BIN_ROOT}/vla-server.bin")
   shopt -s nullglob
-  local libs=("${DEPENDENCY_PREFIX}"/lib/*.so "${DEPENDENCY_PREFIX}"/lib/*.so.*)
+  objects+=("${BIN_ROOT}"/*.so "${BIN_ROOT}"/*.so.*)
   shopt -u nullglob
-  if [[ ${#libs[@]} -eq 0 ]]; then
-    return
-  fi
-  cp -a "${libs[@]}" "${BIN_ROOT}/"
+  local object output
+  for object in "${objects[@]}"; do
+    if ! output="$(LD_LIBRARY_PATH="${library_path}" ldd "${object}" 2>&1)"; then
+      echo "Packaged runtime dependency validation failed for ${object}:" >&2
+      echo "${output}" >&2
+      exit 1
+    fi
+    if grep -Fq '=> not found' <<<"${output}"; then
+      echo "Packaged runtime has unresolved dependencies for ${object}:" >&2
+      echo "${output}" >&2
+      exit 1
+    fi
+  done
 }
 
 write_vla_launcher_wrapper() {
@@ -238,21 +326,19 @@ install_vla_server_binary() {
     echo "Build finished but vla-server was not found under ${BUILD_ROOT}." >&2
     exit 1
   fi
-  if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
-    cp -a "${source_binary}" "${BIN_ROOT}/vla-server.bin"
-    chmod +x "${BIN_ROOT}/vla-server.bin"
-    copy_dependency_runtime_libs
-    write_vla_launcher_wrapper
-  else
-    cp -a "${source_binary}" "${BIN_ROOT}/vla-server"
-    chmod +x "${BIN_ROOT}/vla-server"
-  fi
+  cp -a "${source_binary}" "${BIN_ROOT}/vla-server.bin"
+  chmod 0755 "${BIN_ROOT}/vla-server.bin"
+  collect_runtime_dependency_closure "${BIN_ROOT}/vla-server.bin"
+  write_vla_launcher_wrapper
+  validate_runtime_dependency_closure
 }
 
 ensure_vla_root
 require_command cmake
 require_command pkg-config
 require_command protoc
+require_command ldd
+require_command readlink
 
 if [[ -z "${JOBS}" ]]; then
   JOBS="$(detect_jobs)"

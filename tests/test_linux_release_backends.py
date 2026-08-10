@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "platforms" / "linux" / "release_runtime_backends.py"
@@ -120,6 +121,70 @@ class LinuxReleaseBackendCopyTests(unittest.TestCase):
             self.assertIn(str(copied), (copied / "bin" / "vllm").read_text(encoding="utf-8"))
             self.assertIn(str(copied), (copied / "pyvenv.cfg").read_text(encoding="utf-8"))
             self.assertNotIn(str(source), (copied / "bin" / "vllm").read_text(encoding="utf-8"))
+
+    def test_vla_copy_fails_closed_on_unresolved_elf_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "runtime" / "vla.cpp-linux"
+            target = root / "release" / "runtime"
+            _write_executable(source / "bin" / "vla-server")
+            elf = source / "bin" / "vla-server.bin"
+            elf.write_bytes(b"\x7fELFtest")
+            elf.chmod(elf.stat().st_mode | stat.S_IXUSR)
+            package = release_runtime_backends.RuntimePackage(
+                id="vla.cpp-linux",
+                runtime_dir_name="vla.cpp-linux",
+                source_dir=str(source),
+                copy_mode="binary-bin",
+                launcher_name="vla-server",
+                runtime_mode="external_server",
+                priority=2,
+            )
+            result = release_runtime_backends.subprocess.CompletedProcess(
+                args=["ldd", str(elf)],
+                returncode=0,
+                stdout="libzmq.so.5 => not found\n",
+                stderr="",
+            )
+
+            with mock.patch.object(
+                release_runtime_backends.subprocess, "run", return_value=result
+            ):
+                with self.assertRaisesRegex(ValueError, "unresolved ELF dependency"):
+                    release_runtime_backends.copy_runtime_package(package, target)
+
+    def test_vla_copy_accepts_closed_elf_dependency_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "runtime" / "vla.cpp-linux"
+            target = root / "release" / "runtime"
+            _write_executable(source / "bin" / "vla-server")
+            elf = source / "bin" / "vla-server.bin"
+            elf.write_bytes(b"\x7fELFtest")
+            elf.chmod(elf.stat().st_mode | stat.S_IXUSR)
+            package = release_runtime_backends.RuntimePackage(
+                id="vla.cpp-linux",
+                runtime_dir_name="vla.cpp-linux",
+                source_dir=str(source),
+                copy_mode="binary-bin",
+                launcher_name="vla-server",
+                runtime_mode="external_server",
+                priority=2,
+            )
+            result = release_runtime_backends.subprocess.CompletedProcess(
+                args=["ldd", str(elf)],
+                returncode=0,
+                stdout="libzmq.so.5 => /runtime/libzmq.so.5 (0x0)\n",
+                stderr="",
+            )
+
+            with mock.patch.object(
+                release_runtime_backends.subprocess, "run", return_value=result
+            ) as run:
+                release_runtime_backends.copy_runtime_package(package, target)
+
+            self.assertTrue((target / "vla.cpp-linux" / "bin" / "vla-server.bin").is_file())
+            run.assert_called_once()
 
 
 if __name__ == "__main__":
