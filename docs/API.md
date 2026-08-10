@@ -123,6 +123,12 @@ Quick Tunnel is intended for demos and short-lived testing. For best compatibili
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions |
 | `POST` | `/v1/messages` | Anthropic-compatible Messages API adapter |
 
+The two generation endpoints require an OpenAI-compatible loaded backend. A
+loaded `vla.cpp-*` backend uses a loopback-only ZeroMQ/protobuf action protocol
+instead; both endpoints return `422` with
+`error.code=backend_protocol_not_supported` and report its local client
+endpoint rather than proxying an incompatible request.
+
 Unknown paths return `404`:
 
 ```json
@@ -737,6 +743,7 @@ Important behavior:
 - `model`, `mmproj`, `backend`, `ctx_size`, and `launch_args` in this request are accepted for compatibility but are not used to start or switch runtimes.
 - `request_defaults` can be supplied and is merged with the loaded runtime defaults for the current request.
 - If no runtime is loaded, the endpoint returns `400` or `409`.
+- If the loaded backend is not OpenAI-compatible, including `vla.cpp-*`, the endpoint returns structured `422` instead of forwarding the request.
 
 Request body:
 

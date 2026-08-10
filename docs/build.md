@@ -84,7 +84,7 @@ bash scripts/platforms/linux/vla.cpp-linux/build.sh --from-source
 bash scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source
 ```
 
-If ZeroMQ/protobuf/cppzmq are installed in a non-system prefix, pass `--dependency-prefix /path/to/prefix` so CMake and pkg-config can find them. The build script copies shared libraries from that prefix into the backend `bin/` directory and installs a `vla-server` launcher that sets `LD_LIBRARY_PATH` to the runtime directory.
+If ZeroMQ/protobuf/cppzmq are installed in a non-system prefix, pass `--dependency-prefix /path/to/prefix` so CMake and pkg-config can find them. The prefix may use `lib`, `lib64`, or a Debian-style `lib/*-linux-gnu` directory. The build recursively copies only the non-system shared libraries reachable from `vla-server`, installs a launcher that searches the packaged runtime directory first, and fails if the resulting ELF dependency set is incomplete.
 
 The Rust installer owns multi-asset download, pinned SHA256 verification, staged extraction, required-file validation, atomic activation, and manifest writing. Source build scripts still own compilation from checked-out submodules. Shared llama.cpp release URLs live in `scripts/prebuilt_backends.json`, but a backend is only offered as prebuilt when that catalog contains a matching entry for the current platform.
 
@@ -410,6 +410,8 @@ bash ./scripts/platforms/linux/vllm-linux-cuda/build.sh --package 'vllm==0.9.2'
 - `llama.cpp-linux-openvino`
 - `ik_llama.cpp-linux`
 - `ik_llama.cpp-linux-cuda`
+- `vla.cpp-linux`
+- `vla.cpp-linux-cuda`
 - `vllm-linux-cuda`
 - `mnn-linux`
 
@@ -418,9 +420,11 @@ hard-coded `llama-server` filename check. External server backends are packaged
 when their registered launcher exists under `bin/`. Embedded Python runtimes
 such as `mnn-linux` are rejected until they are exposed through an adapter
 service or Rust-native driver.
-`llama.cpp` and `ik_llama.cpp` backends copy the minimal binary `bin/` payload,
-while external-server Python runtime backends such as `vllm-linux-cuda` copy
-the runtime environment needed by their launcher.
+`llama.cpp`, `ik_llama.cpp`, and `vla.cpp` backends copy the minimal binary
+`bin/` payload, while external-server Python runtime backends such as
+`vllm-linux-cuda` copy the runtime environment needed by their launcher. A
+VLA package is accepted only after every copied ELF object resolves its
+dependencies against the packaged directory and the target system libraries.
 
 The portable package exposes a single user-facing `omniinfer` Rust
 control-plane binary. Packaging builds the CLI with
