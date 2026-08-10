@@ -666,6 +666,7 @@ fn module_path_exists(site_root: &Path, module_name: &str) -> bool {
 
 fn recommended_backend(rows: &[Value]) -> Option<String> {
     rows.iter()
+        .filter(|row| backend_payload_has_capability(row, "chat"))
         .filter(|row| {
             row.get("binary_exists")
                 .and_then(Value::as_bool)
@@ -692,6 +693,15 @@ fn recommended_backend(rows: &[Value]) -> Option<String> {
         })
         .and_then(|row| row.get("id").and_then(Value::as_str))
         .map(str::to_string)
+}
+
+fn backend_payload_has_capability(row: &Value, wanted: &str) -> bool {
+    row.get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|capability| capability == wanted)
 }
 
 fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
@@ -1325,6 +1335,32 @@ mod tests {
         assert!(registry.get("llama.cpp-linux-cuda").is_some());
         assert!(registry.get("vllm-linux-cuda").is_some());
         assert!(registry.get("mnn-linux").is_some());
+    }
+
+    #[test]
+    fn generic_recommendation_excludes_action_only_backends() {
+        let rows = vec![
+            json!({
+                "id": "vla.cpp-linux-cuda",
+                "binary_exists": true,
+                "hardware_compatible": true,
+                "priority": 0,
+                "capabilities": ["vision", "action", "robotics"],
+            }),
+            json!({
+                "id": "llama.cpp-linux",
+                "binary_exists": true,
+                "hardware_compatible": true,
+                "priority": 1,
+                "capabilities": ["chat"],
+            }),
+        ];
+
+        assert_eq!(
+            recommended_backend(&rows).as_deref(),
+            Some("llama.cpp-linux")
+        );
+        assert_eq!(recommended_backend(&rows[..1]), None);
     }
 
     #[test]
