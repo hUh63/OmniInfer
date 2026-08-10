@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 const QUANT_PATTERNS: &[&str] = &[
     "UD-Q8_K_XL",
@@ -36,8 +37,16 @@ pub fn inspect_payload(model: &str, mmproj: Option<&str>, ctx_size: Option<u32>)
     let mmproj_size_gib = resolved_mmproj.as_deref().and_then(path_size_gib);
     let quantization = infer_quantization(&resolved_model);
     let params_b = infer_params_b(&resolved_model);
-    let capabilities = infer_model_capabilities(&resolved_model, resolved_mmproj.as_deref());
     let format = model_format(&artifact_kind, model_path.as_deref(), &resolved_model);
+    let vla_architecture = model_path
+        .as_deref()
+        .filter(|path| path.is_file())
+        .and_then(detect_vla_architecture);
+    let capabilities = infer_model_capabilities(
+        &resolved_model,
+        resolved_mmproj.as_deref(),
+        vla_architecture.as_deref(),
+    );
     Ok(json!({
         "object": "advisor.model",
         "input": model,
@@ -52,6 +61,7 @@ pub fn inspect_payload(model: &str, mmproj: Option<&str>, ctx_size: Option<u32>)
         "quantization": quantization,
         "params_b": params_b,
         "capabilities": capabilities,
+        "vla_architecture": vla_architecture,
         "estimate": memory_estimate(size_gib, mmproj_size_gib, params_b, ctx_size.unwrap_or(DEFAULT_CONTEXT_SIZE)),
         "warnings": warnings,
     }))
@@ -136,13 +146,19 @@ fn model_format(artifact_kind: &str, model_path: Option<&Path>, model_ref: &str)
     if model_path.is_some_and(Path::is_dir) {
         return "directory".to_string();
     }
-    if model_path
+    let extension = model_path
         .and_then(Path::extension)
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("gguf"))
-        || model_ref.to_ascii_lowercase().ends_with(".gguf")
-    {
+        .or_else(|| {
+            Path::new(model_ref)
+                .extension()
+                .and_then(|value| value.to_str())
+        });
+    if extension.is_some_and(|value| value.eq_ignore_ascii_case("gguf")) {
         return "gguf".to_string();
+    }
+    if extension.is_some_and(|value| value.eq_ignore_ascii_case("safetensors")) {
+        return "safetensors".to_string();
     }
     if artifact_kind == "directory" {
         return "directory".to_string();
@@ -205,13 +221,25 @@ fn infer_params_b(text: &str) -> Option<f64> {
     best
 }
 
-fn infer_model_capabilities(text: &str, mmproj_path: Option<&Path>) -> Vec<String> {
+fn infer_model_capabilities(
+    text: &str,
+    mmproj_path: Option<&Path>,
+    vla_architecture: Option<&str>,
+) -> Vec<String> {
     let lower = Path::new(text)
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or(text)
         .to_ascii_lowercase();
-    let mut capabilities = vec!["chat".to_string()];
+    let mut capabilities = if vla_architecture.is_some() {
+        vec![
+            "action".to_string(),
+            "robotics".to_string(),
+            "vision".to_string(),
+        ]
+    } else {
+        vec!["chat".to_string()]
+    };
     if mmproj_path.is_some()
         || ["vl", "vision", "mmproj", "multimodal"]
             .iter()
@@ -228,6 +256,218 @@ fn infer_model_capabilities(text: &str, mmproj_path: Option<&Path>) -> Vec<Strin
     capabilities.sort();
     capabilities.dedup();
     capabilities
+}
+
+const VLA_ARCHITECTURE_KEYS: &[&str] = &[
+    "general.architecture",
+    "smolvla.architecture",
+    "pi0.architecture",
+    "pi05.architecture",
+    "evo1.architecture",
+    "gr00t_n1_5.architecture",
+    "gr00t_n1_6.architecture",
+    "gr00t_n1_7.architecture",
+    "bitvla.architecture",
+    "openvla_oft.architecture",
+    "vla_jepa.architecture",
+    "vla_adapter.architecture",
+];
+
+const VLA_ARCHITECTURES: &[&str] = &[
+    "smolvla",
+    "pi0",
+    "pi05",
+    "evo1",
+    "gr00t_n1_5",
+    "gr00t_n1_6",
+    "gr00t_n1_7",
+    "bitvla",
+    "openvla_oft",
+    "vla_jepa",
+    "vla_adapter",
+];
+
+fn detect_vla_architecture(path: &Path) -> Option<String> {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("gguf") => {
+            detect_gguf_vla_architecture(path)
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("safetensors") => {
+            detect_safetensors_vla_architecture(path)
+        }
+        _ => None,
+    }
+}
+
+fn detect_gguf_vla_architecture(path: &Path) -> Option<String> {
+    let mut reader = BufReader::new(std::fs::File::open(path).ok()?);
+    let mut magic = [0_u8; 4];
+    reader.read_exact(&mut magic).ok()?;
+    if &magic != b"GGUF" {
+        return None;
+    }
+    let version = read_u32(&mut reader).ok()?;
+    if !matches!(version, 2 | 3) {
+        return None;
+    }
+    let _tensor_count = read_u64(&mut reader).ok()?;
+    let metadata_count = read_u64(&mut reader).ok()?;
+    if metadata_count > 1_000_000 {
+        return None;
+    }
+    for _ in 0..metadata_count {
+        let key = read_gguf_string(&mut reader, 1 << 20).ok()?;
+        let value_type = read_u32(&mut reader).ok()?;
+        if VLA_ARCHITECTURE_KEYS.contains(&key.as_str()) && value_type == 8 {
+            let architecture = read_gguf_string(&mut reader, 1 << 20).ok()?;
+            if VLA_ARCHITECTURES.contains(&architecture.as_str()) {
+                return Some(architecture);
+            }
+        } else {
+            skip_gguf_value(&mut reader, value_type, 0).ok()?;
+        }
+    }
+    None
+}
+
+fn detect_safetensors_vla_architecture(path: &Path) -> Option<String> {
+    let mut reader = BufReader::new(std::fs::File::open(path).ok()?);
+    let header_size = read_u64(&mut reader).ok()?;
+    if header_size == 0 || header_size > (1 << 28) {
+        return None;
+    }
+    let patterns = [
+        b"vlm_with_expert.vlm.".as_slice(),
+        b"paligemma_with_expert.paligemma.".as_slice(),
+        b"action_time_mlp_in".as_slice(),
+        b"time_mlp_in".as_slice(),
+    ];
+    let mut found = [false; 4];
+    let max_pattern = patterns.iter().map(|pattern| pattern.len()).max()?;
+    let mut carry = Vec::new();
+    let mut remaining = header_size;
+    let mut chunk = vec![0_u8; 64 * 1024];
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(chunk.len() as u64)).ok()?;
+        reader.read_exact(&mut chunk[..wanted]).ok()?;
+        let mut window = Vec::with_capacity(carry.len() + wanted);
+        window.extend_from_slice(&carry);
+        window.extend_from_slice(&chunk[..wanted]);
+        for (index, pattern) in patterns.iter().enumerate() {
+            found[index] |= window
+                .windows(pattern.len())
+                .any(|candidate| candidate == *pattern);
+        }
+        let keep = usize::min(max_pattern.saturating_sub(1), window.len());
+        carry.clear();
+        carry.extend_from_slice(&window[window.len() - keep..]);
+        remaining -= wanted as u64;
+    }
+    if found[0] {
+        Some("smolvla".to_string())
+    } else if found[1] && found[2] {
+        Some("pi0".to_string())
+    } else if found[1] && found[3] {
+        Some("pi05".to_string())
+    } else {
+        None
+    }
+}
+
+fn read_u32(reader: &mut impl Read) -> std::io::Result<u32> {
+    let mut bytes = [0_u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64(reader: &mut impl Read) -> std::io::Result<u64> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_gguf_string(reader: &mut impl Read, maximum: u64) -> std::io::Result<String> {
+    let length = read_u64(reader)?;
+    if length > maximum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "GGUF string exceeds inspection limit",
+        ));
+    }
+    let mut bytes = vec![0_u8; length as usize];
+    reader.read_exact(&mut bytes)?;
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn skip_gguf_value(
+    reader: &mut (impl Read + Seek),
+    value_type: u32,
+    depth: u8,
+) -> std::io::Result<()> {
+    let fixed_size = match value_type {
+        0 | 1 | 7 => Some(1_u64),
+        2 | 3 => Some(2),
+        4 | 5 | 6 => Some(4),
+        10..=12 => Some(8),
+        _ => None,
+    };
+    if let Some(size) = fixed_size {
+        return skip_bytes(reader, size);
+    }
+    match value_type {
+        8 => {
+            let length = read_u64(reader)?;
+            skip_bytes(reader, length)
+        }
+        9 if depth == 0 => {
+            let element_type = read_u32(reader)?;
+            let count = read_u64(reader)?;
+            if count > 10_000_000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "GGUF array exceeds inspection limit",
+                ));
+            }
+            let element_size = match element_type {
+                0 | 1 | 7 => Some(1_u64),
+                2 | 3 => Some(2),
+                4 | 5 | 6 => Some(4),
+                10..=12 => Some(8),
+                _ => None,
+            };
+            if let Some(size) = element_size {
+                return skip_bytes(
+                    reader,
+                    count.checked_mul(size).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "GGUF array size overflow",
+                        )
+                    })?,
+                );
+            }
+            for _ in 0..count {
+                skip_gguf_value(reader, element_type, depth + 1)?;
+            }
+            Ok(())
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported GGUF metadata value type",
+        )),
+    }
+}
+
+fn skip_bytes(reader: &mut impl Seek, length: u64) -> std::io::Result<()> {
+    let offset = i64::try_from(length).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "GGUF metadata offset exceeds inspection limit",
+        )
+    })?;
+    reader.seek(SeekFrom::Current(offset))?;
+    Ok(())
 }
 
 pub(super) fn memory_estimate(
@@ -305,4 +545,107 @@ fn unknown_memory_breakdown(ctx_size: u32) -> Value {
         "context_size": ctx_size,
         "assumptions": ["local model size is unknown"],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn identifies_vla_gguf_architecture_and_capabilities() {
+        let path = temp_file("advisor-vla-gguf", "gguf");
+        write_test_gguf(
+            &path,
+            &[
+                ("general.name", "SmolVLA test"),
+                ("smolvla.architecture", "smolvla"),
+            ],
+        );
+
+        let payload = inspect_payload(path.to_str().unwrap(), None, Some(4096)).unwrap();
+        assert_eq!(payload["format"], "gguf");
+        assert_eq!(payload["vla_architecture"], "smolvla");
+        assert!(model_has_capability(&payload, "action"));
+        assert!(model_has_capability(&payload, "vision"));
+        assert!(!model_has_capability(&payload, "chat"));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn identifies_supported_vla_safetensors_namespaces() {
+        let smolvla = temp_file("advisor-vla-smolvla", "safetensors");
+        write_test_safetensors(&smolvla, br#"{"vlm_with_expert.vlm.layer": {}}"#);
+        assert_eq!(
+            detect_vla_architecture(&smolvla).as_deref(),
+            Some("smolvla")
+        );
+
+        let pi05 = temp_file("advisor-vla-pi05", "safetensors");
+        write_test_safetensors(
+            &pi05,
+            br#"{"paligemma_with_expert.paligemma.layer": {}, "time_mlp_in": {}}"#,
+        );
+        assert_eq!(detect_vla_architecture(&pi05).as_deref(), Some("pi05"));
+
+        std::fs::remove_file(smolvla).ok();
+        std::fs::remove_file(pi05).ok();
+    }
+
+    #[test]
+    fn malformed_or_non_vla_artifacts_fail_closed() {
+        let malformed = temp_file("advisor-vla-malformed", "gguf");
+        std::fs::write(&malformed, b"GGUF\x03").unwrap();
+        assert_eq!(detect_vla_architecture(&malformed), None);
+
+        let chat = temp_file("advisor-chat", "gguf");
+        write_test_gguf(&chat, &[("general.architecture", "qwen3")]);
+        assert_eq!(detect_vla_architecture(&chat), None);
+
+        std::fs::remove_file(malformed).ok();
+        std::fs::remove_file(chat).ok();
+    }
+
+    fn model_has_capability(payload: &Value, wanted: &str) -> bool {
+        payload["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability.as_str() == Some(wanted))
+    }
+
+    fn temp_file(name: &str, extension: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("omniinfer-{name}-{nanos}.{extension}"))
+    }
+
+    fn write_test_gguf(path: &Path, metadata: &[(&str, &str)]) {
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(b"GGUF").unwrap();
+        file.write_all(&3_u32.to_le_bytes()).unwrap();
+        file.write_all(&0_u64.to_le_bytes()).unwrap();
+        file.write_all(&(metadata.len() as u64).to_le_bytes())
+            .unwrap();
+        for (key, value) in metadata {
+            write_gguf_string(&mut file, key);
+            file.write_all(&8_u32.to_le_bytes()).unwrap();
+            write_gguf_string(&mut file, value);
+        }
+    }
+
+    fn write_gguf_string(file: &mut std::fs::File, value: &str) {
+        file.write_all(&(value.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(value.as_bytes()).unwrap();
+    }
+
+    fn write_test_safetensors(path: &Path, header: &[u8]) {
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(header).unwrap();
+    }
 }

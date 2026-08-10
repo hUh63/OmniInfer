@@ -54,7 +54,16 @@ pub fn fit_payload(
         .filter(|backend| {
             backend_filter.is_none_or(|wanted| json_str(backend, "id") == Some(wanted))
         })
-        .map(|backend| backend_fit_payload(backend, &model_info, &estimate, context, &system))
+        .map(|backend| {
+            backend_fit_payload(
+                backend,
+                &model_info,
+                &estimate,
+                context,
+                &system,
+                backend_filter.is_some(),
+            )
+        })
         .collect::<Vec<_>>();
     let compatible = candidates
         .iter()
@@ -224,8 +233,9 @@ fn backend_fit_payload(
     estimate: &Value,
     ctx_size: u32,
     system: &Value,
+    explicitly_selected: bool,
 ) -> Value {
-    let (compatible, reasons) = backend_model_compatible(backend, model_info);
+    let (compatible, reasons) = backend_model_compatible(backend, model_info, explicitly_selected);
     let hardware_ok = json_bool(backend, "hardware_compatible").unwrap_or(false);
     let installed = json_bool(backend, "installed").unwrap_or(false);
     let memory_kind = if is_gpu_backend(backend) {
@@ -247,13 +257,7 @@ fn backend_fit_payload(
         CPU_MEMORY_MARGIN_GIB
     };
     let fit = fit_level(required_gib, available_gib, margin);
-    let mut launch_args = vec!["--ctx-size".to_string(), ctx_size.to_string()];
-    if is_gpu_backend(backend) && json_str(backend, "id").is_some_and(|id| id.contains("cuda")) {
-        launch_args.extend(["-ngl".to_string(), "999".to_string()]);
-    }
-    if let Some(mmproj) = json_str(model_info, "mmproj") {
-        launch_args.extend(["--mmproj".to_string(), mmproj.to_string()]);
-    }
+    let launch_args = advisor_launch_args(backend, model_info, ctx_size);
     let mut notes = reasons;
     if !installed {
         notes.push("backend runtime is not installed".to_string());
@@ -266,6 +270,8 @@ fn backend_fit_payload(
         "backend": json_str(backend, "id"),
         "label": json_str(backend, "label"),
         "family": json_str(backend, "family"),
+        "capabilities": backend.get("capabilities").cloned().unwrap_or_else(|| json!([])),
+        "supports_ctx_size": json_bool(backend, "supports_ctx_size").unwrap_or(false),
         "installed": installed,
         "hardware_compatible": hardware_ok,
         "compatible": compatible && hardware_ok,
@@ -284,11 +290,57 @@ fn backend_fit_payload(
     })
 }
 
-fn backend_model_compatible(backend: &Value, model_info: &Value) -> (bool, Vec<String>) {
+fn advisor_launch_args(backend: &Value, model_info: &Value, ctx_size: u32) -> Vec<String> {
+    if is_action_backend(backend) {
+        return Vec::new();
+    }
+    let mut launch_args = Vec::new();
+    if json_bool(backend, "supports_ctx_size").unwrap_or(true) {
+        launch_args.extend(["--ctx-size".to_string(), ctx_size.to_string()]);
+    }
+    if is_gpu_backend(backend) && json_str(backend, "id").is_some_and(|id| id.contains("cuda")) {
+        launch_args.extend(["-ngl".to_string(), "999".to_string()]);
+    }
+    if let Some(mmproj) = json_str(model_info, "mmproj") {
+        launch_args.extend(["--mmproj".to_string(), mmproj.to_string()]);
+    }
+    launch_args
+}
+
+fn backend_model_compatible(
+    backend: &Value,
+    model_info: &Value,
+    explicitly_selected: bool,
+) -> (bool, Vec<String>) {
     let format = json_str(model_info, "format").unwrap_or("");
     let artifact_kind = json_str(model_info, "artifact_kind").unwrap_or("");
     let family = json_str(backend, "family").unwrap_or("");
     let caps = capabilities(backend);
+    let action_model = model_has_capability(model_info, "action");
+    if is_action_backend(backend) {
+        if !explicitly_selected && !action_model {
+            return (
+                false,
+                vec![
+                    "action backends require an identified VLA artifact or explicit selection"
+                        .to_string(),
+                ],
+            );
+        }
+        return match format {
+            "gguf" | "safetensors" if artifact_kind == "file" => (true, Vec::new()),
+            _ => (
+                false,
+                vec!["vla.cpp requires a GGUF or safetensors checkpoint file".to_string()],
+            ),
+        };
+    }
+    if action_model {
+        return (
+            false,
+            vec!["VLA action models require an action-capable backend".to_string()],
+        );
+    }
     match format {
         "gguf" => {
             if family == "llama.cpp" || family == "turboquant" {
@@ -326,6 +378,22 @@ fn backend_model_compatible(backend: &Value, model_info: &Value) -> (bool, Vec<S
             vec!["unknown model format; only reference backends are considered safe".to_string()],
         ),
     }
+}
+
+fn is_action_backend(backend: &Value) -> bool {
+    capabilities(backend)
+        .iter()
+        .any(|capability| capability == "action")
+}
+
+fn model_has_capability(model_info: &Value, wanted: &str) -> bool {
+    model_info
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|capability| capability == wanted)
 }
 
 fn is_gpu_backend(backend: &Value) -> bool {
@@ -624,9 +692,12 @@ fn next_load_command(model_info: &Value, recommended: &Value, ctx_size: u32) -> 
         "load".to_string(),
         "-m".to_string(),
         model,
-        "--ctx-size".to_string(),
-        ctx_size.to_string(),
     ];
+    if !is_action_backend(recommended)
+        && json_bool(recommended, "supports_ctx_size").unwrap_or(true)
+    {
+        parts.extend(["--ctx-size".to_string(), ctx_size.to_string()]);
+    }
     if let Some(mmproj) = json_str(model_info, "mmproj") {
         parts.extend(["--mmproj".to_string(), shell_quote(mmproj)]);
     }
@@ -872,8 +943,10 @@ fn task_matches_model(task: &str, model_info: &Value) -> bool {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     match normalized.as_str() {
-        "any" | "chat" | "general" => true,
+        "any" => true,
+        "chat" | "general" => caps.contains(&"chat"),
         "vision" | "multimodal" => caps.contains(&"vision"),
+        "action" | "robotics" | "vla" => caps.contains(&"action"),
         "embedding" | "embeddings" => caps.contains(&"embedding"),
         "coding" => ["coder", "code", "deepseek", "qwen"]
             .iter()
@@ -924,5 +997,91 @@ fn format_gib(value: f64) -> String {
         format!("{rounded:.1}")
     } else {
         format!("{rounded:.2}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_vla_fit_uses_action_contract_without_chat_arguments() {
+        let model = temp_model("explicit-vla-fit", "gguf");
+        let payload = fit_payload(
+            model.to_str().unwrap(),
+            None,
+            Some(8192),
+            Some("vla.cpp-linux-cuda"),
+            json!({
+                "data": [vla_backend(true)],
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(payload["recommended"]["backend"], "vla.cpp-linux-cuda");
+        assert_eq!(payload["recommended"]["compatible"], true);
+        assert_eq!(payload["recommended"]["launch_args"], json!([]));
+        let command = payload["next_command"].as_str().unwrap();
+        assert!(!command.contains("--ctx-size"));
+        assert!(!command.contains("-ngl"));
+
+        std::fs::remove_file(model).ok();
+    }
+
+    #[test]
+    fn action_models_are_isolated_from_chat_backends() {
+        let model_info = json!({
+            "format": "gguf",
+            "artifact_kind": "file",
+            "capabilities": ["action", "robotics", "vision"],
+        });
+        assert!(backend_model_compatible(&vla_backend(true), &model_info, false).0);
+        let llama = json!({
+            "id": "llama.cpp-linux",
+            "family": "llama.cpp",
+            "model_artifact": "file",
+            "capabilities": ["chat", "vision"],
+        });
+        let (compatible, reasons) = backend_model_compatible(&llama, &model_info, false);
+        assert!(!compatible);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("action-capable"))
+        );
+    }
+
+    #[test]
+    fn unidentified_artifacts_require_explicit_vla_selection() {
+        let model_info = json!({
+            "format": "gguf",
+            "artifact_kind": "file",
+            "capabilities": ["chat"],
+        });
+        assert!(!backend_model_compatible(&vla_backend(true), &model_info, false).0);
+        assert!(backend_model_compatible(&vla_backend(true), &model_info, true).0);
+    }
+
+    fn vla_backend(installed: bool) -> Value {
+        json!({
+            "id": "vla.cpp-linux-cuda",
+            "label": "vla.cpp Linux CUDA",
+            "family": "vla.cpp",
+            "binary_exists": installed,
+            "compatibility": "compatible",
+            "model_artifact": "vla-artifact",
+            "supports_ctx_size": false,
+            "capabilities": ["vision", "action", "robotics", "gpu", "cuda"],
+        })
+    }
+
+    fn temp_model(name: &str, extension: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("omniinfer-{name}-{nanos}.{extension}"));
+        std::fs::write(&path, b"test").unwrap();
+        path
     }
 }
