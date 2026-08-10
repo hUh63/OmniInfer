@@ -408,7 +408,7 @@ fn skip_gguf_value(
     let fixed_size = match value_type {
         0 | 1 | 7 => Some(1_u64),
         2 | 3 => Some(2),
-        4 | 5 | 6 => Some(4),
+        4..=6 => Some(4),
         10..=12 => Some(8),
         _ => None,
     };
@@ -432,7 +432,7 @@ fn skip_gguf_value(
             let element_size = match element_type {
                 0 | 1 | 7 => Some(1_u64),
                 2 | 3 => Some(2),
-                4 | 5 | 6 => Some(4),
+                4..=6 => Some(4),
                 10..=12 => Some(8),
                 _ => None,
             };

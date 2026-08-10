@@ -507,51 +507,6 @@ fn model_supported_by_backend(path: &Path, backend: Option<&SelectedBackendInfo>
     }
 }
 
-#[cfg(test)]
-mod backend_model_tests {
-    use super::*;
-
-    #[test]
-    fn vla_backend_accepts_only_supported_checkpoint_files() {
-        let backend = SelectedBackendInfo {
-            family: "vla.cpp".to_string(),
-            model_artifact: "vla-artifact".to_string(),
-        };
-        assert!(model_supported_by_backend(
-            Path::new("smolvla.gguf"),
-            Some(&backend)
-        ));
-        assert!(model_supported_by_backend(
-            Path::new("smolvla.safetensors"),
-            Some(&backend)
-        ));
-        assert!(!model_supported_by_backend(
-            Path::new("weights.bin"),
-            Some(&backend)
-        ));
-        assert!(!model_supported_by_backend(
-            Path::new("config.json"),
-            Some(&backend)
-        ));
-    }
-
-    #[test]
-    fn chat_backends_do_not_claim_vla_safetensors() {
-        let backend = SelectedBackendInfo {
-            family: "llama.cpp".to_string(),
-            model_artifact: "file".to_string(),
-        };
-        assert!(model_supported_by_backend(
-            Path::new("chat.gguf"),
-            Some(&backend)
-        ));
-        assert!(!model_supported_by_backend(
-            Path::new("weights.safetensors"),
-            Some(&backend)
-        ));
-    }
-}
-
 fn model_menu_context(backends_payload: &Value) -> ModelMenuContext {
     let system = advisor::system_payload(backends_payload.clone());
     let host = system.get("host").unwrap_or(&Value::Null);
@@ -993,4 +948,49 @@ fn set_reasoning_value(session: &mut ChatSession, enabled: bool) -> Result<()> {
 #[allow(dead_code)]
 fn _loaded_services() -> Vec<serve_state::ServePidInfo> {
     serve_state::list_serve_pid_infos().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod backend_model_tests {
+    use super::*;
+
+    #[test]
+    fn vla_backend_accepts_only_supported_checkpoint_files() {
+        let backend = SelectedBackendInfo {
+            family: "vla.cpp".to_string(),
+            model_artifact: "vla-artifact".to_string(),
+        };
+        assert!(model_supported_by_backend(
+            Path::new("smolvla.gguf"),
+            Some(&backend)
+        ));
+        assert!(model_supported_by_backend(
+            Path::new("smolvla.safetensors"),
+            Some(&backend)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("weights.bin"),
+            Some(&backend)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("config.json"),
+            Some(&backend)
+        ));
+    }
+
+    #[test]
+    fn chat_backends_do_not_claim_vla_safetensors() {
+        let backend = SelectedBackendInfo {
+            family: "llama.cpp".to_string(),
+            model_artifact: "file".to_string(),
+        };
+        assert!(model_supported_by_backend(
+            Path::new("chat.gguf"),
+            Some(&backend)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("weights.safetensors"),
+            Some(&backend)
+        ));
+    }
 }
