@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::runtime_plan::ExternalRuntimePlan;
+use crate::runtime_plan::{ExternalRuntimePlan, RuntimeReadinessProbe};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProcessOptions {
@@ -115,9 +115,10 @@ impl RuntimeProcess {
         }
         hide_child_window(&mut command);
         let mut child = command.spawn()?;
-        if !wait_http_ready(
+        if !wait_runtime_ready(
             &options.health_host,
             plan.port,
+            plan.readiness_probe,
             options.startup_timeout,
             &mut child,
         )? {
@@ -159,9 +160,10 @@ impl Drop for RuntimeProcess {
     }
 }
 
-fn wait_http_ready(
+fn wait_runtime_ready(
     host: &str,
     port: u16,
+    probe: RuntimeReadinessProbe,
     timeout: Duration,
     child: &mut Child,
 ) -> Result<bool, RuntimeProcessError> {
@@ -170,7 +172,15 @@ fn wait_http_ready(
         if child.try_wait()?.is_some() {
             return Err(RuntimeProcessError::EarlyExit);
         }
-        if health_endpoint_ready(host, port, Duration::from_millis(500)) {
+        let ready = match probe {
+            RuntimeReadinessProbe::HttpHealth => {
+                health_endpoint_ready(host, port, Duration::from_millis(500))
+            }
+            RuntimeReadinessProbe::TcpConnect => {
+                tcp_endpoint_ready(host, port, Duration::from_millis(500))
+            }
+        };
+        if ready {
             return Ok(true);
         }
         thread::sleep(Duration::from_millis(100));
@@ -202,6 +212,18 @@ fn health_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
         .nth(1)
         .and_then(|status| status.parse::<u16>().ok())
         .is_some_and(|status| (200..300).contains(&status))
+}
+
+fn tcp_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    for addr in addrs {
+        if TcpStream::connect_timeout(&addr, timeout).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), RuntimeProcessError> {
@@ -365,6 +387,7 @@ mod tests {
             ctx_size: None,
             log_file_name: "runtime.log".to_string(),
             proxy_model_ref: None,
+            readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
         let process = RuntimeProcess::start(
             &plan,
@@ -395,6 +418,7 @@ mod tests {
             ctx_size: None,
             log_file_name: "runtime.log".to_string(),
             proxy_model_ref: None,
+            readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
         let error = RuntimeProcess::start(
             &plan,
@@ -425,6 +449,7 @@ mod tests {
             ctx_size: None,
             log_file_name: "runtime.log".to_string(),
             proxy_model_ref: None,
+            readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
         let error = RuntimeProcess::start(
             &plan,

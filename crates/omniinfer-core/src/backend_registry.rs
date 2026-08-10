@@ -256,6 +256,8 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "llama.cpp-linux-openvino" => 0,
         "llama.cpp-linux" => 1,
         "llama.cpp-linux-s390x" => 1,
+        "vla.cpp-linux-cuda" => 1,
+        "vla.cpp-linux" => 2,
         "vllm-linux-cuda" => 2,
         "vllm-wsl2-cuda" => 2,
         "vllm-wsl2-rocm" => 2,
@@ -701,6 +703,7 @@ fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
             "omniinfer-native-linux",
             "ik_llama.cpp-linux-cuda",
             "vllm-linux-cuda",
+            "vla.cpp-linux-cuda",
         ],
         HostSystem::Windows => &[
             "llama.cpp-cuda",
@@ -951,6 +954,42 @@ const LINUX_TEMPLATES: &[BackendTemplate] = &[
                 "openai-compatible",
             ],
             "OMNIINFER_VLLM_LINUX_CUDA",
+        )
+    },
+    BackendTemplate {
+        model_artifact: "vla-artifact",
+        supports_ctx_size: false,
+        external_server_protocol: Some("vla.cpp-zmq-server"),
+        log_file_name: "vla-server.log",
+        ..template(
+            "vla.cpp-linux",
+            "vla.cpp Linux",
+            "vla.cpp",
+            "vla.cpp-linux",
+            Some("vla-server"),
+            "vla.cpp ZeroMQ/protobuf VLA action server managed by OmniInfer on Linux CPU",
+            &[
+                "vision", "action", "robotics", "cpu", "linux", "zeromq", "protobuf",
+            ],
+            "OMNIINFER_VLA_CPP_LINUX",
+        )
+    },
+    BackendTemplate {
+        model_artifact: "vla-artifact",
+        supports_ctx_size: false,
+        external_server_protocol: Some("vla.cpp-zmq-server"),
+        log_file_name: "vla-server.log",
+        ..template(
+            "vla.cpp-linux-cuda",
+            "vla.cpp Linux CUDA",
+            "vla.cpp",
+            "vla.cpp-linux-cuda",
+            Some("vla-server"),
+            "vla.cpp ZeroMQ/protobuf VLA action server managed by OmniInfer on Linux CUDA",
+            &[
+                "vision", "action", "robotics", "gpu", "cuda", "linux", "zeromq", "protobuf",
+            ],
+            "OMNIINFER_VLA_CPP_LINUX_CUDA",
         )
     },
 ];

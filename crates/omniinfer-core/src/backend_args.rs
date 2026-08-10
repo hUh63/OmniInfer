@@ -41,6 +41,7 @@ pub fn parse_backend_load_extra_args(
     match family {
         "llama.cpp" | "turboquant" => parse_llama_cpp_load_args(backend_id, tokens),
         "vllm" => parse_vllm_load_args(tokens),
+        "vla.cpp" => parse_vla_cpp_load_args(tokens),
         "mlx-lm" => Err(BackendArgError::MlxLoadUnsupported),
         _ => Ok(ParsedLoadArgs {
             ctx_size: None,
@@ -93,6 +94,38 @@ fn parse_llama_cpp_load_args(
         }
         parsed.launch_args.push(token.clone());
         index += 1;
+    }
+    Ok(parsed)
+}
+
+fn parse_vla_cpp_load_args(tokens: &[String]) -> Result<ParsedLoadArgs, BackendArgError> {
+    let mut parsed = ParsedLoadArgs::default();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let (flag, inline_value) = split_flag_value(token);
+        if matches!(
+            flag,
+            "-m" | "--model" | "-mm" | "--mmproj" | "--message" | "-p" | "--prompt" | "--image"
+        ) {
+            return Err(BackendArgError::ReservedBasic(flag.to_string()));
+        }
+        if matches!(flag, "--bind" | "--host" | "--port") {
+            return Err(BackendArgError::ReservedManaged(flag.to_string()));
+        }
+        if matches!(flag, "-c" | "--ctx-size" | "--max-model-len") {
+            return Err(BackendArgError::ReservedManaged(flag.to_string()));
+        }
+        parsed.launch_args.push(token.clone());
+        index += if inline_value.is_none()
+            && next_is_value(tokens, index)
+            && matches!(flag, "--config" | "--timing-detail")
+        {
+            parsed.launch_args.push(tokens[index + 1].clone());
+            2
+        } else {
+            1
+        };
     }
     Ok(parsed)
 }
@@ -516,6 +549,46 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, BackendArgError::ReservedBasic("--model".to_string()));
+    }
+
+    #[test]
+    fn parses_vla_server_args_without_ctx() {
+        let parsed = parse_backend_load_extra_args(
+            "vla.cpp-linux-cuda",
+            "vla.cpp",
+            &args(&["--timing-detail", "phase", "--config", "/models/config.json"]),
+        )
+        .unwrap();
+        assert_eq!(parsed.ctx_size, None);
+        assert_eq!(
+            parsed.launch_args,
+            args(&["--timing-detail", "phase", "--config", "/models/config.json"])
+        );
+    }
+
+    #[test]
+    fn rejects_vla_managed_bind_arg() {
+        let error = parse_backend_load_extra_args(
+            "vla.cpp-linux-cuda",
+            "vla.cpp",
+            &args(&["--bind", "tcp://127.0.0.1:5555"]),
+        )
+        .unwrap_err();
+        assert_eq!(error, BackendArgError::ReservedManaged("--bind".to_string()));
+    }
+
+    #[test]
+    fn rejects_vla_ctx_arg() {
+        let error = parse_backend_load_extra_args(
+            "vla.cpp-linux-cuda",
+            "vla.cpp",
+            &args(&["--ctx-size", "4096"]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            BackendArgError::ReservedManaged("--ctx-size".to_string())
+        );
     }
 
     #[test]

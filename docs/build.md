@@ -38,6 +38,7 @@ Additional framework notes:
 - `framework/llama-cpp-turboquant` is required for `turboquant-mac`
 - `mlx-mac` is embedded and uses Python packages instead of building `framework/mlx`
 - `framework/vllm` pins the upstream vLLM source release used for provenance and future source-build work
+- `framework/vla.cpp` is required for `vla.cpp-linux` and `vla.cpp-linux-cuda` source builds
 - `vllm-linux-cuda` installs vLLM Python wheels into an OmniInfer-managed local venv by default, which matches vLLM's normal binary distribution path
 - Windows `vllm-wsl2-cuda` and `vllm-wsl2-rocm` install pinned official Linux wheels into OmniInfer-managed WSL2 venvs; upstream vLLM has no native Windows runtime
 
@@ -48,6 +49,7 @@ Submodule behavior:
 - macOS `turboquant-mac` can bootstrap `framework/llama-cpp-turboquant` automatically unless you pass `--no-bootstrap`
 - Windows `llama.cpp-*` scripts do not bootstrap submodules automatically; initialize `framework/llama.cpp` first if it is missing
 - `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm` do not bootstrap or update `framework/vllm` during normal wheel installation
+- Linux `vla.cpp-*` scripts can bootstrap `framework/vla.cpp` automatically unless you pass `--no-bootstrap`
 
 Example:
 
@@ -74,6 +76,15 @@ For example:
 ```bash
 ./omniinfer build <backend> --from-source
 ```
+
+Direct source build scripts are also available by convention under `scripts/platforms/<platform>/<backend>/build.sh`. For vla.cpp on Linux:
+
+```bash
+bash scripts/platforms/linux/vla.cpp-linux/build.sh --from-source
+bash scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source
+```
+
+If ZeroMQ/protobuf/cppzmq are installed in a non-system prefix, pass `--dependency-prefix /path/to/prefix` so CMake and pkg-config can find them. The build script copies shared libraries from that prefix into the backend `bin/` directory and installs a `vla-server` launcher that sets `LD_LIBRARY_PATH` to the runtime directory.
 
 The Rust installer owns multi-asset download, pinned SHA256 verification, staged extraction, required-file validation, atomic activation, and manifest writing. Source build scripts still own compilation from checked-out submodules. Shared llama.cpp release URLs live in `scripts/prebuilt_backends.json`, but a backend is only offered as prebuilt when that catalog contains a matching entry for the current platform.
 
@@ -125,6 +136,8 @@ Current desktop runtime directories:
 - Linux s390x CPU: `.local/runtime/linux/llama.cpp-linux-s390x`
 - Linux x64 OpenVINO: `.local/runtime/linux/llama.cpp-linux-openvino`
 - Linux x64 vLLM CUDA: `.local/runtime/linux/vllm-linux-cuda`
+- Linux x64 vla.cpp CPU: `.local/runtime/linux/vla.cpp-linux`
+- Linux x64 vla.cpp CUDA: `.local/runtime/linux/vla.cpp-linux-cuda`
 - macOS Apple Silicon Metal: `.local/runtime/macos/llama.cpp-mac`
 - macOS Intel x64 CPU: `.local/runtime/macos/llama.cpp-mac-intel`
 - macOS TurboQuant: `.local/runtime/macos/turboquant-mac`

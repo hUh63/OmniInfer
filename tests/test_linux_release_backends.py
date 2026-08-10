@@ -28,6 +28,7 @@ class LinuxReleaseBackendDiscoveryTests(unittest.TestCase):
             root = Path(tmp)
             _write_executable(root / "llama.cpp-linux" / "bin" / "llama-server")
             _write_executable(root / "vllm-linux-cuda" / "bin" / "vllm")
+            _write_executable(root / "vla.cpp-linux-cuda" / "bin" / "vla-server")
             _write_executable(root / "mnn-linux" / "bin" / "python3")
 
             packages = release_runtime_backends.discover_runtime_packages(root)
@@ -35,8 +36,10 @@ class LinuxReleaseBackendDiscoveryTests(unittest.TestCase):
 
             self.assertIn("llama.cpp-linux", by_id)
             self.assertIn("vllm-linux-cuda", by_id)
+            self.assertIn("vla.cpp-linux-cuda", by_id)
             self.assertIn("mnn-linux", by_id)
             self.assertEqual(by_id["llama.cpp-linux"].copy_mode, "binary-bin")
+            self.assertEqual(by_id["vla.cpp-linux-cuda"].copy_mode, "binary-bin")
             self.assertEqual(by_id["vllm-linux-cuda"].copy_mode, "full-runtime")
             self.assertEqual(by_id["mnn-linux"].copy_mode, "full-runtime")
 

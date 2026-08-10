@@ -34,3 +34,6 @@
 [submodule "framework/vllm"]
 	path = framework/vllm
 	url = https://github.com/vllm-project/vllm.git
+[submodule "framework/vla.cpp"]
+	path = framework/vla.cpp
+	url = https://github.com/VinRobotics/vla.cpp.git

@@ -771,6 +771,9 @@ fn resolve_model_for_backend(
         });
     }
     let path = resolve_path_for_backend(model, backend, "model")?;
+    if backend.model_artifact == "vla-artifact" && PathBuf::from(&path).is_dir() {
+        anyhow::bail!("vla.cpp model must be a checkpoint file, not a directory: {path}");
+    }
     if backend.model_artifact == "file" && PathBuf::from(&path).is_dir() {
         return Ok(discover_llama_cpp_model_artifacts(&PathBuf::from(path))?);
     }

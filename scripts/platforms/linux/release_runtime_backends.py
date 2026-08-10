@@ -42,6 +42,8 @@ BACKEND_PRIORITY = {
     "llama.cpp-linux": 1,
     "llama.cpp-linux-s390x": 1,
     "ik_llama.cpp-linux": 1,
+    "vla.cpp-linux-cuda": 1,
+    "vla.cpp-linux": 2,
     "vllm-linux-cuda": 2,
 }
 
@@ -64,6 +66,8 @@ LINUX_TEMPLATES = (
     BackendTemplate("ik_llama.cpp-linux-cuda", "llama.cpp", "ik_llama.cpp-linux-cuda", (), "llama-server", "external_server"),
     BackendTemplate("mnn-linux", "mnn", "mnn-linux", (), None, "embedded", ("MNN", "MNN.llm", "MNN.cv")),
     BackendTemplate("vllm-linux-cuda", "vllm", "vllm-linux-cuda", (), "vllm", "external_server"),
+    BackendTemplate("vla.cpp-linux", "vla.cpp", "vla.cpp-linux", (), "vla-server", "external_server"),
+    BackendTemplate("vla.cpp-linux-cuda", "vla.cpp", "vla.cpp-linux-cuda", (), "vla-server", "external_server"),
 )
 
 
@@ -88,6 +92,8 @@ def _has_embedded_python_runtime(runtime_dir: Path) -> bool:
 
 def _copy_mode(template: BackendTemplate) -> str:
     if template.family == "llama.cpp" and template.launcher_name == "llama-server":
+        return "binary-bin"
+    if template.family == "vla.cpp" and template.launcher_name == "vla-server":
         return "binary-bin"
     return "full-runtime"
 

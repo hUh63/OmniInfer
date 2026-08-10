@@ -15,6 +15,12 @@ pub struct ExternalRuntimeRequest {
     pub launch_args: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeReadinessProbe {
+    HttpHealth,
+    TcpConnect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRuntimePlan {
     pub command: Vec<String>,
@@ -24,6 +30,7 @@ pub struct ExternalRuntimePlan {
     pub ctx_size: Option<u32>,
     pub log_file_name: String,
     pub proxy_model_ref: Option<String>,
+    pub readiness_probe: RuntimeReadinessProbe,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -75,7 +82,9 @@ pub fn build_external_runtime_plan(
         .unwrap_or_else(|| string_array(&request.backend, "default_args"));
     validate_launch_args(&server_args)?;
     let ctx_flags = ctx_size_flags(protocol);
-    if let Some(ctx_size) = request.ctx_size {
+    if let Some(ctx_size) = request.ctx_size
+        && !ctx_flags[0].is_empty()
+    {
         server_args = with_server_arg(server_args, &ctx_flags, ctx_size.to_string());
     }
     let effective_ctx_size =
@@ -87,6 +96,13 @@ pub fn build_external_runtime_plan(
     match protocol {
         "llama.cpp-server" => build_llama_cpp_plan(
             backend_id,
+            &launcher_path,
+            request,
+            server_args,
+            effective_ctx_size,
+            log_file_name,
+        ),
+        "vla.cpp-zmq-server" => build_vla_cpp_plan(
             &launcher_path,
             request,
             server_args,
@@ -161,7 +177,55 @@ fn build_llama_cpp_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref: None,
+        readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
+}
+
+fn build_vla_cpp_plan(
+    launcher_path: &Path,
+    request: &ExternalRuntimeRequest,
+    mut server_args: Vec<String>,
+    _effective_ctx_size: Option<u32>,
+    log_file_name: String,
+) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    validate_vla_cpp_launch_args(&server_args)?;
+    let mut command = vec![
+        launcher_path.display().to_string(),
+        "--bind".to_string(),
+        format!("tcp://{}:{}", request.host, request.port),
+    ];
+    command.append(&mut server_args);
+    if let Some(mmproj) = request
+        .mmproj_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        command.push(mmproj.to_string());
+    }
+    command.push(request.model_path.clone());
+    Ok(ExternalRuntimePlan {
+        command,
+        stop_command: None,
+        cwd: launcher_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        port: request.port,
+        ctx_size: None,
+        log_file_name,
+        proxy_model_ref: None,
+        readiness_probe: RuntimeReadinessProbe::TcpConnect,
+    })
+}
+
+fn validate_vla_cpp_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
+    for token in args {
+        let flag = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+        if matches!(flag, "-c" | "--ctx-size" | "--max-model-len") {
+            return Err(RuntimePlanError::ReservedLaunchArg(flag.to_string()));
+        }
+    }
+    Ok(())
 }
 
 fn build_vllm_plan(
@@ -199,6 +263,7 @@ fn build_vllm_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref,
+        readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
 
@@ -272,6 +337,7 @@ fn build_wsl_vllm_plan(
         ctx_size: effective_ctx_size,
         log_file_name,
         proxy_model_ref,
+        readiness_probe: RuntimeReadinessProbe::HttpHealth,
     })
 }
 
@@ -335,7 +401,14 @@ fn validate_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
         let flag = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
         if matches!(
             flag,
-            "-m" | "--model" | "-mm" | "--mmproj" | "--host" | "--port" | "--no-webui"
+            "-m"
+                | "--model"
+                | "-mm"
+                | "--mmproj"
+                | "--host"
+                | "--port"
+                | "--bind"
+                | "--no-webui"
         ) {
             return Err(RuntimePlanError::ReservedLaunchArg(flag.to_string()));
         }
@@ -377,10 +450,10 @@ fn extract_server_arg_value(args: &[String], flags: &[&str]) -> Option<String> {
 }
 
 fn ctx_size_flags(protocol: &str) -> [&'static str; 2] {
-    if matches!(protocol, "vllm-openai-server" | "vllm-wsl2-openai-server") {
-        ["--max-model-len", ""]
-    } else {
-        ["-c", "--ctx-size"]
+    match protocol {
+        "vllm-openai-server" | "vllm-wsl2-openai-server" => ["--max-model-len", ""],
+        "vla.cpp-zmq-server" => ["", ""],
+        _ => ["-c", "--ctx-size"],
     }
 }
 
@@ -444,6 +517,7 @@ mod tests {
             .to_string();
         assert_eq!(plan.ctx_size, Some(8192));
         assert_eq!(plan.cwd, PathBuf::from("/runtime/llama.cpp-linux-cuda/bin"));
+        assert_eq!(plan.readiness_probe, RuntimeReadinessProbe::HttpHealth);
         assert_eq!(
             plan.command,
             vec![
@@ -492,6 +566,64 @@ mod tests {
                 .any(|items| items == ["--webui", "none"])
         );
         assert!(!plan.command.iter().any(|item| item == "--no-webui"));
+    }
+
+    #[test]
+    fn builds_vla_cpp_zmq_server_shape() {
+        let backend = json!({
+            "id": "vla.cpp-linux-cuda",
+            "launcher_path": "/runtime/vla.cpp-linux-cuda/bin/vla-server",
+            "runtime_dir": "/runtime/vla.cpp-linux-cuda",
+            "default_args": ["--timing-detail", "phase"],
+            "external_server_protocol": "vla.cpp-zmq-server",
+            "log_file_name": "vla-server.log"
+        });
+        let plan = build_external_runtime_plan(&ExternalRuntimeRequest {
+            backend,
+            model_path: "/models/smolvla.gguf".to_string(),
+            mmproj_path: Some("/models/mmproj.gguf".to_string()),
+            host: "127.0.0.1".to_string(),
+            port: 15555,
+            ctx_size: Some(8192),
+            launch_args: None,
+        })
+        .unwrap();
+        assert_eq!(plan.ctx_size, None);
+        assert_eq!(plan.readiness_probe, RuntimeReadinessProbe::TcpConnect);
+        assert_eq!(
+            plan.command,
+            vec![
+                "/runtime/vla.cpp-linux-cuda/bin/vla-server".to_string(),
+                "--bind".to_string(),
+                "tcp://127.0.0.1:15555".to_string(),
+                "--timing-detail".to_string(),
+                "phase".to_string(),
+                "/models/mmproj.gguf".to_string(),
+                "/models/smolvla.gguf".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_vla_cpp_context_launch_arg() {
+        let backend = json!({
+            "id": "vla.cpp-linux",
+            "launcher_path": "/runtime/vla.cpp-linux/bin/vla-server",
+            "runtime_dir": "/runtime/vla.cpp-linux",
+            "default_args": ["-c", "4096"],
+            "external_server_protocol": "vla.cpp-zmq-server"
+        });
+        let error = build_external_runtime_plan(&ExternalRuntimeRequest {
+            backend,
+            model_path: "/models/smolvla.gguf".to_string(),
+            mmproj_path: None,
+            host: "127.0.0.1".to_string(),
+            port: 15555,
+            ctx_size: None,
+            launch_args: None,
+        })
+        .unwrap_err();
+        assert_eq!(error, RuntimePlanError::ReservedLaunchArg("-c".to_string()));
     }
 
     #[test]
