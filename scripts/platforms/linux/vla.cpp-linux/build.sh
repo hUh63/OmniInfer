@@ -16,6 +16,8 @@ BUILD_FROM_SOURCE=0
 USE_NATIVE=0
 ENABLE_LTO=0
 DEPENDENCY_PREFIX=""
+DEPENDENCY_LIBRARY_DIRS=()
+DEPENDENCY_PKG_CONFIG_DIRS=()
 CUDA_ARCHITECTURES=""
 
 check_deps() {
@@ -133,8 +135,29 @@ MODELS_ROOT="${REPO_ROOT}/.local/models"
 
 if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
   export PATH="${DEPENDENCY_PREFIX}/bin:${PATH}"
-  export CMAKE_PREFIX_PATH="${DEPENDENCY_PREFIX}:${CMAKE_PREFIX_PATH:-}"
-  export PKG_CONFIG_PATH="${DEPENDENCY_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export CMAKE_PREFIX_PATH="${DEPENDENCY_PREFIX}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+  for candidate in \
+    "${DEPENDENCY_PREFIX}/lib" \
+    "${DEPENDENCY_PREFIX}/lib64" \
+    "${DEPENDENCY_PREFIX}"/lib/*-linux-gnu; do
+    if [[ -d "${candidate}" ]]; then
+      DEPENDENCY_LIBRARY_DIRS+=("${candidate}")
+      if [[ -d "${candidate}/pkgconfig" ]]; then
+        DEPENDENCY_PKG_CONFIG_DIRS+=("${candidate}/pkgconfig")
+      fi
+    fi
+  done
+  if [[ -d "${DEPENDENCY_PREFIX}/share/pkgconfig" ]]; then
+    DEPENDENCY_PKG_CONFIG_DIRS+=("${DEPENDENCY_PREFIX}/share/pkgconfig")
+  fi
+  if ((${#DEPENDENCY_LIBRARY_DIRS[@]} > 0)); then
+    dependency_path="$(IFS=:; printf '%s' "${DEPENDENCY_LIBRARY_DIRS[*]}")"
+    export LD_LIBRARY_PATH="${dependency_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+  if ((${#DEPENDENCY_PKG_CONFIG_DIRS[@]} > 0)); then
+    pkg_config_path="$(IFS=:; printf '%s' "${DEPENDENCY_PKG_CONFIG_DIRS[*]}")"
+    export PKG_CONFIG_PATH="${pkg_config_path}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  fi
 fi
 
 if [[ ${CHECK_DEPS} -eq 1 ]]; then
@@ -204,13 +227,10 @@ prepare_runtime_dirs() {
 
 dependency_library_path() {
   local value="${BIN_ROOT}"
-  if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
-    for candidate in "${DEPENDENCY_PREFIX}/lib" "${DEPENDENCY_PREFIX}/lib64"; do
-      if [[ -d "${candidate}" ]]; then
-        value="${value}:${candidate}"
-      fi
-    done
-  fi
+  local candidate
+  for candidate in "${DEPENDENCY_LIBRARY_DIRS[@]}"; do
+    value="${value}:${candidate}"
+  done
   printf '%s\n' "${value}"
 }
 
