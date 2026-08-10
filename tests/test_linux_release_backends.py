@@ -184,7 +184,37 @@ class LinuxReleaseBackendCopyTests(unittest.TestCase):
                 release_runtime_backends.copy_runtime_package(package, target)
 
             self.assertTrue((target / "vla.cpp-linux" / "bin" / "vla-server.bin").is_file())
-            run.assert_called_once()
+            self.assertEqual(run.call_count, 2)
+
+    def test_vla_copy_rejects_absolute_elf_runtime_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "runtime" / "vla.cpp-linux"
+            target = root / "release" / "runtime"
+            _write_executable(source / "bin" / "vla-server")
+            elf = source / "bin" / "vla-server.bin"
+            elf.write_bytes(b"\x7fELFtest")
+            elf.chmod(elf.stat().st_mode | stat.S_IXUSR)
+            package = release_runtime_backends.RuntimePackage(
+                id="vla.cpp-linux",
+                runtime_dir_name="vla.cpp-linux",
+                source_dir=str(source),
+                copy_mode="binary-bin",
+                launcher_name="vla-server",
+                runtime_mode="external_server",
+                priority=2,
+            )
+            result = release_runtime_backends.subprocess.CompletedProcess(
+                args=["readelf"],
+                returncode=0,
+                stdout="0x1d (RUNPATH) Library runpath: [/tmp/build/lib]\n",
+                stderr="",
+            )
+            with mock.patch.object(
+                release_runtime_backends.subprocess, "run", return_value=result
+            ):
+                with self.assertRaisesRegex(ValueError, "unsafe ELF runtime path"):
+                    release_runtime_backends.copy_runtime_package(package, target)
 
 
 if __name__ == "__main__":

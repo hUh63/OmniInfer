@@ -385,6 +385,7 @@ CONFIGURE_ARGS=(
   -B "${BUILD_ROOT}"
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
   -DBUILD_SHARED_LIBS=OFF
+  -DCMAKE_SKIP_RPATH=ON
   -DGGML_NATIVE=$( [[ ${USE_NATIVE} -eq 1 ]] && printf 'ON' || printf 'OFF' )
   -DGGML_LTO=$( [[ ${ENABLE_LTO} -eq 1 ]] && printf 'ON' || printf 'OFF' )
   -DGGML_CUDA=$( [[ ${ENABLE_CUDA} -eq 1 ]] && printf 'ON' || printf 'OFF' )

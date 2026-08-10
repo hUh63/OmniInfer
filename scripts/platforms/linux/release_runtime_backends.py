@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import re
 import shutil
 import stat
 import subprocess
@@ -215,6 +216,7 @@ def _validate_elf_dependency_closure(bin_dir: Path) -> None:
         return
     environment = {"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": str(bin_dir)}
     for path in elf_files:
+        _validate_elf_runtime_paths(path, environment)
         result = subprocess.run(
             ["ldd", str(path)],
             check=False,
@@ -227,6 +229,30 @@ def _validate_elf_dependency_closure(bin_dir: Path) -> None:
             raise ValueError(
                 f"unresolved ELF dependency in packaged runtime: {path.name}\n{output}"
             )
+
+
+def _validate_elf_runtime_paths(path: Path, environment: dict[str, str]) -> None:
+    try:
+        result = subprocess.run(
+            ["readelf", "-d", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    except OSError as error:
+        raise ValueError(f"failed to inspect ELF runtime paths: {path.name}: {error}") from error
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    if result.returncode != 0:
+        raise ValueError(f"failed to inspect ELF runtime paths: {path.name}\n{output}")
+    for value in re.findall(r"\((?:RPATH|RUNPATH)\).*?\[(.*?)\]", output):
+        for entry in value.split(":"):
+            if entry not in {"$ORIGIN", "${ORIGIN}"} and not entry.startswith(
+                ("$ORIGIN/", "${ORIGIN}/")
+            ):
+                raise ValueError(
+                    f"unsafe ELF runtime path in packaged runtime: {path.name}: {entry or '<empty>'}"
+                )
 
 
 def _is_elf(path: Path) -> bool:

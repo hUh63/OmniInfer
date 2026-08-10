@@ -425,6 +425,8 @@ service or Rust-native driver.
 `vllm-linux-cuda` copy the runtime environment needed by their launcher. A
 VLA package is accepted only after every copied ELF object resolves its
 dependencies against the packaged directory and the target system libraries.
+Builder-specific absolute `RPATH` and `RUNPATH` entries are rejected; packaged
+runtime paths, when present, must remain relative to `$ORIGIN`.
 
 The portable package exposes a single user-facing `omniinfer` Rust
 control-plane binary. Packaging builds the CLI with
