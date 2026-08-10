@@ -84,7 +84,7 @@ bash scripts/platforms/linux/vla.cpp-linux/build.sh --from-source
 bash scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source
 ```
 
-If ZeroMQ/protobuf/cppzmq are installed in a non-system prefix, pass `--dependency-prefix /path/to/prefix` so CMake and pkg-config can find them. The prefix may use `lib`, `lib64`, or a Debian-style `lib/*-linux-gnu` directory. The build recursively copies only the non-system shared libraries reachable from `vla-server`, installs a launcher that searches the packaged runtime directory first, and fails if the resulting ELF dependency set is incomplete.
+If ZeroMQ/protobuf/cppzmq are installed in an isolated non-system prefix, pass `--dependency-prefix /path/to/prefix` so CMake and pkg-config can find them. System roots such as `/usr` are rejected. The prefix may use `lib`, `lib64`, or a Debian-style `lib/*-linux-gnu` directory. The build recursively copies only the non-system shared libraries reachable from `vla-server`, never bundles core system ABI libraries such as glibc or libstdc++, installs a launcher that searches the packaged runtime directory first, and fails if the resulting ELF dependency set is incomplete.
 
 The Rust installer owns multi-asset download, pinned SHA256 verification, staged extraction, required-file validation, atomic activation, and manifest writing. Source build scripts still own compilation from checked-out submodules. Shared llama.cpp release URLs live in `scripts/prebuilt_backends.json`, but a backend is only offered as prebuilt when that catalog contains a matching entry for the current platform.
 

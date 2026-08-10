@@ -134,6 +134,17 @@ LOG_ROOT="${PACKAGE_ROOT}/logs"
 MODELS_ROOT="${REPO_ROOT}/.local/models"
 
 if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
+  if [[ ! -d "${DEPENDENCY_PREFIX}" ]]; then
+    echo "Dependency prefix is not a directory: ${DEPENDENCY_PREFIX}" >&2
+    exit 1
+  fi
+  resolved_dependency_prefix="$(cd "${DEPENDENCY_PREFIX}" && pwd -P)"
+  case "${resolved_dependency_prefix}" in
+    /|/usr|/lib|/lib64|/usr/lib|/usr/lib64)
+      echo "--dependency-prefix must be an isolated non-system prefix: ${DEPENDENCY_PREFIX}" >&2
+      exit 1
+      ;;
+  esac
   export PATH="${DEPENDENCY_PREFIX}/bin:${PATH}"
   export CMAKE_PREFIX_PATH="${DEPENDENCY_PREFIX}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
   for candidate in \
@@ -236,6 +247,11 @@ dependency_library_path() {
 
 dependency_is_bundleable() {
   local name="$1" path="$2"
+  case "${name}" in
+    ld-linux*.so*|libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libstdc++.so*|libgcc_s.so*|libgomp.so*|libatomic.so*|libresolv.so*|libutil.so*|libnsl.so*|libanl.so*|libthread_db.so*)
+      return 1
+      ;;
+  esac
   if [[ -n "${DEPENDENCY_PREFIX}" ]]; then
     local prefix
     prefix="$(readlink -f "${DEPENDENCY_PREFIX}")"
