@@ -2047,6 +2047,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+printf 'vla-server: bound to %s. ready.\n' "$bind"
 python3 - "$bind" <<'PY'
 import socket
 import sys

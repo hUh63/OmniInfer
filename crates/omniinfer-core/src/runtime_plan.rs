@@ -15,10 +15,10 @@ pub struct ExternalRuntimeRequest {
     pub launch_args: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeReadinessProbe {
     HttpHealth,
-    TcpConnect,
+    TcpConnectAndLog { marker: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,10 +248,12 @@ fn build_vla_cpp_plan(
         return Err(RuntimePlanError::NonLoopbackVlaBind(request.host.clone()));
     }
     validate_vla_cpp_launch_args(&server_args)?;
+    let client_endpoint =
+        ExternalServerProtocol::VlaCppZmqServer.client_endpoint(&request.host, request.port);
     let mut command = vec![
         launcher_path.display().to_string(),
         "--bind".to_string(),
-        ExternalServerProtocol::VlaCppZmqServer.client_endpoint(&request.host, request.port),
+        client_endpoint.clone(),
     ];
     command.append(&mut server_args);
     if let Some(mmproj) = request
@@ -274,9 +276,10 @@ fn build_vla_cpp_plan(
         log_file_name,
         proxy_model_ref: None,
         protocol: ExternalServerProtocol::VlaCppZmqServer,
-        client_endpoint: ExternalServerProtocol::VlaCppZmqServer
-            .client_endpoint(&request.host, request.port),
-        readiness_probe: RuntimeReadinessProbe::TcpConnect,
+        client_endpoint: client_endpoint.clone(),
+        readiness_probe: RuntimeReadinessProbe::TcpConnectAndLog {
+            marker: format!("vla-server: bound to {client_endpoint}. ready."),
+        },
     })
 }
 
@@ -663,7 +666,12 @@ mod tests {
         assert_eq!(plan.protocol, ExternalServerProtocol::VlaCppZmqServer);
         assert_eq!(plan.client_endpoint, "tcp://127.0.0.1:15555");
         assert!(!plan.protocol.is_openai_compatible());
-        assert_eq!(plan.readiness_probe, RuntimeReadinessProbe::TcpConnect);
+        assert_eq!(
+            plan.readiness_probe,
+            RuntimeReadinessProbe::TcpConnectAndLog {
+                marker: "vla-server: bound to tcp://127.0.0.1:15555. ready.".to_string(),
+            }
+        );
         assert_eq!(
             plan.command,
             vec![

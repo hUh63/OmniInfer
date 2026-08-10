@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -91,6 +91,10 @@ impl RuntimeProcess {
                 path: options.log_path.display().to_string(),
                 source,
             })?;
+        let log_start_offset = log_handle
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         let stdout = log_handle
             .try_clone()
             .map_err(|source| RuntimeProcessError::CloneLog {
@@ -118,9 +122,11 @@ impl RuntimeProcess {
         if !wait_runtime_ready(
             &options.health_host,
             plan.port,
-            plan.readiness_probe,
+            &plan.readiness_probe,
             options.startup_timeout,
             &mut child,
+            &options.log_path,
+            log_start_offset,
         )? {
             let _ = terminate_runtime(
                 &mut child,
@@ -163,11 +169,16 @@ impl Drop for RuntimeProcess {
 fn wait_runtime_ready(
     host: &str,
     port: u16,
-    probe: RuntimeReadinessProbe,
+    probe: &RuntimeReadinessProbe,
     timeout: Duration,
     child: &mut Child,
+    log_path: &Path,
+    log_start_offset: u64,
 ) -> Result<bool, RuntimeProcessError> {
     let deadline = Instant::now() + timeout;
+    let mut log_cursor = log_start_offset;
+    let mut log_tail = Vec::new();
+    let mut log_marker_seen = false;
     while Instant::now() < deadline {
         if child.try_wait()?.is_some() {
             return Err(RuntimeProcessError::EarlyExit);
@@ -176,8 +187,14 @@ fn wait_runtime_ready(
             RuntimeReadinessProbe::HttpHealth => {
                 health_endpoint_ready(host, port, Duration::from_millis(500))
             }
-            RuntimeReadinessProbe::TcpConnect => {
-                tcp_endpoint_ready(host, port, Duration::from_millis(500))
+            RuntimeReadinessProbe::TcpConnectAndLog { marker } => {
+                log_marker_seen |= appended_log_contains(
+                    log_path,
+                    &mut log_cursor,
+                    &mut log_tail,
+                    marker.as_bytes(),
+                );
+                log_marker_seen && tcp_endpoint_ready(host, port, Duration::from_millis(500))
             }
         };
         if ready {
@@ -189,6 +206,36 @@ fn wait_runtime_ready(
         return Err(RuntimeProcessError::EarlyExit);
     }
     Ok(false)
+}
+
+fn appended_log_contains(path: &Path, cursor: &mut u64, tail: &mut Vec<u8>, marker: &[u8]) -> bool {
+    if marker.is_empty() {
+        return true;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if file.seek(SeekFrom::Start(*cursor)).is_err() {
+        return false;
+    }
+    let mut appended = Vec::new();
+    if file.take(1024 * 1024).read_to_end(&mut appended).is_err() {
+        return false;
+    }
+    *cursor = cursor.saturating_add(appended.len() as u64);
+    tail.extend_from_slice(&appended);
+    let found = tail
+        .windows(marker.len())
+        .any(|candidate| candidate == marker);
+    if !found {
+        let keep = usize::min(marker.len().saturating_sub(1), tail.len());
+        if keep == 0 {
+            tail.clear();
+        } else {
+            tail.drain(..tail.len() - keep);
+        }
+    }
+    found
 }
 
 fn health_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
@@ -468,6 +515,45 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, RuntimeProcessError::ReadyTimeout));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tcp_readiness_ignores_stale_log_marker_and_occupied_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = temp_root("runtime-process-stale-marker");
+        fs::create_dir_all(&root).unwrap();
+        let script = write_sleep_process(&root);
+        let log_path = root.join("runtime.log");
+        let marker = format!("vla-server: bound to tcp://127.0.0.1:{port}. ready.");
+        fs::write(&log_path, format!("{marker}\n")).unwrap();
+        let plan = ExternalRuntimePlan {
+            command: test_script_command(&script),
+            stop_command: None,
+            cwd: root.clone(),
+            port,
+            ctx_size: None,
+            log_file_name: "runtime.log".to_string(),
+            proxy_model_ref: None,
+            protocol: crate::runtime_plan::ExternalServerProtocol::VlaCppZmqServer,
+            client_endpoint: format!("tcp://127.0.0.1:{port}"),
+            readiness_probe: RuntimeReadinessProbe::TcpConnectAndLog { marker },
+        };
+
+        let error = RuntimeProcess::start(
+            &plan,
+            RuntimeProcessOptions {
+                log_path,
+                env: Vec::new(),
+                startup_timeout: Duration::from_millis(250),
+                health_host: "127.0.0.1".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, RuntimeProcessError::ReadyTimeout));
+
+        drop(listener);
         fs::remove_dir_all(root).ok();
     }
 
