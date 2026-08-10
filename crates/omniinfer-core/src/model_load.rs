@@ -376,7 +376,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.payload["backend"], serde_json::json!("vla.cpp-linux"));
-        assert_eq!(plan.payload["model"], serde_json::json!(model.display().to_string()));
+        assert_eq!(
+            plan.payload["model"],
+            serde_json::json!(model.display().to_string())
+        );
         assert_eq!(
             plan.payload["launch_args"],
             serde_json::json!(["--timing-detail", "phase"])

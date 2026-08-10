@@ -556,13 +556,23 @@ mod tests {
         let parsed = parse_backend_load_extra_args(
             "vla.cpp-linux-cuda",
             "vla.cpp",
-            &args(&["--timing-detail", "phase", "--config", "/models/config.json"]),
+            &args(&[
+                "--timing-detail",
+                "phase",
+                "--config",
+                "/models/config.json",
+            ]),
         )
         .unwrap();
         assert_eq!(parsed.ctx_size, None);
         assert_eq!(
             parsed.launch_args,
-            args(&["--timing-detail", "phase", "--config", "/models/config.json"])
+            args(&[
+                "--timing-detail",
+                "phase",
+                "--config",
+                "/models/config.json"
+            ])
         );
     }
 
@@ -574,7 +584,10 @@ mod tests {
             &args(&["--bind", "tcp://127.0.0.1:5555"]),
         )
         .unwrap_err();
-        assert_eq!(error, BackendArgError::ReservedManaged("--bind".to_string()));
+        assert_eq!(
+            error,
+            BackendArgError::ReservedManaged("--bind".to_string())
+        );
     }
 
     #[test]

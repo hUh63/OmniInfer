@@ -401,14 +401,7 @@ fn validate_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
         let flag = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
         if matches!(
             flag,
-            "-m"
-                | "--model"
-                | "-mm"
-                | "--mmproj"
-                | "--host"
-                | "--port"
-                | "--bind"
-                | "--no-webui"
+            "-m" | "--model" | "-mm" | "--mmproj" | "--host" | "--port" | "--bind" | "--no-webui"
         ) {
             return Err(RuntimePlanError::ReservedLaunchArg(flag.to_string()));
         }
