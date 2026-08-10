@@ -54,10 +54,16 @@ impl ExternalServerProtocol {
     }
 
     pub fn client_endpoint(self, host: &str, port: u16) -> String {
+        let endpoint_host = host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .filter(std::net::IpAddr::is_ipv6)
+            .map(|_| format!("[{host}]"))
+            .unwrap_or_else(|| host.to_string());
         if matches!(self, Self::VlaCppZmqServer) {
-            format!("tcp://{host}:{port}")
+            format!("tcp://{endpoint_host}:{port}")
         } else {
-            format!("http://{host}:{port}")
+            format!("http://{endpoint_host}:{port}")
         }
     }
 }
@@ -88,6 +94,8 @@ pub enum RuntimePlanError {
     UnsupportedProtocol { backend: String, protocol: String },
     #[error("port must be in 1-65535")]
     InvalidPort,
+    #[error("vla.cpp ZeroMQ runtime must bind to a loopback host, got: {0}")]
+    NonLoopbackVlaBind(String),
     #[error("invalid WSL2 launcher manifest {path}: {message}")]
     InvalidWslLauncherManifest { path: String, message: String },
     #[error("WSL2 vLLM does not support this Windows model path: {0}")]
@@ -236,11 +244,14 @@ fn build_vla_cpp_plan(
     _effective_ctx_size: Option<u32>,
     log_file_name: String,
 ) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    if !is_loopback_host(&request.host) {
+        return Err(RuntimePlanError::NonLoopbackVlaBind(request.host.clone()));
+    }
     validate_vla_cpp_launch_args(&server_args)?;
     let mut command = vec![
         launcher_path.display().to_string(),
         "--bind".to_string(),
-        format!("tcp://{}:{}", request.host, request.port),
+        ExternalServerProtocol::VlaCppZmqServer.client_endpoint(&request.host, request.port),
     ];
     command.append(&mut server_args);
     if let Some(mmproj) = request
@@ -267,6 +278,13 @@ fn build_vla_cpp_plan(
             .client_endpoint(&request.host, request.port),
         readiness_probe: RuntimeReadinessProbe::TcpConnect,
     })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn validate_vla_cpp_launch_args(args: &[String]) -> Result<(), RuntimePlanError> {
@@ -680,6 +698,40 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error, RuntimePlanError::ReservedLaunchArg("-c".to_string()));
+    }
+
+    #[test]
+    fn rejects_unauthenticated_non_loopback_vla_bind() {
+        let backend = json!({
+            "id": "vla.cpp-linux",
+            "launcher_path": "/runtime/vla.cpp-linux/bin/vla-server",
+            "runtime_dir": "/runtime/vla.cpp-linux",
+            "external_server_protocol": "vla.cpp-zmq-server"
+        });
+        for host in ["0.0.0.0", "192.0.2.10", "::"] {
+            let error = build_external_runtime_plan(&ExternalRuntimeRequest {
+                backend: backend.clone(),
+                model_path: "/models/smolvla.gguf".to_string(),
+                mmproj_path: None,
+                host: host.to_string(),
+                port: 15555,
+                ctx_size: None,
+                launch_args: None,
+            })
+            .unwrap_err();
+            assert_eq!(
+                error,
+                RuntimePlanError::NonLoopbackVlaBind(host.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn formats_ipv6_loopback_client_endpoint() {
+        assert_eq!(
+            ExternalServerProtocol::VlaCppZmqServer.client_endpoint("::1", 15555),
+            "tcp://[::1]:15555"
+        );
     }
 
     #[test]

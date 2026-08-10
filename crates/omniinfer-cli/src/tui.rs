@@ -496,10 +496,59 @@ fn model_supported_by_backend(path: &Path, backend: Option<&SelectedBackendInfo>
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "gguf" => matches!(backend.family.as_str(), "llama.cpp" | "turboquant"),
+        "gguf" => {
+            backend.model_artifact == "vla-artifact"
+                || matches!(backend.family.as_str(), "llama.cpp" | "turboquant")
+        }
         "mnn" => backend.family == "mnn",
-        "safetensors" | "bin" => backend.model_artifact == "file",
+        "safetensors" => backend.model_artifact == "vla-artifact",
+        "bin" => backend.model_artifact == "file",
         _ => backend.model_artifact == "file",
+    }
+}
+
+#[cfg(test)]
+mod backend_model_tests {
+    use super::*;
+
+    #[test]
+    fn vla_backend_accepts_only_supported_checkpoint_files() {
+        let backend = SelectedBackendInfo {
+            family: "vla.cpp".to_string(),
+            model_artifact: "vla-artifact".to_string(),
+        };
+        assert!(model_supported_by_backend(
+            Path::new("smolvla.gguf"),
+            Some(&backend)
+        ));
+        assert!(model_supported_by_backend(
+            Path::new("smolvla.safetensors"),
+            Some(&backend)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("weights.bin"),
+            Some(&backend)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("config.json"),
+            Some(&backend)
+        ));
+    }
+
+    #[test]
+    fn chat_backends_do_not_claim_vla_safetensors() {
+        let backend = SelectedBackendInfo {
+            family: "llama.cpp".to_string(),
+            model_artifact: "file".to_string(),
+        };
+        assert!(model_supported_by_backend(
+            Path::new("chat.gguf"),
+            Some(&backend)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("weights.safetensors"),
+            Some(&backend)
+        ));
     }
 }
 
