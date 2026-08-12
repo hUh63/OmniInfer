@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OmniInfer VLA - LIBERO Live Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: #101621;
+      --panel-2: #151d2a;
+      --line: #263247;
+      --text: #eff5ff;
+      --muted: #8fa1b9;
+      --cyan: #62e8ff;
+      --green: #44e6a7;
+      --red: #ff657a;
+      --yellow: #ffc857;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 0%, rgba(44, 116, 151, .18), transparent 34%),
+        radial-gradient(circle at 90% 10%, rgba(77, 46, 136, .16), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 20px;
+      padding: 22px 28px 16px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    h1 { margin: 0; font-size: 21px; letter-spacing: -.02em; }
+    h1 span { color: var(--cyan); }
+    .subtitle { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .controls { display: flex; gap: 9px; }
+    select {
+      min-width: 225px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font: inherit;
+    }
+    select:disabled, button:disabled { opacity: .48; cursor: not-allowed; }
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 9px 15px;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    button.primary { background: var(--cyan); border-color: var(--cyan); color: #061016; }
+    button:hover { filter: brightness(1.12); }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.65fr) minmax(320px, .85fr);
+      gap: 16px;
+      padding: 16px 28px 28px;
+      max-width: 1700px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(20,28,41,.98), rgba(12,17,26,.98));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 18px 45px rgba(0,0,0,.22);
+    }
+    .viewer { overflow: hidden; }
+    .viewer-head, .section { padding: 14px 16px; }
+    .viewer-head { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .badge { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 4px rgba(143,161,185,.08); }
+    .running .dot { background: var(--cyan); box-shadow: 0 0 12px var(--cyan); }
+    .success .dot { background: var(--green); box-shadow: 0 0 12px var(--green); }
+    .partial .dot { background: var(--yellow); box-shadow: 0 0 12px var(--yellow); }
+    .failed .dot, .error .dot { background: var(--red); box-shadow: 0 0 12px var(--red); }
+    .frame-wrap {
+      position: relative;
+      min-height: 420px;
+      background: #030507;
+      display: grid;
+      place-items: center;
+    }
+    #frame { display: none; width: 100%; max-height: 69vh; object-fit: contain; image-rendering: auto; }
+    #placeholder { color: #66758b; text-align: center; }
+    .camera-tags { position: absolute; left: 12px; top: 12px; display: flex; gap: 8px; }
+    .camera-tags span { background: rgba(3,5,7,.78); border: 1px solid rgba(255,255,255,.16); padding: 5px 8px; border-radius: 5px; font-size: 10px; letter-spacing: .08em; }
+    .task-strip { padding: 14px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+    .eyebrow { color: var(--muted); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; margin-bottom: 5px; }
+    #task-description { font-size: 16px; font-weight: 680; }
+    .episode-counter { text-align: right; font-variant-numeric: tabular-nums; }
+    aside { display: flex; flex-direction: column; gap: 16px; }
+    .result-card { padding: 16px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; }
+    .result-value { font-size: 26px; font-weight: 850; letter-spacing: -.03em; text-transform: uppercase; }
+    .result-value.success { color: var(--green); }
+    .result-value.partial { color: var(--yellow); }
+    .result-value.failed, .result-value.error { color: var(--red); }
+    .result-value.running { color: var(--cyan); }
+    .score { display: flex; gap: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+    .score strong { color: var(--text); }
+    h2 { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; margin: 0 0 13px; color: var(--muted); }
+    .actions { display: grid; gap: 8px; }
+    .action-row { display: grid; grid-template-columns: 58px 1fr 74px; align-items: center; gap: 9px; font-variant-numeric: tabular-nums; }
+    .action-row label { color: var(--muted); }
+    .bar { height: 7px; border-radius: 10px; background: #273144; position: relative; overflow: hidden; }
+    .bar::after { content: ""; position: absolute; left: 50%; top: 0; width: 1px; height: 100%; background: rgba(255,255,255,.28); }
+    .bar-fill { position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #5775ff, var(--cyan)); border-radius: 8px; }
+    .action-value { text-align: right; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .metric { padding: 11px; border-radius: 8px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.055); }
+    .metric-name { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+    .metric-value { margin-top: 4px; font-size: 20px; font-weight: 760; font-variant-numeric: tabular-nums; }
+    .metric-note { color: var(--muted); font-size: 10px; margin-top: 2px; }
+    canvas { width: 100%; height: 68px; margin-top: 12px; background: rgba(0,0,0,.18); border-radius: 7px; }
+    .runtime { display: grid; gap: 7px; font-size: 12px; }
+    .runtime-row { display: grid; grid-template-columns: 78px 1fr; gap: 8px; }
+    .runtime-row span:first-child { color: var(--muted); }
+    .runtime-row code { overflow-wrap: anywhere; color: #c9d9ef; }
+    .events { max-height: 150px; overflow: auto; display: flex; flex-direction: column-reverse; gap: 5px; font-size: 11px; }
+    .event { color: var(--muted); }
+    .event.error { color: var(--red); }
+    .event.success { color: var(--green); }
+    .event.warning { color: var(--yellow); }
+    #error { display: none; margin-top: 9px; padding: 9px; background: rgba(255,101,122,.09); border: 1px solid rgba(255,101,122,.25); color: #ff9aa9; border-radius: 6px; overflow-wrap: anywhere; }
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; padding: 12px; }
+      header { padding: 16px; }
+      .frame-wrap { min-height: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1><span>OmniInfer</span> + vla.cpp + LIBERO</h1>
+      <div class="subtitle">Managed VLA runtime | live closed-loop simulation</div>
+    </div>
+    <div class="controls">
+      <select id="task-select" aria-label="Object to pick">
+        <option value="0">Loading LIBERO tasks...</option>
+      </select>
+      <button id="stop">Stop</button>
+      <button id="start" class="primary">Start demo</button>
+    </div>
+  </header>
+  <main>
+    <section class="panel viewer">
+      <div class="viewer-head">
+        <div id="phase-badge" class="badge"><span class="dot"></span><span id="phase">Idle</span></div>
+        <div id="step" class="subtitle">Step 0</div>
+      </div>
+      <div class="frame-wrap">
+        <div id="placeholder">Waiting for the LIBERO simulator...</div>
+        <img id="frame" alt="Live LIBERO simulation">
+        <div class="camera-tags"><span>AGENT VIEW</span><span>WRIST VIEW</span></div>
+      </div>
+      <div class="task-strip">
+        <div><div class="eyebrow">Language instruction</div><div id="task-description">-</div></div>
+        <div class="episode-counter"><div class="eyebrow">Episode</div><strong id="episode">0 / 0</strong></div>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel result-card">
+        <div><div class="eyebrow">Current result</div><div id="result" class="result-value">Idle</div><div id="message" class="subtitle">Ready to start</div></div>
+        <div class="score"><span>OK <strong id="successes">0</strong></span><span>FAIL <strong id="failures">0</strong></span></div>
+      </section>
+
+      <section class="panel section">
+        <h2>Robot action | 7 DoF</h2>
+        <div id="actions" class="actions"></div>
+        <div class="subtitle" style="margin-top:10px">Source: <span id="call-kind">-</span></div>
+      </section>
+
+      <section class="panel section">
+        <h2>Latency</h2>
+        <div class="metric-grid">
+          <div class="metric"><div class="metric-name">Model prediction</div><div id="prediction-latency" class="metric-value">-</div><div id="prediction-note" class="metric-note">waiting for prediction</div></div>
+          <div class="metric"><div class="metric-name">Policy call</div><div id="policy-latency" class="metric-value">-</div><div id="policy-note" class="metric-note">includes queue replay</div></div>
+          <div class="metric"><div class="metric-name">Simulator step</div><div id="env-latency" class="metric-value">-</div><div id="env-note" class="metric-note">LIBERO environment</div></div>
+          <div class="metric"><div class="metric-name">Control loop</div><div id="loop-latency" class="metric-value">-</div><div id="loop-note" class="metric-note">policy + simulator</div></div>
+        </div>
+        <canvas id="latency-chart" width="600" height="136"></canvas>
+      </section>
+
+      <section class="panel section">
+        <h2>Managed runtime</h2>
+        <div class="runtime">
+          <div class="runtime-row"><span>Backend</span><code id="backend">-</code></div>
+          <div class="runtime-row"><span>Model</span><code id="model">-</code></div>
+          <div class="runtime-row"><span>Protocol</span><code>vla.cpp-zmq-server</code></div>
+          <div class="runtime-row"><span>Endpoint</span><code id="endpoint">-</code></div>
+        </div>
+        <div id="error"></div>
+      </section>
+
+      <section class="panel section">
+        <h2>Run events</h2>
+        <div id="events" class="events"></div>
+      </section>
+    </aside>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let frameSeq = -1;
+    let taskOptionsLoaded = false;
+    let selectedTaskId = null;
+    const actionContainer = $('actions');
+    const actionRows = ['dx','dy','dz','droll','dpitch','dyaw','gripper'].map((label) => {
+      const row = document.createElement('div'); row.className = 'action-row';
+      row.innerHTML = `<label>${label}</label><div class="bar"><div class="bar-fill"></div></div><div class="action-value">0.00000</div>`;
+      actionContainer.appendChild(row); return row;
+    });
+
+    function fmt(value) { return value == null ? '-' : `${Number(value).toFixed(2)} ms`; }
+    function setMetric(id, noteId, metric, emptyNote) {
+      $(id).textContent = fmt(metric?.p50_ms);
+      $(noteId).textContent = metric?.samples
+        ? `p50 | mean ${fmt(metric.mean_ms)} | p95 ${fmt(metric.p95_ms)}`
+        : emptyNote;
+    }
+    function renderActions(values = []) {
+      actionRows.forEach((row, index) => {
+        const value = Number(values[index] || 0);
+        const bounded = Math.max(-1, Math.min(1, value));
+        const fill = row.querySelector('.bar-fill');
+        if (bounded >= 0) { fill.style.left = '50%'; fill.style.width = `${bounded * 50}%`; }
+        else { fill.style.left = `${50 + bounded * 50}%`; fill.style.width = `${-bounded * 50}%`; }
+        row.querySelector('.action-value').textContent = value.toFixed(5);
+      });
+    }
+    function drawLatency(values = []) {
+      const canvas = $('latency-chart'); const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!values.length) return;
+      const max = Math.max(1, ...values); const width = canvas.width / values.length;
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, '#62e8ff'); gradient.addColorStop(1, '#3c62e8');
+      ctx.fillStyle = gradient;
+      values.forEach((value, index) => {
+        const height = Math.max(2, (value / max) * (canvas.height - 8));
+        ctx.fillRect(index * width, canvas.height - height, Math.max(1, width - 1), height);
+      });
+    }
+    function render(data) {
+      const result = data.result || 'idle';
+      const busy = ['starting', 'initializing', 'running'].includes(data.phase);
+      const taskSelect = $('task-select');
+      if (!taskOptionsLoaded && data.task_options?.length) {
+        taskSelect.replaceChildren(...data.task_options.map((task) => {
+          const option = document.createElement('option');
+          option.value = String(task.task_id);
+          option.textContent = task.instruction
+            .replace('pick up the ', '')
+            .replace(' and place it in the basket', '');
+          return option;
+        }));
+        taskOptionsLoaded = true;
+        selectedTaskId = Number(data.task_id);
+        taskSelect.value = String(selectedTaskId);
+      }
+      if (busy) {
+        selectedTaskId = Number(data.task_id);
+        taskSelect.value = String(selectedTaskId);
+      }
+      taskSelect.disabled = busy;
+      $('start').disabled = busy;
+      $('stop').disabled = !busy;
+      $('phase').textContent = data.phase;
+      $('phase-badge').className = `badge ${result}`;
+      $('result').textContent = result;
+      $('result').className = `result-value ${result}`;
+      $('message').textContent = data.message || '';
+      $('step').textContent = `Step ${data.step}`;
+      $('episode').textContent = `${data.episode} / ${data.episodes}`;
+      $('task-description').textContent = data.task_description || `${data.task} / task ${data.task_id}`;
+      $('successes').textContent = data.successes;
+      $('failures').textContent = data.failures;
+      $('backend').textContent = data.backend || '-';
+      $('model').textContent = data.model || '-';
+      $('endpoint').textContent = data.client_endpoint || '-';
+      $('call-kind').textContent = (data.call_kind || '-').replaceAll('_', ' ');
+      renderActions(data.action);
+      setMetric('prediction-latency', 'prediction-note', data.latency?.prediction, 'waiting for prediction');
+      setMetric('policy-latency', 'policy-note', data.latency?.policy, 'includes action queue replay');
+      setMetric('env-latency', 'env-note', data.latency?.environment, 'LIBERO environment');
+      setMetric('loop-latency', 'loop-note', data.latency?.control_loop, 'policy + simulator');
+      drawLatency(data.latency?.history_ms || []);
+      const error = $('error'); error.style.display = data.error ? 'block' : 'none'; error.textContent = data.error || '';
+      const events = $('events'); events.replaceChildren();
+      [...(data.events || [])].reverse().forEach((item) => {
+        const node = document.createElement('div'); node.className = `event ${item.level}`;
+        node.textContent = `${new Date(item.time * 1000).toLocaleTimeString()}  ${item.message}`; events.appendChild(node);
+      });
+      if (data.frame_seq !== frameSeq && data.frame_seq > 0) {
+        frameSeq = data.frame_seq; const image = $('frame');
+        image.onload = () => { image.style.display = 'block'; $('placeholder').style.display = 'none'; };
+        image.src = `/api/frame.jpg?seq=${frameSeq}`;
+      }
+    }
+    async function refresh() {
+      try { const response = await fetch('/api/state', {cache:'no-store'}); render(await response.json()); }
+      catch (error) { $('message').textContent = `Dashboard disconnected: ${error}`; }
+    }
+    async function control(path, payload) {
+      const options = {method:'POST'};
+      if (payload) {
+        options.headers = {'Content-Type':'application/json'};
+        options.body = JSON.stringify(payload);
+      }
+      const response = await fetch(path, options);
+      const result = await response.json();
+      await refresh();
+      if (!response.ok) $('message').textContent = result.error || `Request failed: HTTP ${response.status}`;
+    }
+    $('task-select').onchange = () => { selectedTaskId = Number($('task-select').value); };
+    $('start').onclick = () => control('/api/start', {task_id: selectedTaskId});
+    $('stop').onclick = () => control('/api/stop');
+    setInterval(refresh, 120); refresh();
+  </script>
+</body>
+</html>
