@@ -61,6 +61,51 @@ def validate_csrf_token(expected: str, received: str | None) -> None:
         raise PermissionError("missing or invalid CSRF token")
 
 
+def validate_dashboard_host(value: str | None, port: int) -> str:
+    """Accept only an explicit loopback Host on the dashboard's bound port."""
+    if not value:
+        raise PermissionError("missing or invalid Host header")
+    try:
+        parsed = urllib.parse.urlsplit(f"//{value}")
+        host = parsed.hostname
+        request_port = parsed.port
+    except ValueError as error:
+        raise PermissionError("missing or invalid Host header") from error
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or host not in {"127.0.0.1", "localhost", "::1"}
+        or request_port != port
+    ):
+        raise PermissionError("missing or invalid Host header")
+    return host
+
+
+def validate_dashboard_origin(value: str | None, host: str, port: int) -> None:
+    """Require mutating browser requests to originate from the current origin."""
+    if not value:
+        raise PermissionError("missing or invalid Origin header")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        origin_port = parsed.port
+    except ValueError as error:
+        raise PermissionError("missing or invalid Origin header") from error
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != host
+        or origin_port != port
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise PermissionError("missing or invalid Origin header")
+
+
 def validate_arch_options(
     arch: str, tokenizer: str | None, stats_json: str | None
 ) -> str | None:
@@ -869,6 +914,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self) -> dict[str, Any]:
+        content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ValueError("request Content-Type must be application/json")
         raw_length = self.headers.get("Content-Length", "0")
         try:
             length = int(raw_length)
@@ -900,6 +948,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return value
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
+        try:
+            validate_dashboard_host(self.headers.get("Host"), self.server.server_port)
+        except PermissionError as error:
+            self._send_json({"ok": False, "error": str(error)}, HTTPStatus.FORBIDDEN)
+            return
         path = urllib.parse.urlsplit(self.path).path
         if path == "/":
             page = self.index_path.read_text(encoding="utf-8")
@@ -938,8 +991,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
         path = urllib.parse.urlsplit(self.path).path
         try:
+            host = validate_dashboard_host(
+                self.headers.get("Host"), self.server.server_port
+            )
             validate_csrf_token(
                 self.csrf_token, self.headers.get("X-OmniInfer-CSRF-Token")
+            )
+            validate_dashboard_origin(
+                self.headers.get("Origin"), host, self.server.server_port
             )
         except PermissionError as error:
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.FORBIDDEN)

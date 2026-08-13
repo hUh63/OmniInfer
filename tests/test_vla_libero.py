@@ -332,6 +332,7 @@ class RuntimeContractTests(unittest.TestCase):
             connection = http.client.HTTPConnection(
                 "127.0.0.1", server.server_address[1], timeout=2
             )
+            origin = f"http://127.0.0.1:{server.server_address[1]}"
             connection.request("GET", "/")
             page_response = connection.getresponse()
             page = page_response.read().decode("utf-8")
@@ -365,6 +366,7 @@ class RuntimeContractTests(unittest.TestCase):
                 body='{"task_id":0,"model_profile":"command-line"}',
                 headers={
                     "Content-Type": "application/json",
+                    "Origin": origin,
                     "X-OmniInfer-CSRF-Token": "test-token",
                 },
             )
@@ -386,6 +388,7 @@ class RuntimeContractTests(unittest.TestCase):
                 ),
                 headers={
                     "Content-Type": "application/json",
+                    "Origin": origin,
                     "X-OmniInfer-CSRF-Token": "test-token",
                 },
             )
@@ -398,6 +401,72 @@ class RuntimeContractTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(2)
+
+    def test_dashboard_rejects_dns_rebinding_and_foreign_origins(self):
+        class Controller:
+            started = False
+
+            def start(self, task_id, model_profile):
+                self.started = True
+                return True
+
+            def stop(self):
+                return True
+
+        controller = Controller()
+        DEMO.DashboardHandler.controller = controller
+        DEMO.DashboardHandler.state = DEMO.DemoState(DEMO.DemoConfig())
+        DEMO.DashboardHandler.index_path = (
+            REPOSITORY_ROOT / "examples" / "vla-libero" / "index.html"
+        )
+        DEMO.DashboardHandler.csrf_token = "test-token"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), DEMO.DashboardHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            connection.request("GET", "/", headers={"Host": "attacker.example"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 403)
+            self.assertNotIn("test-token", response.read().decode("utf-8"))
+            connection.close()
+
+            for host, origin in (
+                ("attacker.example", "http://attacker.example"),
+                (f"127.0.0.1:{port}", "https://evil.example"),
+                (f"127.0.0.1:{port}", None),
+            ):
+                with self.subTest(host=host, origin=origin):
+                    headers = {
+                        "Host": host,
+                        "Content-Type": "application/json",
+                        "X-OmniInfer-CSRF-Token": "test-token",
+                    }
+                    if origin is not None:
+                        headers["Origin"] = origin
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", port, timeout=2
+                    )
+                    connection.request(
+                        "POST",
+                        "/api/start",
+                        body='{"task_id":0,"model_profile":"command-line"}',
+                        headers=headers,
+                    )
+                    self.assertEqual(connection.getresponse().status, 403)
+                    connection.close()
+            self.assertFalse(controller.started)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+    def test_dashboard_requires_json_content_type(self):
+        handler = object.__new__(DEMO.DashboardHandler)
+        handler.headers = {"Content-Length": "2", "Content-Type": "text/plain"}
+        with self.assertRaisesRegex(ValueError, "Content-Type"):
+            handler._read_json()
 
     def test_run_uses_the_isolated_demo_environment(self):
         runner = (REPOSITORY_ROOT / "examples" / "vla-libero" / "run.sh").read_text()
