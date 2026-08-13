@@ -21,11 +21,11 @@ condition remain consistent. Selection is locked while a rollout is active.
 For multi-episode runs, the final status is `success`, `failed`, or `partial`;
 `partial` means that the same run contained both successful and failed episodes.
 The dashboard exposes the SmolVLA and PI0.5 request formats supported by the
-vla.cpp LIBERO client. Both paths have completed real-checkpoint end-to-end
-LIBERO demo rollouts. This validates the integration smoke path, including
-tokenization, state normalization, action chunks, managed runtime startup, and
-simulator interaction; it is not a full LIBERO benchmark, success-rate, or
-model-parity claim.
+vla.cpp LIBERO client. SmolVLA is the validated end-to-end example path. PI0.5
+is an experimental request path: its tokenizer, state-normalization, and action
+chunk wiring are covered here, but this example has not published reproducible
+real-checkpoint rollout evidence. Do not treat it as a validated success-rate
+or parity claim until that evidence is reviewed.
 
 This is an optional Linux developer example. It is not packaged with OmniInfer:
 the setup process downloads LIBERO and creates its own Python environment, and
@@ -295,9 +295,9 @@ MUJOCO_GL=egl examples/vla-libero/run.sh -- \
 
 ## PI0.5
 
-> **Validation scope:** PI0.5 has completed a real-checkpoint end-to-end demo
-> rollout through this path. This is integration smoke evidence, not a complete
-> LIBERO benchmark, success-rate measurement, or parity claim.
+> **Experimental:** the PI0.5 request/configuration path is implemented, but a
+> reproducible real-checkpoint rollout has not been published for this example.
+> Use SmolVLA for the currently validated end-to-end demonstration.
 
 PI0.5 requires LIBERO state quantiles. If `--stats-json` is omitted, the
 vla.cpp client follows its official default and obtains

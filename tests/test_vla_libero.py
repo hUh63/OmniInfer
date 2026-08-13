@@ -236,11 +236,12 @@ class RuntimeContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn("sentencepiece==0.2.0", requirements.splitlines())
 
-    def test_readme_states_pi05_validation_scope_and_runtime_cleanup(self):
+    def test_readme_marks_pi05_experimental_and_explains_runtime_cleanup(self):
         readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
-        self.assertIn("real-checkpoint end-to-end", readme)
-        self.assertIn("not a full LIBERO benchmark", readme)
-        self.assertIn("not a complete\n> LIBERO benchmark", readme)
+        self.assertIn("PI0.5\nis an experimental request path", readme)
+        self.assertIn("has not published reproducible", readme)
+        self.assertIn("real-checkpoint rollout evidence", readme)
+        self.assertIn("Use SmolVLA for the currently validated", readme)
         self.assertIn("does\nnot unload the previous runtime", readme)
         self.assertIn("POST /omni/model/unload", readme)
         self.assertIn("409 model_reload_required", readme)
