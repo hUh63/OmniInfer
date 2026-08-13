@@ -135,10 +135,11 @@ requests from an older rollout cannot replace the current frame.
 
 1. Linux x86_64, Python 3.10, Git, `uv`, and `protoc`.
 2. An NVIDIA driver plus EGL-capable rendering for CUDA vla.cpp runtimes.
-3. Build OmniInfer and install `vla.cpp-linux` or `vla.cpp-linux-cuda` into the
-   same per-user runtime root used by the gateway. Packaged releases can use
-   `backend install`; source builds are described in `docs/build.md` and must
-   place or copy the resulting backend directory under that runtime root.
+3. Build `vla.cpp-linux` or `vla.cpp-linux-cuda` from an OmniInfer source
+   checkout, then place or copy the complete backend directory into the same
+   per-user runtime root used by the gateway. The current prebuilt catalog does
+   not publish either VLA backend, so `backend install` is not available for
+   this example yet. See `docs/build.md` for source-build dependencies.
 4. Initialize `framework/vla.cpp`.
 5. Have a SmolVLA or PI0.5 checkpoint compatible with the vla.cpp runtime.
 

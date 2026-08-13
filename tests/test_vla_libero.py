@@ -842,6 +842,14 @@ class MetricTests(unittest.TestCase):
         self.assertIn("uv and Hugging Face", readme)
         self.assertIn("does not bundle", readme)
 
+    def test_readme_does_not_claim_an_unpublished_vla_prebuilt(self):
+        readme = (
+            REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md"
+        ).read_text()
+        self.assertIn("current prebuilt catalog", readme)
+        self.assertIn("`backend install` is not available", readme)
+        self.assertIn("source-build dependencies", readme)
+
     def test_state_exposes_only_the_ten_predefined_object_tasks(self):
         state = DEMO.DemoState(DEMO.DemoConfig())
         options = state.snapshot()["task_options"]
