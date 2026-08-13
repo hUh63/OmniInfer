@@ -382,8 +382,8 @@ If the gateway uses an admin key, place it in
 Bearer header without putting the secret in the process command line. To keep
 that credential local, `--omniinfer-url` accepts only an explicit loopback IP
 and port over HTTP; the client ignores environment proxies and refuses HTTP
-redirects. Use SSH forwarding to bring a remote gateway to a local loopback
-port instead of pointing the demo at a network URL.
+redirects. Run the demo on the same host as the gateway and use the dashboard's
+SSH-forwarding instructions for remote browser access.
 
 Open the URL printed by `run.sh`. The dashboard is intentionally loopback-only:
 it can start and stop GPU rollouts, so it must not be exposed directly to a

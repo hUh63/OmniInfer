@@ -263,6 +263,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn('--runtime-root "$DEMO_ROOT/runtimes"', readme)
         self.assertIn("changing only", readme)
         self.assertIn("the port still shares OmniInfer state", readme)
+        self.assertIn("same host as the gateway", readme)
         self.assertIn(
             "scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source",
             readme,
