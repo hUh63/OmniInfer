@@ -640,10 +640,30 @@ class RuntimeContractTests(unittest.TestCase):
             "http://127.0.0.1:19000/omni",
             "http://127.0.0.1:19000?target=remote",
             "http://127.0.0.1:19000#fragment",
+            "http://[::1%25lo]:19000",
         ):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     DEMO.OmniInferAPI(value, "admin-secret")
+
+    def test_omniinfer_api_ignores_environment_proxies(self):
+        with mock.patch.object(
+            DEMO.urllib.request, "build_opener", wraps=DEMO.urllib.request.build_opener
+        ) as build_opener:
+            DEMO.OmniInferAPI("http://127.0.0.1:19000", "admin-secret")
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertIsInstance(proxy_handler, DEMO.urllib.request.ProxyHandler)
+        self.assertEqual(proxy_handler.proxies, {})
+
+    def test_cli_rejects_remote_omniinfer_url_before_startup(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["demo.py", "--omniinfer-url", "https://attacker.example"],
+        ):
+            with self.assertRaises(SystemExit) as error:
+                DEMO.parse_args()
+        self.assertEqual(error.exception.code, 2)
 
     def test_omniinfer_api_does_not_follow_redirects_with_admin_key(self):
         class RedirectHandler(http.server.BaseHTTPRequestHandler):

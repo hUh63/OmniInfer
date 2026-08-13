@@ -379,7 +379,11 @@ endpoint instead of silently connecting to the wrong runtime.
 
 If the gateway uses an admin key, place it in
 `OMNIINFER_ADMIN_API_KEY`; the demo reads the environment variable and sends a
-Bearer header without putting the secret in the process command line.
+Bearer header without putting the secret in the process command line. To keep
+that credential local, `--omniinfer-url` accepts only an explicit loopback IP
+and port over HTTP; the client ignores environment proxies and refuses HTTP
+redirects. Use SSH forwarding to bring a remote gateway to a local loopback
+port instead of pointing the demo at a network URL.
 
 Open the URL printed by `run.sh`. The dashboard is intentionally loopback-only:
 it can start and stop GPU rollouts, so it must not be exposed directly to a

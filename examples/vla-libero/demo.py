@@ -132,6 +132,8 @@ def validate_omniinfer_url(value: str) -> str:
             "OmniInfer URL must be an HTTP loopback IP with an explicit port "
             "and no credentials, path, query, or fragment"
         )
+    if getattr(address, "scope_id", None) is not None:
+        raise ValueError("OmniInfer URL must not contain an IPv6 scope identifier")
     canonical_host = f"[{address.compressed}]" if address.version == 6 else address.compressed
     return f"http://{canonical_host}:{port}"
 
@@ -396,7 +398,9 @@ class OmniInferAPI:
     def __init__(self, base_url: str, admin_api_key: str | None = None):
         self.base_url = validate_omniinfer_url(base_url)
         self.admin_api_key = admin_api_key
-        self._opener = urllib.request.build_opener(_NoRedirectHandler())
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirectHandler()
+        )
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -1182,6 +1186,7 @@ def parse_args() -> argparse.Namespace:
             "--server-arg, --tokenizer, or --stats-json"
         )
     try:
+        args.omniinfer_url = validate_omniinfer_url(args.omniinfer_url)
         validate_libero_object_task_id(args.task_id)
         if args.model_profiles is None:
             args.stats_json = validate_arch_options(
