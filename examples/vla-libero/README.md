@@ -21,8 +21,11 @@ condition remain consistent. Selection is locked while a rollout is active.
 For multi-episode runs, the final status is `success`, `failed`, or `partial`;
 `partial` means that the same run contained both successful and failed episodes.
 The dashboard exposes the SmolVLA and PI0.5 request formats supported by the
-vla.cpp LIBERO client. Both architectures use the same managed OmniInfer
-runtime path; their tokenizer, statistics, and action-chunk requirements differ.
+vla.cpp LIBERO client. SmolVLA is the validated end-to-end example path. PI0.5
+is an experimental request path: its tokenizer, state-normalization, and action
+chunk wiring are covered here, but this example has not yet published a real
+PI0.5 checkpoint rollout result. Do not treat it as a validated success-rate or
+parity claim until that evidence is added.
 
 This is an optional Linux developer example. It is not packaged with OmniInfer:
 the setup process downloads LIBERO and creates its own Python environment, and
@@ -217,6 +220,10 @@ MUJOCO_GL=egl examples/vla-libero/run.sh -- \
 
 ## PI0.5
 
+> **Experimental:** the PI0.5 request/configuration path is implemented, but a
+> real PI0.5 checkpoint rollout has not yet been validated by this example.
+> Use SmolVLA for the currently verified end-to-end demonstration.
+
 PI0.5 requires LIBERO state quantiles. If `--stats-json` is omitted, the
 vla.cpp client follows its official default and obtains
 `lerobot/libero` `meta/stats.json` from Hugging Face. Pass a local file for a
@@ -275,7 +282,14 @@ Each profile supports:
 The configured model files are validated when the dashboard starts. Selecting
 a different profile asks OmniInfer to load that model before the rollout, so a
 model switch includes normal runtime startup and weight-loading latency. It is
-not an instantaneous in-process policy switch.
+not an instantaneous in-process policy switch. OmniInfer keeps independently
+loaded model paths as separate managed runtimes; selecting another profile does
+not unload the previous runtime, so RAM/VRAM use can accumulate. Before loading
+a model that will not fit alongside the current one, unload the old model with
+`POST /omni/model/unload` using its loaded model id, or stop the isolated demo
+gateway after the rollout. Reloading the same model path with different runtime
+settings returns `409 model_reload_required` until the existing runtime is
+explicitly unloaded.
 
 `--model-profiles` cannot be combined with the single-model `--model`,
 `--mmproj`, `--server-arg`, `--tokenizer`, or `--stats-json` options. The
