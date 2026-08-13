@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="omniinfer-csrf-token" content="{{CSRF_TOKEN}}">
   <title>OmniInfer VLA - LIBERO Live Demo</title>
   <style>
     :root {
@@ -147,6 +148,9 @@
       <div class="subtitle">Managed VLA runtime | live closed-loop simulation</div>
     </div>
     <div class="controls">
+      <select id="model-select" aria-label="VLA model">
+        <option value="">Loading models...</option>
+      </select>
       <select id="task-select" aria-label="Object to pick">
         <option value="0">Loading LIBERO tasks...</option>
       </select>
@@ -215,7 +219,9 @@
     const $ = (id) => document.getElementById(id);
     let frameSeq = -1;
     let taskOptionsLoaded = false;
+    let modelOptionsLoaded = false;
     let selectedTaskId = null;
+    let selectedModelProfile = null;
     const actionContainer = $('actions');
     const actionRows = ['dx','dy','dz','droll','dpitch','dyaw','gripper'].map((label) => {
       const row = document.createElement('div'); row.className = 'action-row';
@@ -257,6 +263,18 @@
       const result = data.result || 'idle';
       const busy = ['starting', 'initializing', 'running'].includes(data.phase);
       const taskSelect = $('task-select');
+      const modelSelect = $('model-select');
+      if (!modelOptionsLoaded && data.model_options?.length) {
+        modelSelect.replaceChildren(...data.model_options.map((model) => {
+          const option = document.createElement('option');
+          option.value = model.id;
+          option.textContent = `${model.label} (${model.arch})`;
+          return option;
+        }));
+        modelOptionsLoaded = true;
+        selectedModelProfile = data.model_profile;
+        modelSelect.value = selectedModelProfile;
+      }
       if (!taskOptionsLoaded && data.task_options?.length) {
         taskSelect.replaceChildren(...data.task_options.map((task) => {
           const option = document.createElement('option');
@@ -273,8 +291,11 @@
       if (busy) {
         selectedTaskId = Number(data.task_id);
         taskSelect.value = String(selectedTaskId);
+        selectedModelProfile = data.model_profile;
+        modelSelect.value = selectedModelProfile;
       }
       taskSelect.disabled = busy;
+      modelSelect.disabled = busy;
       $('start').disabled = busy;
       $('stop').disabled = !busy;
       $('phase').textContent = data.phase;
@@ -313,10 +334,11 @@
       try { const response = await fetch('/api/state', {cache:'no-store'}); render(await response.json()); }
       catch (error) { $('message').textContent = `Dashboard disconnected: ${error}`; }
     }
+    const csrfToken = document.querySelector('meta[name="omniinfer-csrf-token"]').content;
     async function control(path, payload) {
-      const options = {method:'POST'};
+      const options = {method:'POST', headers:{'X-OmniInfer-CSRF-Token': csrfToken}};
       if (payload) {
-        options.headers = {'Content-Type':'application/json'};
+        options.headers['Content-Type'] = 'application/json';
         options.body = JSON.stringify(payload);
       }
       const response = await fetch(path, options);
@@ -325,7 +347,11 @@
       if (!response.ok) $('message').textContent = result.error || `Request failed: HTTP ${response.status}`;
     }
     $('task-select').onchange = () => { selectedTaskId = Number($('task-select').value); };
-    $('start').onclick = () => control('/api/start', {task_id: selectedTaskId});
+    $('model-select').onchange = () => { selectedModelProfile = $('model-select').value; };
+    $('start').onclick = () => control('/api/start', {
+      task_id: selectedTaskId,
+      model_profile: selectedModelProfile,
+    });
     $('stop').onclick = () => control('/api/stop');
     setInterval(refresh, 120); refresh();
   </script>

@@ -11,10 +11,20 @@ Usage: $0 [--venv <path>] [--libero-config <path>] -- [demo options]
 EOF
 }
 
+require_value() {
+    local option="$1"
+    local value="${2-}"
+    if [[ -z "$value" || "$value" == -* ]]; then
+        echo "$option requires a value" >&2
+        usage >&2
+        exit 2
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --venv) VENV_DIR="$2"; shift 2 ;;
-        --libero-config) LIBERO_CONFIG_DIR="$2"; shift 2 ;;
+        --venv) require_value "$1" "${2-}"; VENV_DIR="$2"; shift 2 ;;
+        --libero-config) require_value "$1" "${2-}"; LIBERO_CONFIG_DIR="$2"; shift 2 ;;
         --) shift; break ;;
         -h|--help) usage; exit 0 ;;
         *) break ;;

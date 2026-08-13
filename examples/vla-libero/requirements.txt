@@ -9,6 +9,7 @@ pillow==12.3.0
 pyzmq==27.1.0
 protobuf==3.20.3
 transformers==4.51.3
+sentencepiece==0.2.0
 gymnasium==0.29.1
 mujoco==2.3.2
 imageio[ffmpeg]==2.37.4

@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import html
 import io
 import json
 import os
+import re
+import secrets
 import shutil
 import statistics
 import sys
@@ -17,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,6 +44,37 @@ LIBERO_OBJECT_TASKS = (
     "pick up the orange juice and place it in the basket",
 )
 SUPPORTED_DEMO_ARCHES = ("smolvla", "pi05")
+MODEL_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def default_output_dir() -> str:
+    """Keep generated videos out of a shared source checkout by default."""
+    state_root = os.environ.get("XDG_STATE_HOME")
+    if not state_root:
+        state_root = str(Path.home() / ".local" / "state")
+    return str(Path(state_root) / "omniinfer" / "vla-libero-demo" / "outputs")
+
+
+def validate_csrf_token(expected: str, received: str | None) -> None:
+    """Reject browser mutations that did not originate from this dashboard page."""
+    if not received or not hmac.compare_digest(expected, received):
+        raise PermissionError("missing or invalid CSRF token")
+
+
+def validate_arch_options(
+    arch: str, tokenizer: str | None, stats_json: str | None
+) -> str | None:
+    """Validate architecture-specific options before starting the dashboard."""
+    if arch != "pi05":
+        if stats_json is not None:
+            raise ValueError("--stats-json is only supported with --arch pi05")
+        return None
+    if stats_json is not None:
+        stats_path = Path(stats_json).expanduser()
+        if not stats_path.is_file():
+            raise ValueError(f"--stats-json must be an existing file; got {stats_json!r}")
+        return str(stats_path)
+    return None
 
 
 def validate_libero_object_task_id(value: Any) -> int:
@@ -123,13 +158,12 @@ class DemoConfig:
     arch: str = "smolvla"
     tokenizer: str | None = None
     stats_json: str | None = None
-    unnorm_key: str | None = None
     task: str = "libero_object"
     task_id: int = 0
     episodes: int = 1
     seed: int = 42
     fps: int = 20
-    output_dir: str = "outputs/vla-libero"
+    output_dir: str = field(default_factory=default_output_dir)
     view_mode: str = "multi-view"
     n_action_steps: int = 1
     recv_timeout_ms: int = 120_000
@@ -147,6 +181,133 @@ class DemoConfig:
         if self.launch_args:
             payload["launch_args"] = list(self.launch_args)
         return payload
+
+
+@dataclass(frozen=True)
+class ModelProfile:
+    identifier: str
+    label: str
+    config: DemoConfig
+
+    def public(self) -> dict[str, str]:
+        return {"id": self.identifier, "label": self.label, "arch": self.config.arch}
+
+
+def _profile_path(value: Any, field_name: str, config_dir: Path) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"model profile {field_name!r} must be a non-empty string")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config_dir / path
+    return str(path.resolve())
+
+
+def _profile_tokenizer(value: Any, config_dir: Path) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("model profile 'tokenizer' must be a non-empty string")
+    candidate = Path(value).expanduser()
+    local_candidate = candidate if candidate.is_absolute() else config_dir / candidate
+    explicitly_local = candidate.is_absolute() or value.startswith(("./", "../", "~/"))
+    if local_candidate.exists():
+        return str(local_candidate.resolve())
+    if explicitly_local:
+        raise ValueError(f"model profile tokenizer does not exist: {local_candidate}")
+    return value
+
+
+def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
+    """Load trusted server-side model choices without exposing paths to browsers."""
+    config_path = Path(path).expanduser().resolve()
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ValueError(f"--model-profiles file does not exist: {config_path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"--model-profiles must contain valid JSON: {error}") from error
+    if not isinstance(payload, dict) or set(payload) != {"models"}:
+        raise ValueError("--model-profiles JSON must contain only a 'models' object")
+    models = payload["models"]
+    if not isinstance(models, dict) or not models:
+        raise ValueError("--model-profiles 'models' must be a non-empty object")
+    if len(models) > 32:
+        raise ValueError("--model-profiles supports at most 32 models")
+
+    allowed = {
+        "label", "arch", "model", "backend", "mmproj", "server_args",
+        "tokenizer", "stats_json", "n_action_steps",
+    }
+    profiles: dict[str, ModelProfile] = {}
+    for identifier, entry in models.items():
+        if not isinstance(identifier, str) or not MODEL_PROFILE_ID_RE.fullmatch(identifier):
+            raise ValueError(f"invalid model profile id: {identifier!r}")
+        if not isinstance(entry, dict):
+            raise ValueError(f"model profile {identifier!r} must be an object")
+        unknown = set(entry) - allowed
+        if unknown:
+            raise ValueError(
+                f"model profile {identifier!r} has unknown field(s): {sorted(unknown)}"
+            )
+        label = entry.get("label")
+        arch = entry.get("arch")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(f"model profile {identifier!r} requires a non-empty label")
+        if arch not in SUPPORTED_DEMO_ARCHES:
+            raise ValueError(
+                f"model profile {identifier!r} arch must be one of {SUPPORTED_DEMO_ARCHES}"
+            )
+        model = _profile_path(entry.get("model"), "model", config_path.parent)
+        if not Path(model).is_file():
+            raise ValueError(f"model profile {identifier!r} model does not exist: {model}")
+        mmproj = entry.get("mmproj")
+        if mmproj is not None:
+            mmproj = _profile_path(mmproj, "mmproj", config_path.parent)
+            if not Path(mmproj).is_file():
+                raise ValueError(f"model profile {identifier!r} mmproj does not exist: {mmproj}")
+        server_args = entry.get("server_args", [])
+        if not isinstance(server_args, list) or not all(
+            isinstance(value, str) for value in server_args
+        ):
+            raise ValueError(f"model profile {identifier!r} server_args must be a string array")
+        tokenizer = _profile_tokenizer(entry.get("tokenizer"), config_path.parent)
+        stats_json = entry.get("stats_json")
+        if stats_json is not None:
+            stats_json = _profile_path(stats_json, "stats_json", config_path.parent)
+        stats_json = validate_arch_options(arch, tokenizer, stats_json)
+        n_action_steps = entry.get("n_action_steps", 10 if arch == "pi05" else 1)
+        if isinstance(n_action_steps, bool) or not isinstance(n_action_steps, int) or n_action_steps < 1:
+            raise ValueError(
+                f"model profile {identifier!r} n_action_steps must be an integer >= 1"
+            )
+        backend = entry.get("backend", base.backend)
+        if not isinstance(backend, str) or not backend.startswith("vla.cpp-"):
+            raise ValueError(f"model profile {identifier!r} backend must be a vla.cpp backend")
+        profiles[identifier] = ModelProfile(
+            identifier=identifier,
+            label=label.strip(),
+            config=replace(
+                base,
+                backend=backend,
+                model=model,
+                mmproj=mmproj,
+                launch_args=tuple(server_args),
+                arch=arch,
+                tokenizer=tokenizer,
+                stats_json=stats_json,
+                n_action_steps=n_action_steps,
+            ),
+        )
+    return profiles
+
+
+def public_profile_error(error: Exception, config: DemoConfig) -> str:
+    """Keep trusted profile paths out of dashboard state and browser responses."""
+    message = f"{type(error).__name__}: {error}"
+    for value in (config.model, config.mmproj, config.stats_json, config.tokenizer):
+        if value and (Path(value).is_absolute() or os.path.sep in value):
+            message = message.replace(value, "<model-profile-value>")
+    return message
 
 
 class OmniInferAPI:
@@ -211,7 +372,18 @@ def configure_protoc(protoc: str | None) -> str:
 
 
 class DemoState:
-    def __init__(self, config: DemoConfig):
+    def __init__(
+        self,
+        config: DemoConfig,
+        profiles: dict[str, ModelProfile] | None = None,
+        default_profile: str = "command-line",
+    ):
+        if profiles is None:
+            profiles = {
+                default_profile: ModelProfile(default_profile, config.arch, config)
+            }
+        self._profiles = profiles
+        selected = profiles[default_profile]
         self._lock = threading.Lock()
         self._frame = b""
         self._policy_ms: deque[float] = deque(maxlen=500)
@@ -230,9 +402,11 @@ class DemoState:
                 {"task_id": task_id, "instruction": instruction}
                 for task_id, instruction in enumerate(LIBERO_OBJECT_TASKS)
             ],
-            "arch": config.arch,
-            "backend": config.backend,
-            "model": config.model,
+            "model_profile": default_profile,
+            "model_options": [profile.public() for profile in profiles.values()],
+            "arch": selected.config.arch,
+            "backend": selected.config.backend,
+            "model": selected.label,
             "client_endpoint": None,
             "episode": 0,
             "episodes": config.episodes,
@@ -249,7 +423,9 @@ class DemoState:
             "error": None,
         }
 
-    def begin(self, task_id: int) -> None:
+    def begin(self, task_id: int, profile: ModelProfile | None = None) -> None:
+        if profile is None:
+            profile = self._profiles[str(self._data["model_profile"])]
         with self._lock:
             self._frame = b""
             self._policy_ms.clear()
@@ -263,6 +439,11 @@ class DemoState:
                 message="Starting OmniInfer-managed VLA runtime",
                 task_id=task_id,
                 task_description=LIBERO_OBJECT_TASKS[task_id],
+                model_profile=profile.identifier,
+                model=profile.label,
+                arch=profile.config.arch,
+                backend=profile.config.backend,
+                episodes=profile.config.episodes,
                 client_endpoint=None,
                 episode=0,
                 step=0,
@@ -426,31 +607,48 @@ def create_policy(config: DemoConfig, endpoint: str) -> tuple[Any, Any]:
         recv_timeout_ms=config.recv_timeout_ms,
         n_action_steps=config.n_action_steps,
         stats_json=config.stats_json,
-        bitvla_unnorm_key=config.unnorm_key,
     )
     return raw_client, _LiberoPolicyAdapter(client=raw_client)
 
 
 class DemoController:
-    def __init__(self, config: DemoConfig, state: DemoState, repository_root: Path):
+    def __init__(
+        self,
+        config: DemoConfig,
+        state: DemoState,
+        repository_root: Path,
+        profiles: dict[str, ModelProfile] | None = None,
+        default_profile: str = "command-line",
+    ):
         self.config = config
+        self.profiles = profiles or {
+            default_profile: ModelProfile(default_profile, config.arch, config)
+        }
+        self.default_profile = default_profile
         self.state = state
         self.repository_root = repository_root
         self._guard = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def start(self, task_id: int | None = None) -> bool:
+    def start(
+        self, task_id: int | None = None, model_profile: str | None = None
+    ) -> bool:
         with self._guard:
             if self._thread is not None and self._thread.is_alive():
                 return False
             if task_id is None:
                 task_id = int(self.state.snapshot()["task_id"])
             task_id = validate_libero_object_task_id(task_id)
+            if model_profile is None:
+                model_profile = str(self.state.snapshot()["model_profile"])
+            if model_profile not in self.profiles:
+                raise ValueError(f"unknown model_profile: {model_profile!r}")
+            profile = self.profiles[model_profile]
             self._stop.clear()
-            self.state.begin(task_id)
+            self.state.begin(task_id, profile)
             self._thread = threading.Thread(
-                target=self._run_guarded, args=(task_id,), daemon=True
+                target=self._run_guarded, args=(task_id, profile), daemon=True
             )
             self._thread.start()
             return True
@@ -463,16 +661,17 @@ class DemoController:
                 self.state.update(message="Stopping after the current simulator step")
             return running
 
-    def _run_guarded(self, task_id: int) -> None:
+    def _run_guarded(self, task_id: int, profile: ModelProfile) -> None:
         try:
-            self._run(task_id)
+            self._run(task_id, profile)
         except Exception as error:  # dashboard must preserve the failure for inspection
-            self.state.event("error", str(error))
+            public_error = public_profile_error(error, profile.config)
+            self.state.event("error", public_error)
             self.state.update(
                 phase="error",
                 result="error",
                 message="Demo failed",
-                error=f"{type(error).__name__}: {error}",
+                error=public_error,
                 finished_at=time.time(),
             )
             traceback.print_exc()
@@ -480,7 +679,8 @@ class DemoController:
             with self._guard:
                 self._thread = None
 
-    def _run(self, task_id: int) -> None:
+    def _run(self, task_id: int, profile: ModelProfile) -> None:
+        run_config = profile.config
         eval_root = self.repository_root / "framework" / "vla.cpp" / "eval"
         if not (eval_root / "client" / "vla_cpp_client.py").is_file():
             raise RuntimeError(
@@ -488,13 +688,13 @@ class DemoController:
             )
         sys.path.insert(0, str(eval_root))
 
-        api = OmniInferAPI(self.config.omniinfer_url, self.config.admin_api_key)
-        endpoint, backend, model = api.resolve_vla_runtime(self.config)
+        api = OmniInferAPI(run_config.omniinfer_url, run_config.admin_api_key)
+        endpoint, backend, _model_path = api.resolve_vla_runtime(run_config)
         self.state.update(
             phase="initializing",
-            message="Initializing tokenizer and LIBERO simulator",
+            message="Initializing VLA client and LIBERO simulator",
             backend=backend,
-            model=model,
+            model=profile.label,
             client_endpoint=endpoint,
         )
         self.state.event("info", f"OmniInfer runtime ready: {backend} at {endpoint}")
@@ -505,32 +705,32 @@ class DemoController:
         raw_client = None
         environment = None
         try:
-            protoc = configure_protoc(self.config.protoc)
+            protoc = configure_protoc(run_config.protoc)
             self.state.event("info", f"Using protoc: {protoc}")
-            raw_client, policy = create_policy(self.config, endpoint)
-            output_dir = Path(self.config.output_dir).resolve()
+            raw_client, policy = create_policy(run_config, endpoint)
+            output_dir = Path(run_config.output_dir).resolve()
             run_dir = output_dir / (
                 f"run-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}-task-{task_id}"
             )
             run_dir.mkdir(parents=True, exist_ok=False)
             self.state.event("info", f"Writing rollout video to {run_dir}")
             environment = gym.make(
-                f"{self.config.task}/task_{task_id}",
-                seed=self.config.seed,
-                video_fps=self.config.fps,
+                f"{run_config.task}/task_{task_id}",
+                seed=run_config.seed,
+                video_fps=run_config.fps,
                 output_video_dir=run_dir,
-                video_view_mode=self.config.view_mode,
+                video_view_mode=run_config.view_mode,
             )
             self.state.update(phase="running", message="Running LIBERO rollout")
 
             successes = 0
             failures = 0
-            for episode_index in range(self.config.episodes):
+            for episode_index in range(run_config.episodes):
                 if self._stop.is_set():
                     break
                 policy.reset()
                 observation, _ = environment.reset()
-                self.state.publish_frame(encode_frame(observation, self.config.view_mode))
+                self.state.publish_frame(encode_frame(observation, run_config.view_mode))
                 self.state.update(
                     phase="running",
                     result="running",
@@ -542,7 +742,7 @@ class DemoController:
                     error=None,
                 )
                 self.state.event(
-                    "info", f"Episode {episode_index + 1}/{self.config.episodes} started"
+                    "info", f"Episode {episode_index + 1}/{run_config.episodes} started"
                 )
 
                 actions_until_prediction = 0
@@ -555,7 +755,7 @@ class DemoController:
                     action = policy.get_action(observation)
                     policy_ms = (time.perf_counter() - policy_start) * 1000.0
                     if prediction_sent:
-                        actions_until_prediction = self.config.n_action_steps - 1
+                        actions_until_prediction = run_config.n_action_steps - 1
                     else:
                         actions_until_prediction -= 1
 
@@ -578,7 +778,7 @@ class DemoController:
                     env_ms = (time.perf_counter() - env_start) * 1000.0
                     loop_ms = (time.perf_counter() - loop_start) * 1000.0
                     step += 1
-                    self.state.publish_frame(encode_frame(observation, self.config.view_mode))
+                    self.state.publish_frame(encode_frame(observation, run_config.view_mode))
                     self.state.publish_step(
                         action=list(action[: len(ACTION_LABELS)]),
                         policy_ms=policy_ms,
@@ -632,7 +832,7 @@ class DemoController:
                     phase="completed",
                     result=result,
                     message=(
-                        f"Completed {self.config.episodes} episode(s): "
+                        f"Completed {run_config.episodes} episode(s): "
                         f"{successes} success, {failures} failure"
                     ),
                     successes=successes,
@@ -653,6 +853,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     controller: DemoController
     state: DemoState
     index_path: Path
+    csrf_token: str
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -663,6 +864,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -690,14 +892,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise ValueError("request body must include task_id")
         return validate_libero_object_task_id(payload["task_id"])
 
+    @staticmethod
+    def _require_model_profile(payload: dict[str, Any]) -> str:
+        value = payload.get("model_profile")
+        if not isinstance(value, str) or not value:
+            raise ValueError("request body must include model_profile")
+        return value
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
         path = urllib.parse.urlsplit(self.path).path
         if path == "/":
-            body = self.index_path.read_bytes()
+            page = self.index_path.read_text(encoding="utf-8")
+            body = page.replace(
+                "{{CSRF_TOKEN}}", html.escape(self.csrf_token, quote=True)
+            ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -721,11 +937,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
         path = urllib.parse.urlsplit(self.path).path
+        try:
+            validate_csrf_token(
+                self.csrf_token, self.headers.get("X-OmniInfer-CSRF-Token")
+            )
+        except PermissionError as error:
+            self._send_json({"ok": False, "error": str(error)}, HTTPStatus.FORBIDDEN)
+            return
         if path == "/api/start":
             try:
                 payload = self._read_json()
+                unexpected = set(payload) - {"task_id", "model_profile"}
+                if unexpected:
+                    raise ValueError(
+                        f"request body has unexpected field(s): {sorted(unexpected)}"
+                    )
                 task_id = self._require_task_id(payload)
-                started = self.controller.start(task_id)
+                model_profile = self._require_model_profile(payload)
+                started = self.controller.start(task_id, model_profile)
             except ValueError as error:
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
                 return
@@ -747,6 +976,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--omniinfer-url", default="http://127.0.0.1:9000")
     parser.add_argument("--backend", default="vla.cpp-linux-cuda")
     parser.add_argument("--model", help="VLA checkpoint path; omit to use the loaded runtime")
+    parser.add_argument(
+        "--model-profiles",
+        help="Trusted server-side JSON file defining models selectable in the dashboard",
+    )
     parser.add_argument("--mmproj")
     parser.add_argument(
         "--server-arg",
@@ -764,34 +997,59 @@ def parse_args() -> argparse.Namespace:
         help="Path to protoc when protobuf-compiler is not available on PATH",
     )
     parser.add_argument("--arch", choices=SUPPORTED_DEMO_ARCHES, default="smolvla")
-    parser.add_argument("--tokenizer")
-    parser.add_argument("--stats-json")
-    parser.add_argument("--unnorm-key")
+    parser.add_argument(
+        "--tokenizer",
+        help="Tokenizer Hugging Face id or local checkpoint directory override",
+    )
+    parser.add_argument(
+        "--stats-json",
+        help=(
+            "PI0.5 LIBERO meta/stats.json; when omitted, the vla.cpp client "
+            "uses its official lerobot/libero download path"
+        ),
+    )
     parser.add_argument("--task", choices=["libero_object"], default="libero_object")
     parser.add_argument("--task-id", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=20)
-    parser.add_argument("--output-dir", default="outputs/vla-libero")
+    parser.add_argument("--output-dir", default=default_output_dir())
     parser.add_argument("--view-mode", choices=["single-view", "multi-view"], default="multi-view")
     parser.add_argument("--n-action-steps", type=int, default=1)
     parser.add_argument("--recv-timeout-ms", type=int, default=120_000)
     parser.add_argument("--listen-host", default="127.0.0.1")
-    parser.add_argument("--listen-port", type=int, default=7860)
+    parser.add_argument(
+        "--listen-port",
+        type=int,
+        default=0,
+        help="Dashboard port (default: 0, ask the OS for an unused port)",
+    )
     parser.add_argument(
         "--auto-start", action=argparse.BooleanOptionalAction, default=False
     )
     args = parser.parse_args()
+    if args.model_profiles and (args.server_arg or any(
+        value is not None
+        for value in (args.model, args.mmproj, args.tokenizer, args.stats_json)
+    )):
+        parser.error(
+            "--model-profiles cannot be combined with --model, --mmproj, "
+            "--server-arg, --tokenizer, or --stats-json"
+        )
     try:
         validate_libero_object_task_id(args.task_id)
+        if args.model_profiles is None:
+            args.stats_json = validate_arch_options(
+                args.arch, args.tokenizer, args.stats_json
+            )
     except ValueError as error:
         parser.error(str(error))
     if args.episodes < 1:
         parser.error("--episodes must be >= 1")
     if args.n_action_steps < 1:
         parser.error("--n-action-steps must be >= 1")
-    if not (1 <= args.listen_port <= 65535):
-        parser.error("--listen-port must be between 1 and 65535")
+    if not (0 <= args.listen_port <= 65535):
+        parser.error("--listen-port must be between 0 and 65535")
     if args.listen_host not in LOOPBACK_HOSTS:
         parser.error("--listen-host must be a loopback address; use SSH port forwarding for remote access")
     return args
@@ -811,7 +1069,6 @@ def main() -> int:
         arch=args.arch,
         tokenizer=args.tokenizer,
         stats_json=args.stats_json,
-        unnorm_key=args.unnorm_key,
         task=args.task,
         task_id=args.task_id,
         episodes=args.episodes,
@@ -822,17 +1079,32 @@ def main() -> int:
         n_action_steps=args.n_action_steps,
         recv_timeout_ms=args.recv_timeout_ms,
     )
-    state = DemoState(config)
-    controller = DemoController(config, state, repository_root)
+    if args.model_profiles:
+        try:
+            profiles = load_model_profiles(args.model_profiles, config)
+        except ValueError as error:
+            raise SystemExit(f"Invalid --model-profiles: {error}") from error
+        default_profile = next(iter(profiles))
+    else:
+        default_profile = "command-line"
+        profiles = {
+            default_profile: ModelProfile(default_profile, config.arch, config)
+        }
+    state = DemoState(config, profiles, default_profile)
+    controller = DemoController(
+        config, state, repository_root, profiles, default_profile
+    )
     DashboardHandler.controller = controller
     DashboardHandler.state = state
     DashboardHandler.index_path = Path(__file__).with_name("index.html")
+    DashboardHandler.csrf_token = secrets.token_urlsafe(32)
 
     server = ThreadingHTTPServer((args.listen_host, args.listen_port), DashboardHandler)
-    print(f"VLA LIBERO demo: http://{args.listen_host}:{args.listen_port}", flush=True)
+    actual_port = int(server.server_address[1])
+    print(f"VLA LIBERO demo: http://{args.listen_host}:{actual_port}", flush=True)
     if args.listen_host in LOOPBACK_HOSTS:
         print(
-            f"Remote host: ssh -L {args.listen_port}:127.0.0.1:{args.listen_port} <host>",
+            f"Remote host: ssh -L {actual_port}:127.0.0.1:{actual_port} <host>",
             flush=True,
         )
     if args.auto_start:

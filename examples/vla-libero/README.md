@@ -20,7 +20,9 @@ prompt text, so the language instruction, scene, target object, and success
 condition remain consistent. Selection is locked while a rollout is active.
 For multi-episode runs, the final status is `success`, `failed`, or `partial`;
 `partial` means that the same run contained both successful and failed episodes.
-It currently supports the SmolVLA and PI0.5 vla.cpp request formats.
+The dashboard exposes the SmolVLA and PI0.5 request formats supported by the
+vla.cpp LIBERO client. Both architectures use the same managed OmniInfer
+runtime path; their tokenizer, statistics, and action-chunk requirements differ.
 
 This is an optional Linux developer example. It is not packaged with OmniInfer:
 the setup process downloads LIBERO and creates its own Python environment, and
@@ -47,19 +49,31 @@ git submodule update --init framework/vla.cpp
 # 4. Create the small CPU-only demo environment (default).
 examples/vla-libero/setup.sh
 
-# 5. Start OmniInfer, then start the dashboard in another terminal.
+# 5. Build the VLA runtime, copy the complete backend package into a private
+#    runtime root, choose an unused gateway port, then start OmniInfer.
+DEMO_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/omniinfer/vla-libero-demo"
+bash scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source
+mkdir -p "$DEMO_ROOT/runtimes"
+cp -a .local/runtime/linux/vla.cpp-linux-cuda "$DEMO_ROOT/runtimes/"
+
 OMNIINFER_SERVE_DIRECT=1 ./omniinfer serve \
-  --host 127.0.0.1 --port 9000 --no-restore-model
+  --host 127.0.0.1 --port <gateway-port> --no-restore-model \
+  --state-root "$DEMO_ROOT/state" \
+  --runtime-root "$DEMO_ROOT/runtimes"
 
 MUJOCO_GL=egl examples/vla-libero/run.sh -- \
+  --omniinfer-url http://127.0.0.1:<gateway-port> \
   --backend vla.cpp-linux-cuda \
   --model <path-to-smolvla.gguf> \
   --arch smolvla --task-id 0 --episodes 1
 ```
 
-Open `http://127.0.0.1:7860`, choose a task, and press **Start**. For a
-remote Linux host, use `ssh -L 7860:127.0.0.1:7860 <host>` and open the same
-local URL. The dashboard never exposes a network listener by default.
+The dashboard prints its selected URL at startup. By default it asks the OS for
+an unused loopback port, which avoids collisions on multi-user hosts. Choose a
+task at that URL and press **Start**. For a remote Linux host, forward the
+printed port with `ssh -L <port>:127.0.0.1:<port> <host>`. The dashboard never
+exposes a network listener by default. Pass `--listen-port <port>` only when a
+fixed port is required.
 
 To create a Python environment with CUDA PyTorch instead of the CPU default:
 
@@ -69,7 +83,16 @@ examples/vla-libero/setup.sh --torch-backend cu124
 
 Choose the CUDA option only when Python-side GPU preprocessing is required.
 `vla-server` performs model inference independently, so the CPU environment is
-the recommended default for this example.
+the recommended default for this example. Select the backend when creating the
+environment. Re-running setup with a different backend does not convert an
+existing venv. To change backend, use a new venv path or remove the old venv
+first; for example:
+
+```sh
+examples/vla-libero/setup.sh \
+  --torch-backend cu124 \
+  --venv "${XDG_CACHE_HOME:-$HOME/.cache}/omniinfer/vla-libero-demo/venv-cu124"
+```
 
 ## Simulation flow
 
@@ -103,28 +126,48 @@ hidden benchmark runner:
 
 1. Linux x86_64, Python 3.10, Git, `uv`, and `protoc`.
 2. An NVIDIA driver plus EGL-capable rendering for CUDA vla.cpp runtimes.
-3. Build OmniInfer and install/build `vla.cpp-linux` or
-   `vla.cpp-linux-cuda` from this checkout.
+3. Build OmniInfer and install `vla.cpp-linux` or `vla.cpp-linux-cuda` into the
+   same per-user runtime root used by the gateway. Packaged releases can use
+   `backend install`; source builds are described in `docs/build.md` and must
+   place or copy the resulting backend directory under that runtime root.
 4. Initialize `framework/vla.cpp`.
-5. Have a vla.cpp-compatible checkpoint and the tokenizer/stats required by its
-   architecture.
+5. Have a SmolVLA or PI0.5 checkpoint compatible with the vla.cpp runtime.
 
 The vla.cpp Python client invokes `protoc` to generate its local protobuf stub.
 If `protoc` is installed outside `PATH`, pass `--protoc <path-to-protoc>`; the
 demo validates it before initializing the client.
 
-When the tokenizer is already cached (or `--tokenizer` points to a local
-snapshot) and the demonstration host has no Internet access, set
-`HF_HUB_OFFLINE=1` to avoid Hugging Face Hub connection retries during startup.
+When all required model resources are already cached and the demonstration host
+has no Internet access, set `HF_HUB_OFFLINE=1` to avoid Hugging Face Hub
+connection retries during startup.
 
-Start a loopback OmniInfer gateway in direct mode:
+Build the VLA runtime and copy the complete backend package into a private
+runtime root. The source checkout currently uses this path rather than assuming
+that a matching prebuilt archive is available:
+
+```sh
+DEMO_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/omniinfer/vla-libero-demo"
+bash scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source
+mkdir -p "$DEMO_ROOT/runtimes"
+cp -a .local/runtime/linux/vla.cpp-linux-cuda "$DEMO_ROOT/runtimes/"
+```
+
+Then start a loopback OmniInfer gateway. On a multi-user host, both the port and
+the state/runtime roots must be private to your session or user; changing only
+the port still shares OmniInfer state, PID files, and logs:
 
 ```sh
 OMNIINFER_SERVE_DIRECT=1 ./omniinfer serve \
   --host 127.0.0.1 \
-  --port 9000 \
-  --no-restore-model
+  --port <gateway-port> \
+  --no-restore-model \
+  --state-root "$DEMO_ROOT/state" \
+  --runtime-root "$DEMO_ROOT/runtimes"
 ```
+
+For a CPU runtime, use the corresponding `vla.cpp-linux` build script and
+backend directory. See `docs/build.md` for build dependencies and options. Do
+not point two concurrently running gateway instances at the same state root.
 
 Create the dedicated dashboard environment:
 
@@ -132,8 +175,11 @@ Create the dedicated dashboard environment:
 examples/vla-libero/setup.sh
 ```
 
-This clones the upstream LIBERO source checkout on first use and creates an
-isolated environment under `${XDG_CACHE_HOME:-~/.cache}/omniinfer/`. It does
+This clones LIBERO at commit
+`8f1084e3132a39270c3a13ebe37270a43ece2a01` on first use and creates an
+isolated source checkout and environment under
+`${XDG_CACHE_HOME:-~/.cache}/omniinfer/`. Pinning the revision makes the demo
+setup reproducible instead of following LIBERO's moving default branch. It does
 not install or modify vla.cpp's complete `setup_libero.sh` evaluation
 environment. The dashboard's default is CPU-only PyTorch: model inference
 continues to run in the separately managed `vla-server`, so Python needs torch
@@ -143,18 +189,23 @@ reduced the environment from about 9.6 GB to about 2.3 GB.
 To retain a CUDA PyTorch environment, request one explicitly:
 
 ```sh
-examples/vla-libero/setup.sh --torch-backend cu124
+examples/vla-libero/setup.sh \
+  --torch-backend cu124 \
+  --venv "${XDG_CACHE_HOME:-$HOME/.cache}/omniinfer/vla-libero-demo/venv-cu124"
 ```
 
 The CUDA option is for compatibility or local GPU-side preprocessing; it does
 not move vla-server inference into Python. `uv` and a system `protoc` are still
-required. `setup.sh --help` documents alternate venv, LIBERO source, and uv
-paths.
+required. Choose CPU or CUDA when the venv is first created; changing
+`--torch-backend` does not rewrite an existing environment. Use a separate
+`--venv` path as above, or remove the existing venv before recreating it.
+`setup.sh --help` documents alternate venv, LIBERO source, and uv paths.
 
 ## SmolVLA
 
 ```sh
 MUJOCO_GL=egl examples/vla-libero/run.sh -- \
+  --omniinfer-url http://127.0.0.1:<gateway-port> \
   --backend vla.cpp-linux-cuda \
   --model <path-to-smolvla.gguf> \
   --arch smolvla \
@@ -166,8 +217,17 @@ MUJOCO_GL=egl examples/vla-libero/run.sh -- \
 
 ## PI0.5
 
+PI0.5 requires LIBERO state quantiles. If `--stats-json` is omitted, the
+vla.cpp client follows its official default and obtains
+`lerobot/libero` `meta/stats.json` from Hugging Face. Pass a local file for a
+reproducible or offline demonstration. `--tokenizer` is optional; when omitted,
+the vla.cpp client uses its PI0.5 PaliGemma tokenizer preset. That upstream
+repository is gated, so hosts without an authenticated/cached copy should pass
+a compatible local tokenizer directory explicitly.
+
 ```sh
 MUJOCO_GL=egl examples/vla-libero/run.sh -- \
+  --omniinfer-url http://127.0.0.1:<gateway-port> \
   --backend vla.cpp-linux-cuda \
   --model <path-to-pi05.gguf> \
   --arch pi05 \
@@ -179,6 +239,50 @@ MUJOCO_GL=egl examples/vla-libero/run.sh -- \
   --n-action-steps 10
 ```
 
+The tokenizer flag can also override SmolVLA's tokenizer preset. The stats flag
+is PI0.5-specific and is rejected with other architectures. An explicitly
+supplied stats path is checked before the dashboard starts, so a typo does not
+fail only after the simulator is running.
+
+## Selecting models in the dashboard
+
+The commands above bind the dashboard to one model for the lifetime of the
+process. To let users choose between approved models in the page, copy
+`model-profiles.example.json`, replace its placeholder paths, and start with:
+
+```sh
+MUJOCO_GL=egl examples/vla-libero/run.sh -- \
+  --omniinfer-url http://127.0.0.1:<gateway-port> \
+  --model-profiles <path-to-model-profiles.json>
+```
+
+The first profile in the JSON file is selected by default. The dashboard state
+exposes only each profile's `id`, display `label`, and `arch`; checkpoint,
+tokenizer, stats, and server arguments are never accepted from a browser
+request. Model and task selection are frozen while a rollout is active.
+
+Each profile supports:
+
+- required: `label`, `arch`, and `model`;
+- optional: `backend`, `mmproj`, `server_args`, `tokenizer`, `stats_json`, and
+  `n_action_steps`;
+- relative `model`, `mmproj`, and `stats_json` paths resolved from the profile
+  JSON directory;
+- tokenizer values accepted as Hugging Face IDs or local paths; prefix a local
+  relative tokenizer with `./` to distinguish it from an ID such as `org/repo`;
+- default `n_action_steps`: 1 for SmolVLA and 10 for PI0.5.
+
+The configured model files are validated when the dashboard starts. Selecting
+a different profile asks OmniInfer to load that model before the rollout, so a
+model switch includes normal runtime startup and weight-loading latency. It is
+not an instantaneous in-process policy switch.
+
+`--model-profiles` cannot be combined with the single-model `--model`,
+`--mmproj`, `--server-arg`, `--tokenizer`, or `--stats-json` options. The
+configuration file is trusted local input: keep it outside public artifacts
+when it contains private filesystem layout, and do not expose the dashboard
+beyond loopback.
+
 If OmniInfer already manages the desired VLA model, omit `--model`; the demo
 validates `/omni/state` and uses its reported `client_endpoint`. It rejects a
 non-VLA protocol, non-VLA backend, missing endpoint, and non-loopback ZMQ
@@ -188,12 +292,12 @@ If the gateway uses an admin key, place it in
 `OMNIINFER_ADMIN_API_KEY`; the demo reads the environment variable and sends a
 Bearer header without putting the secret in the process command line.
 
-Open `http://127.0.0.1:7860`. The dashboard is intentionally loopback-only:
+Open the URL printed by `run.sh`. The dashboard is intentionally loopback-only:
 it can start and stop GPU rollouts, so it must not be exposed directly to a
 network. When it runs on a remote machine, forward it over SSH:
 
 ```sh
-ssh -L 7860:127.0.0.1:7860 <remote-host>
+ssh -L <port>:127.0.0.1:<port> <remote-host>
 ```
 
 The page is idle on startup. Choose a predefined task and press **Start**;
@@ -203,12 +307,18 @@ after the current policy or simulator step returns.
 
 ## Files and cleanup
 
-- `setup.sh` downloads LIBERO under `framework/vla.cpp/eval/sim/libero/LIBERO`
-  and creates a venv under `${XDG_CACHE_HOME:-~/.cache}/omniinfer/` by default.
+- `setup.sh` downloads the pinned LIBERO revision and creates a venv under
+  `${XDG_CACHE_HOME:-~/.cache}/omniinfer/vla-libero-demo/` by default. These
+  per-user defaults avoid writing generated state into a shared source checkout.
 - `run.sh` only starts the dashboard; it never installs packages.
-- `demo.py` never installs Python packages. A tokenizer may still be fetched by
-  `transformers` if `--tokenizer` is not local/cached; set `HF_HUB_OFFLINE=1`
-  to require offline use.
+- `demo.py` never installs Python packages. Set `HF_HUB_OFFLINE=1` when all
+  required model resources are already cached and network access is undesired.
+- Rollout videos default to
+  `${XDG_STATE_HOME:-~/.local/state}/omniinfer/vla-libero-demo/outputs/`, not
+  the current checkout. Override this with `--output-dir` when needed.
+- The page receives a per-process CSRF token and all start/stop requests must
+  return it in a dedicated header. Loopback binding remains mandatory; CSRF
+  protection does not make direct network exposure supported.
 - Remove the chosen venv and LIBERO checkout manually when no longer needed.
   Neither belongs in Git or the OmniInfer release archive.
 
