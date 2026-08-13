@@ -261,6 +261,14 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("existing venv", readme)
         self.assertIn("vla-libero-demo/venv-cu124", readme)
 
+    def test_setup_disables_shared_robosuite_file_logging_and_smokes_import(self):
+        setup = (
+            REPOSITORY_ROOT / "examples" / "vla-libero" / "setup.sh"
+        ).read_text()
+        self.assertIn('FILE_LOGGING_LEVEL = None', setup)
+        self.assertIn("PYTHONPATH=\"$VLA_CPP_ROOT/eval\"", setup)
+        self.assertIn("import gymnasium; import sim.libero", setup)
+
     def test_model_profile_example_exists_and_contains_both_architectures(self):
         example = (
             REPOSITORY_ROOT

@@ -109,11 +109,37 @@ fi
 SITE_PACKAGES="$($VENV_DIR/bin/python -c 'import site; print(site.getsitepackages()[0])')"
 printf '%s\n' "$LIBERO_DIR" > "$SITE_PACKAGES/omniinfer_libero_source.pth"
 
+# robosuite 1.4.0 enables a process-wide /tmp/robosuite.log by default. That
+# path is unsafe on multi-user hosts: another user's file can make every
+# subsequent import fail with PermissionError. Keep the upstream defaults in a
+# venv-local private macro file and disable only file logging.
+ROBOSUITE_DIR="$SITE_PACKAGES/robosuite"
+[[ -f "$ROBOSUITE_DIR/macros.py" ]] || {
+    echo "robosuite macros.py was not installed in $ROBOSUITE_DIR" >&2
+    exit 1
+}
+"$VENV_DIR/bin/python" - "$ROBOSUITE_DIR/macros.py" "$ROBOSUITE_DIR/macros_private.py" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+needle = 'FILE_LOGGING_LEVEL = "DEBUG"'
+if source.count(needle) != 1:
+    raise SystemExit("unexpected robosuite FILE_LOGGING_LEVEL definition")
+target = Path(sys.argv[2])
+target.write_text(source.replace(needle, "FILE_LOGGING_LEVEL = None"), encoding="utf-8")
+PY
+
 CONFIG_DIR="$(dirname "$VENV_DIR")/libero-config"
 mkdir -p "$CONFIG_DIR"
 if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
     printf 'N\n' | LIBERO_CONFIG_PATH="$CONFIG_DIR" "$VENV_DIR/bin/python" -c 'import libero.libero'
 fi
+
+# Exercise the same import path used by demo.py. This catches incompatible
+# dependency sets and shared-log regressions during setup rather than rollout.
+LIBERO_CONFIG_PATH="$CONFIG_DIR" PYTHONPATH="$VLA_CPP_ROOT/eval" \
+    "$VENV_DIR/bin/python" -c 'import gymnasium; import sim.libero'
 
 echo "Demo environment ready: $VENV_DIR"
 echo "LIBERO revision: $LIBERO_COMMIT"
