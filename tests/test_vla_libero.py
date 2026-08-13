@@ -223,16 +223,24 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("ZeroMQ/protobuf endpoint", readme)
         self.assertIn("success`, `failed`, `partial`, `stopped`, or `error`", readme)
 
+    def test_readme_explains_smolvla_hub_cache_and_offline_behavior(self):
+        readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
+        self.assertIn("HuggingFaceTB/SmolVLM2-500M-Instruct", readme)
+        self.assertIn("timeouts and retries on every new rollout", readme)
+        self.assertIn("HF_HUB_OFFLINE=1", readme)
+        self.assertIn("Do not enable offline mode before", readme)
+
     def test_pi05_tokenizer_runtime_dependency_is_pinned(self):
         requirements = (
             REPOSITORY_ROOT / "examples" / "vla-libero" / "requirements.txt"
         ).read_text()
         self.assertIn("sentencepiece==0.2.0", requirements.splitlines())
 
-    def test_readme_marks_pi05_experimental_and_explains_runtime_cleanup(self):
+    def test_readme_states_pi05_validation_scope_and_runtime_cleanup(self):
         readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
-        self.assertIn("is an experimental request path", readme)
-        self.assertIn("PI0.5 checkpoint rollout result", readme)
+        self.assertIn("real-checkpoint end-to-end", readme)
+        self.assertIn("not a full LIBERO benchmark", readme)
+        self.assertIn("not a complete\n> LIBERO benchmark", readme)
         self.assertIn("does\nnot unload the previous runtime", readme)
         self.assertIn("POST /omni/model/unload", readme)
         self.assertIn("409 model_reload_required", readme)
@@ -269,14 +277,23 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("existing venv", readme)
         self.assertIn("vla-libero-demo/venv-cu124", readme)
 
-    def test_setup_disables_shared_robosuite_file_logging_and_smokes_import(self):
+    def test_setup_disables_shared_logging_and_offers_opt_in_smoke_test(self):
         setup = (
             REPOSITORY_ROOT / "examples" / "vla-libero" / "setup.sh"
         ).read_text()
         self.assertIn('FILE_LOGGING_LEVEL = None', setup)
+        self.assertIn('--smoke-test)', setup)
+        self.assertIn('if [[ $RUN_SMOKE_TEST -eq 1 ]]', setup)
         self.assertIn("PYTHONPATH=\"$VLA_CPP_ROOT/eval\"", setup)
         self.assertIn('gym.make("libero_object/task_0"', setup)
         self.assertIn("environment.reset(seed=0)", setup)
+
+        readme = (
+            REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md"
+        ).read_text()
+        self.assertIn("does not start a simulator by default", readme)
+        self.assertIn("setup.sh --smoke-test", readme)
+        self.assertIn("MUJOCO_GL=osmesa", readme)
 
     def test_model_profile_example_exists_and_contains_both_architectures(self):
         example = (
@@ -349,6 +366,44 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertIn('content="test-token"', page)
             self.assertNotIn("{{CSRF_TOKEN}}", page)
             self.assertEqual(page_response.getheader("X-Frame-Options"), "DENY")
+            self.assertIn(
+                "img-src 'self' data: blob:",
+                page_response.getheader("Content-Security-Policy"),
+            )
+            connection.close()
+
+            state.begin(0)
+            with mock.patch.object(DEMO, "encode_frame", return_value=b"jpeg-frame"):
+                state.publish_frame({}, "single-view", force=True)
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_address[1], timeout=2
+            )
+            connection.request("GET", "/api/frame.jpg?run=1&after=0")
+            frame_response = connection.getresponse()
+            self.assertEqual(frame_response.status, 200)
+            self.assertEqual(frame_response.read(), b"jpeg-frame")
+            self.assertEqual(frame_response.getheader("X-OmniInfer-Run-Id"), "1")
+            self.assertEqual(frame_response.getheader("X-OmniInfer-Frame-Seq"), "1")
+            connection.close()
+
+            for query in ("run=1&after=1", "run=0&after=0"):
+                with self.subTest(query=query):
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_address[1], timeout=2
+                    )
+                    connection.request("GET", f"/api/frame.jpg?{query}")
+                    unchanged = connection.getresponse()
+                    self.assertEqual(unchanged.status, 204)
+                    unchanged.read()
+                    connection.close()
+
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_address[1], timeout=2
+            )
+            connection.request("GET", "/api/frame.jpg?run=bad&after=0")
+            invalid_frame = connection.getresponse()
+            self.assertEqual(invalid_frame.status, 400)
+            invalid_frame.read()
             connection.close()
 
             connection = http.client.HTTPConnection(
@@ -648,6 +703,71 @@ class MetricTests(unittest.TestCase):
             "pick up the ketchup and place it in the basket",
         )
         self.assertIsNone(snapshot["client_endpoint"])
+        self.assertEqual(snapshot["run_id"], 1)
+        self.assertEqual(snapshot["frame_seq"], 0)
+        self.assertEqual(state.frame(), (b"", 1, 0))
+
+    def test_begin_assigns_a_new_run_id_and_clears_the_old_frame(self):
+        state = DEMO.DemoState(DEMO.DemoConfig())
+        observation = {"pixels": {"image": [[[0, 0, 0]]]}}
+        with mock.patch.object(DEMO, "encode_frame", return_value=b"old-frame"):
+            state.begin(0)
+            self.assertTrue(state.publish_frame(observation, "single-view", force=True))
+        self.assertEqual(state.frame(), (b"old-frame", 1, 1))
+        state.begin(1)
+        self.assertEqual(state.frame(), (b"", 2, 0))
+
+    def test_display_frame_sampling_skips_encoding_until_interval_expires(self):
+        state = DEMO.DemoState(DEMO.DemoConfig())
+        observation = {"pixels": {"image": [[[0, 0, 0]]]}}
+        state.begin(0)
+        with (
+            mock.patch.object(DEMO, "encode_frame", return_value=b"frame") as encode,
+            mock.patch.object(DEMO.time, "monotonic", side_effect=[10.0, 10.01, 10.06]),
+        ):
+            self.assertTrue(state.publish_frame(observation, "single-view", force=True))
+            self.assertFalse(
+                state.publish_frame(
+                    observation, "single-view", min_interval_seconds=0.05
+                )
+            )
+            self.assertTrue(
+                state.publish_frame(
+                    observation, "single-view", min_interval_seconds=0.05
+                )
+            )
+        self.assertEqual(encode.call_count, 2)
+        self.assertEqual(state.frame(), (b"frame", 1, 2))
+
+    def test_frame_encoded_for_an_old_run_is_discarded(self):
+        state = DEMO.DemoState(DEMO.DemoConfig())
+        observation = {"pixels": {"image": [[[0, 0, 0]]]}}
+        state.begin(0)
+
+        def begin_next_run(_observation, _view_mode):
+            state.begin(1)
+            return b"stale-frame"
+
+        with mock.patch.object(DEMO, "encode_frame", side_effect=begin_next_run):
+            self.assertFalse(state.publish_frame(observation, "single-view", force=True))
+        self.assertEqual(state.frame(), (b"", 2, 0))
+
+    def test_frontend_separates_state_and_single_flight_frame_refresh(self):
+        page = (REPOSITORY_ROOT / "examples" / "vla-libero" / "index.html").read_text()
+        self.assertIn("function clearFrame()", page)
+        self.assertIn("if (frameRequest || currentRunId == null) return", page)
+        self.assertIn("X-OmniInfer-Run-Id", page)
+        self.assertIn("setInterval(refreshFrame, 50)", page)
+
+    def test_readme_documents_disk_space_and_external_artifacts(self):
+        readme = (
+            REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md"
+        ).read_text()
+        self.assertIn("## Disk space planning", readme)
+        self.assertIn("CPU-only uv environment used about 2.2 GB", readme)
+        self.assertIn("reserve at least 10 GB", readme)
+        self.assertIn("uv and Hugging Face", readme)
+        self.assertIn("does not bundle", readme)
 
     def test_state_exposes_only_the_ten_predefined_object_tasks(self):
         state = DEMO.DemoState(DEMO.DemoConfig())

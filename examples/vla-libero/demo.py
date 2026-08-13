@@ -431,6 +431,8 @@ class DemoState:
         selected = profiles[default_profile]
         self._lock = threading.Lock()
         self._frame = b""
+        self._next_run_id = 0
+        self._last_frame_at = 0.0
         self._policy_ms: deque[float] = deque(maxlen=500)
         self._prediction_ms: deque[float] = deque(maxlen=500)
         self._env_ms: deque[float] = deque(maxlen=500)
@@ -462,6 +464,7 @@ class DemoState:
             "action": [0.0] * len(ACTION_LABELS),
             "action_labels": ACTION_LABELS,
             "call_kind": None,
+            "run_id": 0,
             "frame_seq": 0,
             "started_at": None,
             "finished_at": None,
@@ -472,7 +475,9 @@ class DemoState:
         if profile is None:
             profile = self._profiles[str(self._data["model_profile"])]
         with self._lock:
+            self._next_run_id += 1
             self._frame = b""
+            self._last_frame_at = 0.0
             self._policy_ms.clear()
             self._prediction_ms.clear()
             self._env_ms.clear()
@@ -497,6 +502,7 @@ class DemoState:
                 reward=0.0,
                 action=[0.0] * len(ACTION_LABELS),
                 call_kind=None,
+                run_id=self._next_run_id,
                 frame_seq=0,
                 started_at=time.time(),
                 finished_at=None,
@@ -515,10 +521,28 @@ class DemoState:
     def _append_event_locked(self, level: str, message: str) -> None:
         self._events.append({"time": time.time(), "level": level, "message": message})
 
-    def publish_frame(self, frame: bytes) -> None:
+    def publish_frame(
+        self,
+        observation: dict[str, Any],
+        view_mode: str,
+        *,
+        min_interval_seconds: float = 0.0,
+        force: bool = False,
+    ) -> bool:
+        """Encode and publish only the latest display frame at the requested rate."""
+        now = time.monotonic()
         with self._lock:
+            if not force and now - self._last_frame_at < min_interval_seconds:
+                return False
+            run_id = int(self._data["run_id"])
+        frame = encode_frame(observation, view_mode)
+        with self._lock:
+            if int(self._data["run_id"]) != run_id:
+                return False
             self._frame = frame
+            self._last_frame_at = now
             self._data["frame_seq"] += 1
+        return True
 
     def publish_step(
         self,
@@ -558,9 +582,13 @@ class DemoState:
             }
             return payload
 
-    def frame(self) -> bytes:
+    def frame(self) -> tuple[bytes, int, int]:
         with self._lock:
-            return self._frame
+            return (
+                self._frame,
+                int(self._data["run_id"]),
+                int(self._data["frame_seq"]),
+            )
 
 
 def encode_frame(observation: dict[str, Any], view_mode: str) -> bytes:
@@ -775,7 +803,10 @@ class DemoController:
                     break
                 policy.reset()
                 observation, _ = environment.reset()
-                self.state.publish_frame(encode_frame(observation, run_config.view_mode))
+                frame_interval_seconds = 1.0 / run_config.fps
+                self.state.publish_frame(
+                    observation, run_config.view_mode, force=True
+                )
                 self.state.update(
                     phase="running",
                     result="running",
@@ -823,7 +854,12 @@ class DemoController:
                     env_ms = (time.perf_counter() - env_start) * 1000.0
                     loop_ms = (time.perf_counter() - loop_start) * 1000.0
                     step += 1
-                    self.state.publish_frame(encode_frame(observation, run_config.view_mode))
+                    self.state.publish_frame(
+                        observation,
+                        run_config.view_mode,
+                        min_interval_seconds=frame_interval_seconds,
+                        force=terminated or truncated,
+                    )
                     self.state.publish_step(
                         action=list(action[: len(ACTION_LABELS)]),
                         policy_ms=policy_ms,
@@ -963,7 +999,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
@@ -974,15 +1010,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(self.state.snapshot())
             return
         if path == "/api/frame.jpg":
-            body = self.state.frame()
-            if not body:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                requested_run = int(query.get("run", ["-1"])[0])
+                after_seq = int(query.get("after", ["-1"])[0])
+            except ValueError:
+                self._send_json(
+                    {"error": "frame query parameters must be integers"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            body, run_id, frame_seq = self.state.frame()
+            if requested_run != run_id or after_seq >= frame_seq or not body:
                 self.send_response(HTTPStatus.NO_CONTENT)
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("X-OmniInfer-Run-Id", str(run_id))
+                self.send_header("X-OmniInfer-Frame-Seq", str(frame_seq))
                 self.end_headers()
                 return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("X-OmniInfer-Run-Id", str(run_id))
+            self.send_header("X-OmniInfer-Frame-Seq", str(frame_seq))
             self.end_headers()
             self.wfile.write(body)
             return
@@ -1105,6 +1156,8 @@ def parse_args() -> argparse.Namespace:
         parser.error(str(error))
     if args.episodes < 1:
         parser.error("--episodes must be >= 1")
+    if args.fps < 1:
+        parser.error("--fps must be >= 1")
     if args.n_action_steps < 1:
         parser.error("--n-action-steps must be >= 1")
     if not (0 <= args.listen_port <= 65535):

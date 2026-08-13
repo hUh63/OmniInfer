@@ -12,6 +12,7 @@ LIBERO_DIR="$DEMO_CACHE_DIR/LIBERO"
 LIBERO_COMMIT="8f1084e3132a39270c3a13ebe37270a43ece2a01"
 TORCH_BACKEND="cpu"
 UV_BIN="${UV_BIN:-}"
+RUN_SMOKE_TEST=0
 
 usage() {
     cat <<EOF
@@ -22,6 +23,7 @@ Options:
   --venv <path>              virtual environment directory
   --libero-dir <path>        LIBERO source checkout directory
   --uv <path>                uv executable (default: uv from PATH)
+  --smoke-test               Reset one LIBERO task after setup (default: off)
   -h, --help                 show this help
 EOF
 }
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --venv) require_value "$1" "${2-}"; VENV_DIR="$2"; shift 2 ;;
         --libero-dir) require_value "$1" "${2-}"; LIBERO_DIR="$2"; shift 2 ;;
         --uv) require_value "$1" "${2-}"; UV_BIN="$2"; shift 2 ;;
+        --smoke-test) RUN_SMOKE_TEST=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -136,11 +139,13 @@ if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
     printf 'N\n' | LIBERO_CONFIG_PATH="$CONFIG_DIR" "$VENV_DIR/bin/python" -c 'import libero.libero'
 fi
 
-# Exercise the same import and environment-reset path used by demo.py. This
-# catches incompatible dependencies, assets, rendering, and shared-log
-# regressions during setup rather than the first rollout.
-LIBERO_CONFIG_PATH="$CONFIG_DIR" PYTHONPATH="$VLA_CPP_ROOT/eval" \
-    MUJOCO_GL="${MUJOCO_GL:-egl}" "$VENV_DIR/bin/python" - <<'PY'
+# Optionally exercise the same import and environment-reset path used by
+# demo.py. Keep this opt-in because installation itself should not require an
+# EGL-capable device; users can select another supported MuJoCo renderer by
+# setting MUJOCO_GL before invoking setup.
+if [[ $RUN_SMOKE_TEST -eq 1 ]]; then
+    LIBERO_CONFIG_PATH="$CONFIG_DIR" PYTHONPATH="$VLA_CPP_ROOT/eval" \
+        MUJOCO_GL="${MUJOCO_GL:-egl}" "$VENV_DIR/bin/python" - <<'PY'
 import gymnasium as gym
 import sim.libero  # noqa: F401 - registers the LIBERO environments
 
@@ -150,6 +155,7 @@ try:
 finally:
     environment.close()
 PY
+fi
 
 echo "Demo environment ready: $VENV_DIR"
 echo "LIBERO revision: $LIBERO_COMMIT"

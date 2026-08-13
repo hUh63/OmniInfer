@@ -217,7 +217,10 @@
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
-    let frameSeq = -1;
+    let currentRunId = null;
+    let displayedFrameSeq = 0;
+    let frameRequest = null;
+    let frameObjectUrl = null;
     let taskOptionsLoaded = false;
     let modelOptionsLoaded = false;
     let selectedTaskId = null;
@@ -259,11 +262,71 @@
         ctx.fillRect(index * width, canvas.height - height, Math.max(1, width - 1), height);
       });
     }
+    function clearFrame() {
+      if (frameRequest) {
+        frameRequest.controller.abort();
+        frameRequest = null;
+      }
+      if (frameObjectUrl) {
+        URL.revokeObjectURL(frameObjectUrl);
+        frameObjectUrl = null;
+      }
+      displayedFrameSeq = 0;
+      const image = $('frame');
+      image.onload = null;
+      image.removeAttribute('src');
+      image.style.display = 'none';
+      $('placeholder').style.display = 'block';
+    }
+    async function refreshFrame() {
+      if (frameRequest || currentRunId == null) return;
+      const request = {controller: new AbortController(), runId: currentRunId};
+      frameRequest = request;
+      try {
+        const response = await fetch(
+          `/api/frame.jpg?run=${request.runId}&after=${displayedFrameSeq}`,
+          {cache:'no-store', signal:request.controller.signal},
+        );
+        if (response.status === 204) return;
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const responseRunId = Number(response.headers.get('X-OmniInfer-Run-Id'));
+        const responseFrameSeq = Number(response.headers.get('X-OmniInfer-Frame-Seq'));
+        const blob = await response.blob();
+        if (
+          currentRunId !== request.runId || responseRunId !== currentRunId ||
+          !Number.isFinite(responseFrameSeq) || responseFrameSeq <= displayedFrameSeq
+        ) return;
+        const objectUrl = URL.createObjectURL(blob);
+        const image = $('frame');
+        image.onload = () => {
+          URL.revokeObjectURL(objectUrl);
+          if (frameObjectUrl === objectUrl) frameObjectUrl = null;
+          if (currentRunId !== responseRunId) return;
+          image.style.display = 'block';
+          $('placeholder').style.display = 'none';
+        };
+        if (frameObjectUrl) URL.revokeObjectURL(frameObjectUrl);
+        frameObjectUrl = objectUrl;
+        displayedFrameSeq = responseFrameSeq;
+        image.src = objectUrl;
+      } catch (error) {
+        if (error.name !== 'AbortError') console.warn('Frame refresh failed', error);
+      } finally {
+        if (frameRequest === request) frameRequest = null;
+      }
+    }
     function render(data) {
       const result = data.result || 'idle';
       const busy = ['starting', 'initializing', 'running'].includes(data.phase);
       const taskSelect = $('task-select');
       const modelSelect = $('model-select');
+      const nextRunId = Number(data.run_id ?? 0);
+      if (currentRunId !== nextRunId) {
+        currentRunId = nextRunId;
+        clearFrame();
+      } else if (!data.frame_seq) {
+        clearFrame();
+      }
       if (!modelOptionsLoaded && data.model_options?.length) {
         modelSelect.replaceChildren(...data.model_options.map((model) => {
           const option = document.createElement('option');
@@ -324,11 +387,7 @@
         const node = document.createElement('div'); node.className = `event ${item.level}`;
         node.textContent = `${new Date(item.time * 1000).toLocaleTimeString()}  ${item.message}`; events.appendChild(node);
       });
-      if (data.frame_seq !== frameSeq && data.frame_seq > 0) {
-        frameSeq = data.frame_seq; const image = $('frame');
-        image.onload = () => { image.style.display = 'block'; $('placeholder').style.display = 'none'; };
-        image.src = `/api/frame.jpg?seq=${frameSeq}`;
-      }
+      if (data.frame_seq > displayedFrameSeq) refreshFrame();
     }
     async function refresh() {
       try { const response = await fetch('/api/state', {cache:'no-store'}); render(await response.json()); }
@@ -353,7 +412,9 @@
       model_profile: selectedModelProfile,
     });
     $('stop').onclick = () => control('/api/stop');
-    setInterval(refresh, 120); refresh();
+    setInterval(refresh, 120);
+    setInterval(refreshFrame, 50);
+    refresh();
   </script>
 </body>
 </html>

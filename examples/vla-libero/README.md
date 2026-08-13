@@ -21,11 +21,11 @@ condition remain consistent. Selection is locked while a rollout is active.
 For multi-episode runs, the final status is `success`, `failed`, or `partial`;
 `partial` means that the same run contained both successful and failed episodes.
 The dashboard exposes the SmolVLA and PI0.5 request formats supported by the
-vla.cpp LIBERO client. SmolVLA is the validated end-to-end example path. PI0.5
-is an experimental request path: its tokenizer, state-normalization, and action
-chunk wiring are covered here, but this example has not yet published a real
-PI0.5 checkpoint rollout result. Do not treat it as a validated success-rate or
-parity claim until that evidence is added.
+vla.cpp LIBERO client. Both paths have completed real-checkpoint end-to-end
+LIBERO demo rollouts. This validates the integration smoke path, including
+tokenization, state normalization, action chunks, managed runtime startup, and
+simulator interaction; it is not a full LIBERO benchmark, success-rate, or
+model-parity claim.
 
 This is an optional Linux developer example. It is not packaged with OmniInfer:
 the setup process downloads LIBERO and creates its own Python environment, and
@@ -117,13 +117,19 @@ hidden benchmark runner:
 6. `vla-server` returns an action chunk. The demo applies the next 7-DoF action
    to LIBERO, then repeats the observation → action loop until the episode ends
    or the user presses **Stop**.
-7. Every step updates the browser with the live camera frame, current action,
-   task text, episode/step count, and model/policy/simulator/control-loop
-   latency. Each rollout writes an MP4 to its own timestamped subdirectory
-   under `--output-dir`.
+7. Throughout the rollout, the browser shows the latest sampled camera frame,
+   current action, task text, episode/step count, and
+   model/policy/simulator/control-loop latency. Each rollout writes an MP4 to
+   its own timestamped subdirectory under `--output-dir`.
 8. LIBERO reports the final success condition. The page explicitly displays
    `success`, `failed`, `partial`, `stopped`, or `error`; it never treats a
    completed process as success by itself.
+
+The simulator and MP4 recorder still process every environment step. The
+browser display samples the latest observation at up to `--fps` and deliberately
+drops intermediate display frames when action chunks advance faster than the
+page can render. A new rollout clears the previous image immediately, and stale
+requests from an older rollout cannot replace the current frame.
 
 ## Prerequisites
 
@@ -204,7 +210,75 @@ required. Choose CPU or CUDA when the venv is first created; changing
 `--venv` path as above, or remove the existing venv before recreating it.
 `setup.sh --help` documents alternate venv, LIBERO source, and uv paths.
 
+Setup does not start a simulator by default, so creating the environment does
+not require an EGL-capable device. To validate the installed dependencies,
+assets, renderer, and one real LIBERO environment reset immediately after
+setup, add `--smoke-test`:
+
+```sh
+examples/vla-libero/setup.sh --smoke-test
+```
+
+The smoke test defaults to `MUJOCO_GL=egl`. Select another MuJoCo renderer when
+needed:
+
+```sh
+MUJOCO_GL=osmesa examples/vla-libero/setup.sh --smoke-test
+```
+
+This check initializes the simulator only; it does not load a VLA model or run
+an episode.
+
+## Disk space planning
+
+The demo does not bundle its Python environment, LIBERO checkout, model files,
+runtime build, or download caches into the OmniInfer release. They are created
+or supplied on the machine that runs the demo. Plan disk space before running
+setup or building a backend, especially on a shared host.
+
+The Python environment is the main setup cost. On the validation host, the
+CPU-only uv environment used about 2.2 GB. The complete CUDA environment used
+about 9.6 GB, so reserve at least 10 GB when selecting `--torch-backend cu124`.
+Exact sizes can vary with PyTorch, CUDA, platform wheels, and dependency
+versions.
+
+CPU and CUDA environments should use separate `--venv` paths and therefore
+consume space independently when both are retained. The uv and Hugging Face
+download caches also use additional, variable disk space; they are shared user
+caches rather than part of either venv or the OmniInfer release. Models and
+rollout recordings are user-provided/generated and must be budgeted separately.
+
+Inspect the actual paths before and after setup or a build:
+
+```sh
+df -h .
+du -sh "${XDG_CACHE_HOME:-$HOME/.cache}/omniinfer/vla-libero-demo" 2>/dev/null || true
+du -sh "${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}" 2>/dev/null || true
+```
+
 ## SmolVLA
+
+SmolVLA uses the public
+`HuggingFaceTB/SmolVLM2-500M-Instruct` tokenizer by default. The first use
+requires Hugging Face connectivity unless the tokenizer is already fully
+cached. When the network is unavailable but the cache is complete,
+initialization can still succeed, but the Hub's online version check may wait
+through connection timeouts and retries on every new rollout. After confirming
+that the tokenizer is fully cached, set `HF_HUB_OFFLINE=1` when starting the
+dashboard to skip those checks. Do not enable offline mode before the required
+files are cached; initialization will fail instead of downloading them.
+
+For subsequent offline runs after the cache has been verified, prefix the
+dashboard command with the environment variable:
+
+```sh
+HF_HUB_OFFLINE=1 MUJOCO_GL=egl examples/vla-libero/run.sh -- \
+  --omniinfer-url http://127.0.0.1:<gateway-port> \
+  --model-profiles <path-to-model-profiles.json>
+```
+
+This setting applies to that dashboard process only. Omit
+`HF_HUB_OFFLINE=1` whenever files still need to be downloaded.
 
 ```sh
 MUJOCO_GL=egl examples/vla-libero/run.sh -- \
@@ -220,9 +294,9 @@ MUJOCO_GL=egl examples/vla-libero/run.sh -- \
 
 ## PI0.5
 
-> **Experimental:** the PI0.5 request/configuration path is implemented, but a
-> real PI0.5 checkpoint rollout has not yet been validated by this example.
-> Use SmolVLA for the currently verified end-to-end demonstration.
+> **Validation scope:** PI0.5 has completed a real-checkpoint end-to-end demo
+> rollout through this path. This is integration smoke evidence, not a complete
+> LIBERO benchmark, success-rate measurement, or parity claim.
 
 PI0.5 requires LIBERO state quantiles. If `--stats-json` is omitted, the
 vla.cpp client follows its official default and obtains
