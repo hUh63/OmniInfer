@@ -620,6 +620,79 @@ class RuntimeContractTests(unittest.TestCase):
     def test_no_model_uses_existing_managed_runtime(self):
         self.assertIsNone(DEMO.DemoConfig(model=None).model_load_payload())
 
+    def test_omniinfer_api_accepts_only_canonical_loopback_origins(self):
+        self.assertEqual(
+            DEMO.OmniInferAPI("http://127.0.0.1:19000/").base_url,
+            "http://127.0.0.1:19000",
+        )
+        self.assertEqual(
+            DEMO.OmniInferAPI("http://[::1]:19000").base_url,
+            "http://[::1]:19000",
+        )
+        for value in (
+            "https://127.0.0.1:19000",
+            "http://localhost:19000",
+            "http://192.0.2.10:19000",
+            "http://user:password@127.0.0.1:19000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:19000/omni",
+            "http://127.0.0.1:19000?target=remote",
+            "http://127.0.0.1:19000#fragment",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    DEMO.OmniInferAPI(value, "admin-secret")
+
+    def test_omniinfer_api_does_not_follow_redirects_with_admin_key(self):
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            received_authorization = None
+
+            def do_GET(self):
+                type(self).received_authorization = self.headers.get("Authorization")
+                self.send_response(302)
+                self.send_header("Location", self.server.redirect_target)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        class TargetHandler(http.server.BaseHTTPRequestHandler):
+            requests = 0
+
+            def do_GET(self):
+                type(self).requests += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, _format, *_args):
+                return
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        source.redirect_target = f"http://127.0.0.1:{target.server_port}/capture"
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+        target_thread.start()
+        source_thread.start()
+        try:
+            api = DEMO.OmniInferAPI(
+                f"http://127.0.0.1:{source.server_port}", "admin-secret"
+            )
+            with self.assertRaisesRegex(RuntimeError, "HTTP 302"):
+                api._request("/omni/state")
+            self.assertEqual(RedirectHandler.received_authorization, "Bearer admin-secret")
+            self.assertEqual(TargetHandler.requests, 0)
+        finally:
+            source.shutdown()
+            target.shutdown()
+            source.server_close()
+            target.server_close()
+            source_thread.join(2)
+            target_thread.join(2)
+
     def test_configure_protoc_rejects_non_executable_path(self):
         with tempfile.TemporaryDirectory() as directory:
             candidate = Path(directory) / "protoc"
