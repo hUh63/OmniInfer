@@ -136,10 +136,20 @@ if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
     printf 'N\n' | LIBERO_CONFIG_PATH="$CONFIG_DIR" "$VENV_DIR/bin/python" -c 'import libero.libero'
 fi
 
-# Exercise the same import path used by demo.py. This catches incompatible
-# dependency sets and shared-log regressions during setup rather than rollout.
+# Exercise the same import and environment-reset path used by demo.py. This
+# catches incompatible dependencies, assets, rendering, and shared-log
+# regressions during setup rather than the first rollout.
 LIBERO_CONFIG_PATH="$CONFIG_DIR" PYTHONPATH="$VLA_CPP_ROOT/eval" \
-    "$VENV_DIR/bin/python" -c 'import gymnasium; import sim.libero'
+    MUJOCO_GL="${MUJOCO_GL:-egl}" "$VENV_DIR/bin/python" - <<'PY'
+import gymnasium as gym
+import sim.libero  # noqa: F401 - registers the LIBERO environments
+
+environment = gym.make("libero_object/task_0", seed=0, video_fps=30)
+try:
+    environment.reset(seed=0)
+finally:
+    environment.close()
+PY
 
 echo "Demo environment ready: $VENV_DIR"
 echo "LIBERO revision: $LIBERO_COMMIT"

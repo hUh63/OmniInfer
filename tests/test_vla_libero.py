@@ -275,7 +275,8 @@ class RuntimeContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn('FILE_LOGGING_LEVEL = None', setup)
         self.assertIn("PYTHONPATH=\"$VLA_CPP_ROOT/eval\"", setup)
-        self.assertIn("import gymnasium; import sim.libero", setup)
+        self.assertIn('gym.make("libero_object/task_0"', setup)
+        self.assertIn("environment.reset(seed=0)", setup)
 
     def test_model_profile_example_exists_and_contains_both_architectures(self):
         example = (
