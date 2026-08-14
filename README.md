@@ -9,7 +9,11 @@
 
 Easy, fast, and private LLM & VLM inference for every device
 
-| [Demo](#demo) | [Getting Started](#getting-started) | [About](#about) | [Documentation](#documentation) | [Architecture](#architecture) |
+| [News](#news) | [Demo](#demo) | [Getting Started](#getting-started) | [About](#about) | [Documentation](#documentation) | [Architecture](#architecture) |
+
+## News
+
+- **2026-08-14** — 🚀 **Day-0 support for Qwen3.8-27B.** OmniInfer is ready for Qwen's latest 27B vision-language model from day one.
 
 ## Demo
 
