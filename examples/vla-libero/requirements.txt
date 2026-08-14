@@ -1,0 +1,24 @@
+# Runtime dependencies for the interactive LIBERO dashboard.
+#
+# vla-server owns model inference.  The Python process only runs simulation and
+# request preprocessing, so setup.sh defaults to CPU-only PyTorch.
+torch==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+pillow==12.3.0
+pyzmq==27.1.0
+protobuf==3.20.3
+transformers==4.51.3
+sentencepiece==0.2.0
+gymnasium==0.29.1
+mujoco==2.3.2
+imageio[ffmpeg]==2.37.4
+matplotlib==3.7.5
+hydra-core==1.2.0
+easydict==1.9
+robomimic==0.2.0
+robosuite==1.4.0
+bddl==1.0.1
+future==0.18.2
+cloudpickle==2.1.0
+gym==0.25.2

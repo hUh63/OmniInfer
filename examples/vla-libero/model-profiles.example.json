@@ -1,0 +1,18 @@
+{
+  "models": {
+    "smolvla": {
+      "label": "SmolVLA",
+      "arch": "smolvla",
+      "model": "/path/to/smolvla-libero.gguf",
+      "n_action_steps": 1
+    },
+    "pi05": {
+      "label": "PI0.5",
+      "arch": "pi05",
+      "model": "/path/to/pi05-libero.gguf",
+      "tokenizer": "/path/to/paligemma-tokenizer",
+      "stats_json": "/path/to/libero/meta/stats.json",
+      "n_action_steps": 10
+    }
+  }
+}
