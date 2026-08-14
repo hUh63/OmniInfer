@@ -301,12 +301,12 @@ Linux backend script behavior:
 
 | Backend | Default action | Source build action |
 |---|---|---|
-| `llama.cpp-linux` | Downloads official `b10280` Linux CPU archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with CPU settings |
-| `llama.cpp-linux-rocm` | Downloads official `b10280` ROCm archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with ROCm settings |
-| `llama.cpp-linux-vulkan` | Downloads official `b10280` Vulkan archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with Vulkan settings |
-| `llama.cpp-linux-s390x` | Downloads official `b10280` s390x archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` for s390x |
-| `llama.cpp-linux-openvino` | Downloads official `b10280` OpenVINO archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with OpenVINO settings |
-| `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b10280` has no Linux CUDA archive | `--from-source` builds pinned `framework/llama.cpp` commit `61881b1f7` with CUDA settings |
+| `llama.cpp-linux` | Downloads official `b10280` Linux CPU archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with CPU settings |
+| `llama.cpp-linux-rocm` | Downloads official `b10280` ROCm archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with ROCm settings |
+| `llama.cpp-linux-vulkan` | Downloads official `b10280` Vulkan archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with Vulkan settings |
+| `llama.cpp-linux-s390x` | Downloads official `b10280` s390x archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` for s390x |
+| `llama.cpp-linux-openvino` | Downloads official `b10280` OpenVINO archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with OpenVINO settings |
+| `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b10280` has no Linux CUDA archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with CUDA settings |
 | `vllm-linux-cuda` | Creates an OmniInfer-managed venv and installs vLLM wheels | Not a C++ source build path |
 | `mnn-linux` | Creates an OmniInfer-managed venv and installs the official `MNN==3.5.0` wheel | `--from-source` builds PyMNN from `framework/mnn` |
 | `ik_llama.cpp-linux` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/ik_llama.cpp` CPU |
