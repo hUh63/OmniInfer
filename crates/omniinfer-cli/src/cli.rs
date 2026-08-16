@@ -60,6 +60,11 @@ pub(crate) enum Command {
     },
     /// Run inference on the loaded model.
     Chat(ChatArgs),
+    /// Measure the loaded model and archive submission-compatible benchmark JSON.
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommand,
+    },
     /// Stop the OmniInfer service.
     Shutdown,
     /// Start and manage the OmniInfer gateway.
@@ -197,6 +202,108 @@ pub(crate) enum AdvisorCommand {
 pub(crate) enum ThinkingMode {
     On,
     Off,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum BenchCommand {
+    /// Run a benchmark against the currently loaded model.
+    Run(Box<BenchRunArgs>),
+    /// List locally archived benchmark results.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BenchRunArgs {
+    /// Optional stable benchmark ID; a unique ID is generated when omitted.
+    #[arg(long)]
+    pub(crate) benchmark_id: Option<String>,
+    /// Model ID used by the destination benchmark catalog.
+    #[arg(long)]
+    pub(crate) catalog_model_id: String,
+    /// Optional human-readable model name.
+    #[arg(long)]
+    pub(crate) model_name: Option<String>,
+    /// Model artifact format, for example GGUF, MLX, or Safetensors.
+    #[arg(long = "format")]
+    pub(crate) model_format: String,
+    /// Quantization name used by the catalog.
+    #[arg(long)]
+    pub(crate) quantization: String,
+    /// Stable public HTTPS URL for the measured model artifact.
+    #[arg(long)]
+    pub(crate) model_url: String,
+    /// Human-readable tested device name.
+    #[arg(long)]
+    pub(crate) device_name: String,
+    /// SoC/device ID or exact name used by the destination catalog.
+    #[arg(long)]
+    pub(crate) soc: String,
+    /// Optional expected catalog backend ID; defaults to the loaded backend.
+    #[arg(long)]
+    pub(crate) backend_id: Option<String>,
+    /// Optional human-readable backend name.
+    #[arg(long)]
+    pub(crate) backend_name: Option<String>,
+    /// Exact runtime/backend version under test.
+    #[arg(long)]
+    pub(crate) backend_version: String,
+    /// Exact command used to build or install the measured runtime.
+    #[arg(long)]
+    pub(crate) build_command: String,
+    /// Override the runtime launch command captured from OmniInfer state.
+    #[arg(long)]
+    pub(crate) run_command: Option<String>,
+    /// Explicitly declare a baseline run with no optional optimization.
+    #[arg(long)]
+    pub(crate) baseline: bool,
+    /// Confirm an optimization method that was active. Repeat for multiple methods.
+    #[arg(long = "optimization")]
+    pub(crate) optimizations: Vec<String>,
+    /// Inline benchmark prompt. Conflicts with --prompt-file.
+    #[arg(long, conflicts_with = "prompt_file")]
+    pub(crate) prompt: Option<String>,
+    /// UTF-8 file containing the benchmark prompt.
+    #[arg(long, conflicts_with = "prompt")]
+    pub(crate) prompt_file: Option<PathBuf>,
+    /// Maximum output tokens requested from the runtime.
+    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) max_tokens: u32,
+    /// Measured repetitions written to the result.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(3..=100))]
+    pub(crate) runs: u16,
+    /// Unrecorded warmup requests before measurement.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=100))]
+    pub(crate) warmup_runs: u16,
+    /// Context size; inferred from loaded runtime state when omitted.
+    #[arg(long)]
+    pub(crate) context_size: Option<u32>,
+    /// Runtime batch size; inferred from known launch flags when omitted.
+    #[arg(long)]
+    pub(crate) batch_size: Option<u32>,
+    /// Per-request timeout in seconds.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    pub(crate) timeout_seconds: u32,
+    /// Submitter name or stable community identity.
+    #[arg(long)]
+    pub(crate) submitter_name: String,
+    /// Optional submitter organization.
+    #[arg(long)]
+    pub(crate) organization: Option<String>,
+    /// Optional public source URL for supporting evidence.
+    #[arg(long)]
+    pub(crate) source_url: Option<String>,
+    /// Optional methodology notes.
+    #[arg(long)]
+    pub(crate) notes: Option<String>,
+    /// Optional result path. Defaults to .local/benchmarks/results/<id>.json.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+    /// Also print the complete result JSON to stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 #[derive(Debug, Args)]

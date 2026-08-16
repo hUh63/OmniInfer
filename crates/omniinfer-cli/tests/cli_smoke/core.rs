@@ -8,6 +8,7 @@ fn help_lists_core_commands() {
         .success()
         .stdout(predicate::str::contains("Commands:"))
         .stdout(predicate::str::contains("advisor"))
+        .stdout(predicate::str::contains("bench"))
         .stdout(predicate::str::contains("serve"))
         .stdout(predicate::str::contains("thinking").not());
 }
