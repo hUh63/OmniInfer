@@ -349,7 +349,7 @@ Windows WSL2 vLLM example:
 
 Use `vllm-wsl2-rocm` instead on a supported Ryzen AI AMD system.
 
-### 4. Chat
+### 5. Chat
 
 Text chat:
 
@@ -384,6 +384,33 @@ You can also pass backend-native extra args directly:
 .\omniinfer.ps1 chat "Hello" -- --top-k 40 --top-p 0.9
 ```
 
+### 6. Record a benchmark
+
+After loading a text model, `bench run` performs three measured requests by
+default and writes submission-compatible JSON under
+`.local/benchmarks/results/`:
+
+```sh
+./omniinfer bench run \
+  --catalog-model-id <catalog-model-id> \
+  --format GGUF \
+  --quantization Q4_K_M \
+  --model-url https://example.com/model.gguf \
+  --device-name "Example workstation" \
+  --soc "Example accelerator" \
+  --backend-version <runtime-version> \
+  --build-command "cmake -B build && cmake --build build -j" \
+  --baseline \
+  --submitter-name <name>
+
+./omniinfer bench list
+```
+
+Declare each optional method with `--optimization <slug>` instead of using
+`--baseline`. The runtime launch command is captured from OmniInfer state when
+available. See [Benchmark Results](benchmark.md) for the complete contract,
+security rules, and machine-readable output behavior.
+
 ## Common Commands
 
 ```sh
@@ -396,6 +423,7 @@ You can also pass backend-native extra args directly:
 ./omniinfer load -m /path/to/model-directory --config
 ./omniinfer chat "Hello"
 ./omniinfer chat --think on "Hello"
+./omniinfer bench list
 ./omniinfer serve --default-thinking off
 ./omniinfer shutdown
 ./omniinfer completion bash
