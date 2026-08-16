@@ -4,6 +4,8 @@
 mod advisor;
 #[path = "cli_smoke/backend.rs"]
 mod backend;
+#[path = "cli_smoke/benchmark.rs"]
+mod benchmark;
 #[path = "cli_smoke/chat.rs"]
 mod chat;
 #[path = "cli_smoke/core.rs"]

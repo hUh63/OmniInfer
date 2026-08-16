@@ -144,6 +144,7 @@ OmniInfer runs everywhere:
 Recommended docs:
 
 - [CLI Guide](docs/CLI.md): end-to-end CLI usage for Linux, macOS, Windows, and Android
+- [Benchmark Results](docs/benchmark.md): generate and archive submission-compatible benchmark JSON
 - [Android App Integration](docs/android/integration.md): embed OmniInfer in a third-party Android app
 - [Android Backend Reference](docs/android/backends.md): Android backend options for llama.cpp, MNN, LiteRT-LM, and ExecuTorch QNN
 - [Android Smoke Tests](docs/android/smoke-tests.md): adb/curl checks and source-build validation

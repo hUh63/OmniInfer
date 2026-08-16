@@ -946,9 +946,11 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tar",
+ "time",
  "tokio",
  "tokio-stream",
  "ureq",
+ "url",
  "zip",
 ]
 

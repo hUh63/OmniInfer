@@ -8,6 +8,7 @@ use omniinfer_core::{config, gateway_auth, http_client, local_state, paths, serv
 mod advisor;
 mod backend_commands;
 mod backend_installer;
+mod benchmark;
 mod chat;
 mod cli;
 mod cloudflare;
@@ -163,6 +164,12 @@ fn run_ported_command(command: &Command) -> Result<()> {
                 },
         } => print_advisor_recommend(task.as_deref(), *limit, *ctx_size, *json),
         Command::Chat(args) => print_chat(args),
+        Command::Bench {
+            command: BenchCommand::Run(args),
+        } => benchmark::run(args),
+        Command::Bench {
+            command: BenchCommand::List { json },
+        } => benchmark::list(*json),
         Command::Shutdown => shutdown_service(),
         Command::Serve(ServeArgs {
             command: Some(ServeCommand::Status { port }),

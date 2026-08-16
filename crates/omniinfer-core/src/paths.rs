@@ -154,6 +154,10 @@ pub fn local_run_dir() -> PathBuf {
     local_dir().join("run")
 }
 
+pub fn benchmark_results_dir() -> PathBuf {
+    local_dir().join("benchmarks").join("results")
+}
+
 pub fn state_file() -> PathBuf {
     local_config_dir().join("state.json")
 }

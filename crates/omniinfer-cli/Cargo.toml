@@ -28,9 +28,11 @@ serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 tar.workspace = true
+time.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 ureq.workspace = true
+url.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
