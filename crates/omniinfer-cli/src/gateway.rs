@@ -421,7 +421,7 @@ async fn try_handle_rust_endpoint(
             Ok(Some(json_response(StatusCode::OK, result)))
         }
         (&Method::POST, "/omni/model/clear-selection") => {
-            let runtime = state.runtime.lock().await;
+            let mut runtime = state.runtime.lock().await;
             let selection_cleared = local_state::clear_selected_model()?;
             let snapshot = runtime.snapshot();
             Ok(Some(json_response(
@@ -559,7 +559,7 @@ async fn try_handle_rust_endpoint(
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let target = {
-                let runtime = state.runtime.lock().await;
+                let mut runtime = state.runtime.lock().await;
                 runtime.proxy_target_for_model(requested_model.as_deref())
             };
             let Some(target) = target else {
@@ -696,7 +696,7 @@ async fn try_handle_rust_endpoint(
             let openai_payload = anthropic_request_to_openai(&payload);
             let mut normalized = normalize_chat_request(openai_payload, false)?;
             let mut target = {
-                let runtime = state.runtime.lock().await;
+                let mut runtime = state.runtime.lock().await;
                 runtime.proxy_target_for_model(response_model.as_deref())
             };
             if target.is_none() && response_model.is_some() {

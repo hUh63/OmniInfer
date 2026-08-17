@@ -11,6 +11,7 @@ This document defines the stable gateway contract for loading a model through
   "backend": "<optional-backend-id>",
   "mmproj": "<optional-mmproj-path>",
   "ctx_size": 4096,
+  "resource_budget_bytes": 7516192768,
   "launch_args": ["-ngl", "999"],
   "request_defaults": {
     "temperature": 0.2,
@@ -29,6 +30,7 @@ This document defines the stable gateway contract for loading a model through
 | `backend` | string | load | maybe | Optional. If omitted, OmniInfer uses selected or automatic backend logic. |
 | `mmproj` | string | load | yes | Optional multimodal projector override. |
 | `ctx_size` / `ctx-size` | integer | load | yes | Optional context length override. |
+| `resource_budget_bytes` | positive integer | admission | yes | Optional explicit runtime memory budget. It is required when a reference backend cannot resolve the model to a local file or directory, and it cannot be lower than OmniInfer's local estimate when one is available. |
 | `launch_args` | string array or shell string | load | yes | Optional backend-native launch arguments for external server backends. |
 | `request_defaults` | object | generation defaults | no | Stored with the loaded runtime and merged into later inference requests. |
 | `strict_capabilities` | boolean | validation | no | Optional. When true, unsupported load options fail instead of being ignored with warnings. |
@@ -67,9 +69,24 @@ Common generation defaults include:
   "selected_model": "models/Qwen3.5-2B-Q4_K_M.gguf",
   "selected_mmproj": null,
   "selected_ctx_size": 4096,
+  "generation": 1,
+  "route_state": "ready",
+  "allocation_id": 1,
+  "resource_budget": {
+    "domains_bytes": {"cuda:0": 7516192768},
+    "components": [
+      {"name": "weights", "domain": "cuda:0", "bytes": 5368709120}
+    ]
+  },
   "warnings": []
 }
 ```
+
+OmniInfer reserves the reported budget before starting the backend, commits the
+allocation only after readiness and local-state persistence succeed, and rolls
+it back on failure. For an explicit multi-GPU mapping that cannot be attributed
+reliably, the full budget is reserved on every candidate device rather than
+risk oversubscription.
 
 ## Idempotency and Reloads
 

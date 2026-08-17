@@ -365,6 +365,15 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     assert_eq!(load_body["selected_ctx_size"], 512);
     assert_eq!(load_body["backend_port"], backend_port);
     assert!(load_body["backend_pid"].as_u64().unwrap() > 0);
+    assert_eq!(load_body["route_state"], "ready");
+    let first_generation = load_body["generation"].as_u64().unwrap();
+    assert!(first_generation > 0);
+    assert!(load_body["allocation_id"].as_u64().unwrap() > 0);
+    assert!(
+        load_body["resource_budget"]["domains_bytes"]
+            .as_object()
+            .is_some_and(|domains| !domains.is_empty())
+    );
     let launch_command = load_body["launch_command"]
         .as_array()
         .unwrap()
@@ -470,6 +479,116 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     assert_eq!(props_response.status().as_u16(), 200);
     let props_body: Value = props_response.into_body().read_json().unwrap();
     assert_eq!(props_body["n_ctx"], 512);
+
+    let committed_before_unload = gateway_state(port).await;
+    assert!(resource_total(&committed_before_unload, "committed_bytes") > 0);
+
+    let model_text = model.display().to_string();
+    let unload_body = tokio::task::spawn_blocking({
+        let model_text = model_text.clone();
+        move || {
+            let response = ureq::post(format!("http://127.0.0.1:{port}/omni/model/unload"))
+                .send_json(json!({"model": model_text}))
+                .unwrap();
+            response.into_body().read_json::<Value>().unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(unload_body["invalidated_generation"], first_generation);
+    assert_eq!(unload_body["resources_released"], true);
+
+    let released = gateway_state(port).await;
+    assert_eq!(resource_total(&released, "reserved_bytes"), 0);
+    assert_eq!(resource_total(&released, "committed_bytes"), 0);
+    assert!(released["loaded_models"].as_array().unwrap().is_empty());
+
+    let second_backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let reload_body = tokio::task::spawn_blocking(move || {
+        let response = ureq::post(format!("http://127.0.0.1:{port}/omni/model/load"))
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model_text,
+                "ctx_size": 512,
+                "backend_port": second_backend_port,
+                "launch_args": ["-np", "5", "--cache-ram", "2048"]
+            }))
+            .unwrap();
+        response.into_body().read_json::<Value>().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(reload_body["generation"].as_u64().unwrap() > first_generation);
+    assert_eq!(reload_body["route_state"], "ready");
+
+    #[cfg(unix)]
+    {
+        let pid = reload_body["backend_pid"].as_u64().unwrap().to_string();
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-TERM", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut reaped = false;
+        for _ in 0..30 {
+            let state = gateway_state(port).await;
+            if state["loaded_models"].as_array().unwrap().is_empty()
+                && resource_total(&state, "committed_bytes") == 0
+            {
+                reaped = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reaped, "exited runtime generation should be invalidated");
+    }
+
+    gateway.stop().await;
+    upstream.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
+async fn runtime_load_rolls_back_when_local_state_commit_fails() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("rust-gateway-state-rollback");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    std::fs::write(temp.join(".local").join("config"), b"not-a-directory").unwrap();
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let upstream = spawn_test_upstream().await;
+    let gateway = spawn_test_gateway(upstream.port, GatewayAccessPolicy::default()).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+
+    let response = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/load"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "ctx_size": 512,
+                "backend_port": backend_port
+            }))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 502);
+
+    let state = gateway_state(port).await;
+    assert_eq!(resource_total(&state, "reserved_bytes"), 0);
+    assert_eq!(resource_total(&state, "committed_bytes"), 0);
+    assert!(state["loaded_models"].as_array().unwrap().is_empty());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err());
 
     gateway.stop().await;
     upstream.stop().await;
@@ -1759,6 +1878,26 @@ async fn remote_admin_post(
     })
     .await
     .unwrap()
+}
+
+async fn gateway_state(port: u16) -> Value {
+    tokio::task::spawn_blocking(move || {
+        let response = ureq::get(format!("http://127.0.0.1:{port}/omni/state"))
+            .call()
+            .unwrap();
+        response.into_body().read_json().unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+fn resource_total(state: &Value, field: &str) -> u64 {
+    state["resource_ledger"][field]
+        .as_object()
+        .into_iter()
+        .flat_map(|domains| domains.values())
+        .filter_map(Value::as_u64)
+        .sum()
 }
 
 async fn remote_chat(port: u16, key: &'static str, model: &'static str) -> Value {
