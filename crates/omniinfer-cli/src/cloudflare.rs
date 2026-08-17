@@ -477,6 +477,7 @@ pub(crate) fn start_cloudflare_quick_tunnel(
     local_url: &str,
     log_path: &Path,
     detach: bool,
+    mut on_spawn: impl FnMut(&std::process::Child) -> Result<()>,
 ) -> Result<(std::process::Child, String)> {
     let output = OpenOptions::new()
         .create(true)
@@ -498,6 +499,11 @@ pub(crate) fn start_cloudflare_quick_tunnel(
         detach_child_process(&mut command);
     }
     let mut child = command.spawn()?;
+    if let Err(error) = on_spawn(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut tail = Vec::new();
@@ -665,9 +671,14 @@ mod tests {
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))
             .expect("make fake helper executable");
 
-        let error =
-            start_cloudflare_quick_tunnel(&helper, "http://127.0.0.1:8080", &log_path, false)
-                .expect_err("exited helper must not be accepted");
+        let error = start_cloudflare_quick_tunnel(
+            &helper,
+            "http://127.0.0.1:8080",
+            &log_path,
+            false,
+            |_| Ok(()),
+        )
+        .expect_err("exited helper must not be accepted");
         let message = error.to_string();
         assert!(message.contains("status exit status: 9"), "{message}");
         assert!(
