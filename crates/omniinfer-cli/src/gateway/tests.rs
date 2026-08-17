@@ -1835,19 +1835,18 @@ async fn spawn_test_gateway_with_runtime_options(
 ) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
     let (tx, rx) = oneshot::channel();
     let stopped = Arc::new(AtomicBool::new(false));
     let stopped_for_task = Arc::clone(&stopped);
     tokio::spawn(async move {
         tokio::select! {
-            result = run_gateway(GatewayConfig {
+            result = run_gateway_with_listener(GatewayConfig {
                 listen_host: "127.0.0.1".to_string(),
                 listen_port: port,
                 runtime_startup_timeout,
                 access_policy,
                 public_model_root,
-            }) => {
+            }, listener) => {
                 let _ = result;
             }
             _ = rx => {}
