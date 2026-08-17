@@ -494,6 +494,7 @@ Notes:
 - `ctx_size` is optional and may also be sent as `ctx-size`.
 - `launch_args` is optional and intended for backend-native launch arguments.
 - `request_defaults` is merged into later inference requests after this model is loaded.
+- Effective request defaults are exposed in runtime state and retained when the selected model is restored.
 - `strict_capabilities` is optional. When true, unsupported load options fail instead of being ignored with warnings.
 - Relative model paths resolve under the selected backend's `models_dir`.
 - When the service is started with `--public-model-root` and remote management is enabled, remote clients should pass a public model id such as `qwen3.5-4b-q4_k_m` instead of a server filesystem path. Remote path selection is rejected; local loopback clients may still use explicit paths.
@@ -744,6 +745,7 @@ Important behavior:
 - This endpoint does not load a model. Load a model first with `/omni/model/select`.
 - `model`, `mmproj`, `backend`, `ctx_size`, and `launch_args` in this request are accepted for compatibility but are not used to start or switch runtimes.
 - `request_defaults` can be supplied and is merged with the loaded runtime defaults for the current request.
+- Merge precedence is loaded runtime defaults, nested `request_defaults`, then explicit top-level request fields. Non-object defaults return HTTP 400.
 - If no runtime is loaded, the endpoint returns `400` or `409`.
 - If the loaded backend is not OpenAI-compatible, including `vla.cpp-*`, the endpoint returns structured `422` instead of forwarding the request.
 

@@ -17,7 +17,7 @@ use omniinfer_core::runtime_plan::{
     ExternalRuntimeRequest, ExternalServerProtocol, build_external_runtime_plan,
 };
 use omniinfer_core::runtime_process::{RuntimeProcess, RuntimeProcessError, RuntimeProcessOptions};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::gpu_status::runtime_env_for_backend;
 
@@ -54,6 +54,7 @@ pub(super) struct RuntimeProxyTarget {
     pub(super) protocol: ExternalServerProtocol,
     pub(super) backend_id: String,
     pub(super) model: Option<String>,
+    pub(super) request_defaults: Map<String, Value>,
     pub(super) generation: u64,
 }
 
@@ -82,6 +83,7 @@ struct LoadedRustRuntime {
     public_model_id: Option<String>,
     mmproj: Option<String>,
     ctx_size: Option<u32>,
+    request_defaults: Map<String, Value>,
     launch_args: Vec<String>,
     cuda_visible_devices: Option<String>,
     cuda_warning: Option<String>,
@@ -180,6 +182,7 @@ impl RustRuntimeManager {
     ) -> Result<LoadModelOutcome> {
         self.reap_exited_runtimes();
         let model = json_required_str(&payload, "model")?.to_string();
+        let requested_request_defaults = request_defaults_from_payload(&payload)?;
         let public_model_id = payload
             .get("public_model_id")
             .and_then(Value::as_str)
@@ -263,6 +266,13 @@ impl RustRuntimeManager {
                 ctx_size,
                 &effective_launch_args,
             ) {
+                local_state::save_selected_backend(&backend.id)?;
+                local_state::save_selected_model(
+                    &resolved_model.model_path,
+                    mmproj_path.as_deref(),
+                    ctx_size,
+                    &requested_request_defaults,
+                )?;
                 let loaded_key = self.promote_loaded_model_key(
                     &loaded_key,
                     &requested_model_key,
@@ -270,16 +280,11 @@ impl RustRuntimeManager {
                 );
                 let loaded = self
                     .loaded
-                    .get(&loaded_key)
+                    .get_mut(&loaded_key)
                     .expect("promoted runtime should remain registered");
+                loaded.request_defaults = requested_request_defaults.clone();
                 let response = model_load_response(loaded, true);
                 self.default_model_key = Some(loaded_key);
-                local_state::save_selected_backend(&backend.id)?;
-                local_state::save_selected_model(
-                    &resolved_model.model_path,
-                    mmproj_path.as_deref(),
-                    ctx_size,
-                )?;
                 return Ok(LoadModelOutcome::Success(response));
             }
             let requested = RequestedRuntimeConfig {
@@ -289,6 +294,7 @@ impl RustRuntimeManager {
                 public_model_id: public_model_id.as_deref(),
                 mmproj: mmproj_path.as_deref(),
                 ctx_size,
+                request_defaults: &requested_request_defaults,
                 launch_args: &effective_launch_args,
             };
             return Ok(LoadModelOutcome::ReloadRequired(reload_required_response(
@@ -358,6 +364,7 @@ impl RustRuntimeManager {
                 &resolved_model.model_path,
                 mmproj_path.as_deref(),
                 plan.ctx_size,
+                &requested_request_defaults,
             )?;
             let generation = manager.take_generation()?;
             let allocation_id = manager
@@ -379,6 +386,7 @@ impl RustRuntimeManager {
                 public_model_id: public_model_id.clone(),
                 mmproj: mmproj_path.clone(),
                 ctx_size: plan.ctx_size,
+                request_defaults: requested_request_defaults,
                 launch_args: effective_launch_args,
                 cuda_visible_devices: cuda_selection
                     .as_ref()
@@ -493,6 +501,7 @@ impl RustRuntimeManager {
             protocol: loaded.external_server_protocol,
             backend_id: loaded.backend_id.clone(),
             model: loaded.proxy_model_ref.clone(),
+            request_defaults: loaded.request_defaults.clone(),
             generation: loaded.generation,
         })
     }
@@ -612,7 +621,7 @@ impl RustRuntimeManager {
                     "owner_admin_id": loaded.owner_admin_id,
                     "mmproj": loaded.mmproj,
                     "ctx_size": loaded.ctx_size,
-                    "request_defaults": {},
+                    "request_defaults": loaded.request_defaults,
                     "runtime_mode": "external_server",
                     "backend_pid": info.pid,
                     "backend_port": info.port,
@@ -894,12 +903,14 @@ fn annotate_restore_state(
             && loaded.model == selected.model
             && loaded.mmproj == selected.mmproj
             && loaded.ctx_size == selected.ctx_size
+            && loaded.request_defaults == selected.request_defaults
     });
     payload["restore_selection"] = json!({
         "backend": persistent_state.selected_backend,
         "model": selected.model,
         "mmproj": selected.mmproj,
         "ctx_size": selected.ctx_size,
+        "request_defaults": selected.request_defaults,
     });
     payload["restore_status"] = json!(if completed { "loaded" } else { "pending" });
     payload["restore_completed"] = json!(completed);
@@ -933,6 +944,7 @@ fn model_load_response(loaded: &LoadedRustRuntime, already_loaded: bool) -> Valu
         "selected_public_model_id": loaded.public_model_id,
         "selected_mmproj": loaded.mmproj,
         "selected_ctx_size": loaded.ctx_size,
+        "request_defaults": loaded.request_defaults,
         "backend_pid": info.pid,
         "backend_port": info.port,
         "generation": loaded.generation,
@@ -961,6 +973,7 @@ struct RequestedRuntimeConfig<'a> {
     public_model_id: Option<&'a str>,
     mmproj: Option<&'a str>,
     ctx_size: Option<u32>,
+    request_defaults: &'a Map<String, Value>,
     launch_args: &'a [String],
 }
 
@@ -986,6 +999,7 @@ fn reload_required_response(
             "public_model_id": loaded.public_model_id,
             "mmproj": loaded.mmproj,
             "ctx_size": loaded.ctx_size,
+            "request_defaults": loaded.request_defaults,
             "launch_args": loaded.launch_args,
         },
         "requested": {
@@ -995,6 +1009,7 @@ fn reload_required_response(
             "public_model_id": requested.public_model_id,
             "mmproj": requested.mmproj,
             "ctx_size": requested.ctx_size,
+            "request_defaults": requested.request_defaults,
             "launch_args": requested.launch_args,
         },
     })
@@ -1011,6 +1026,7 @@ fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
         "public_model_id": loaded.public_model_id,
         "mmproj": loaded.mmproj,
         "ctx_size": loaded.ctx_size,
+        "request_defaults": loaded.request_defaults,
         "runtime_mode": "external_server",
         "backend_pid": info.pid,
         "backend_port": info.port,
@@ -1401,6 +1417,14 @@ fn json_required_str<'a>(payload: &'a Value, key: &'static str) -> Result<&'a st
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("field '{key}' is required"))
+}
+
+fn request_defaults_from_payload(payload: &Value) -> Result<Map<String, Value>> {
+    match payload.get("request_defaults") {
+        Some(Value::Object(defaults)) => Ok(defaults.clone()),
+        Some(_) => anyhow::bail!("request_defaults must be an object"),
+        None => Ok(Map::new()),
+    }
 }
 
 fn resolve_model_for_backend(

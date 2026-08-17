@@ -1,7 +1,7 @@
 use std::fs;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::paths;
@@ -39,6 +39,7 @@ pub struct SelectedModel {
     pub model: String,
     pub mmproj: Option<String>,
     pub ctx_size: Option<u32>,
+    pub request_defaults: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +78,7 @@ pub fn save_selected_model(
     model: &str,
     mmproj: Option<&str>,
     ctx_size: Option<u32>,
+    request_defaults: &Map<String, Value>,
 ) -> Result<(), StateError> {
     let model = model.trim();
     if model.is_empty() {
@@ -115,6 +117,10 @@ pub fn save_selected_model(
             map.remove("selected_ctx_size");
         }
     }
+    map.insert(
+        "selected_request_defaults".to_string(),
+        Value::Object(request_defaults.clone()),
+    );
     save_state_value(&value)
 }
 
@@ -124,7 +130,12 @@ pub fn clear_selected_model() -> Result<bool, StateError> {
         return Ok(false);
     };
     let mut cleared = false;
-    for key in ["selected_model", "selected_mmproj", "selected_ctx_size"] {
+    for key in [
+        "selected_model",
+        "selected_mmproj",
+        "selected_ctx_size",
+        "selected_request_defaults",
+    ] {
         cleared |= map.remove(key).is_some();
     }
     if cleared {
@@ -219,6 +230,11 @@ fn parse_state_value(value: &Value) -> LocalState {
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0),
+        request_defaults: map
+            .get("selected_request_defaults")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
     });
 
     LocalState {
@@ -280,6 +296,7 @@ mod tests {
                 model: "/models/model.gguf".to_string(),
                 mmproj: Some("/models/mmproj.gguf".to_string()),
                 ctx_size: Some(8192),
+                request_defaults: Map::new(),
             })
         );
         assert_eq!(state.default_thinking, Some(false));
@@ -322,6 +339,7 @@ mod tests {
             "selected_model": "/models/model.gguf",
             "selected_mmproj": "/models/mmproj.gguf",
             "selected_ctx_size": 8192,
+            "selected_request_defaults": {"max_tokens": 64},
             "future": { "keep": true }
         });
         let state = parse_state_value(&value);
@@ -331,6 +349,8 @@ mod tests {
                 model: "/models/model.gguf".to_string(),
                 mmproj: Some("/models/mmproj.gguf".to_string()),
                 ctx_size: Some(8192),
+                request_defaults: serde_json::from_value(serde_json::json!({"max_tokens": 64}))
+                    .unwrap(),
             })
         );
         assert_eq!(value["future"]["keep"], true);
@@ -360,8 +380,17 @@ mod tests {
             "/models/model.gguf",
             Some("/models/mmproj.gguf"),
             Some(8192),
+            &serde_json::from_value(serde_json::json!({"max_tokens": 64})).unwrap(),
         )
         .expect("save model");
+        assert_eq!(
+            load_state()
+                .expect("load saved model")
+                .selected_model
+                .expect("selected model")
+                .request_defaults["max_tokens"],
+            64
+        );
 
         assert!(clear_selected_model().expect("clear model"));
         assert!(!clear_selected_model().expect("clear model again"));
@@ -369,6 +398,8 @@ mod tests {
         assert_eq!(state.selected_backend.as_deref(), Some("llama.cpp-mac"));
         assert_eq!(state.selected_model, None);
         assert_eq!(state.default_thinking, Some(true));
+        let raw = std::fs::read_to_string(crate::paths::state_file()).expect("read state");
+        assert!(!raw.contains("selected_request_defaults"));
         std::fs::remove_dir_all(root).ok();
     }
 

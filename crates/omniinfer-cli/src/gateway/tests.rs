@@ -551,6 +551,150 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
 }
 
 #[tokio::test]
+async fn runtime_request_defaults_merge_without_restarting_backend() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("runtime-request-defaults");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let upstream = spawn_test_upstream().await;
+    let gateway = spawn_test_gateway(upstream.port, GatewayAccessPolicy::default()).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let load_request = json!({
+        "backend": backend_id,
+        "model": model.display().to_string(),
+        "ctx_size": 512,
+        "backend_port": backend_port,
+        "request_defaults": {
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9
+        }
+    });
+
+    let loaded = tokio::task::spawn_blocking({
+        let load_request = load_request.clone();
+        move || {
+            ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+                .send_json(load_request)
+                .unwrap()
+                .into_body()
+                .read_json::<Value>()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(loaded["request_defaults"]["max_tokens"], 64);
+    assert_eq!(loaded["request_defaults"]["temperature"], 0.2);
+    let backend_pid = loaded["backend_pid"].as_u64().unwrap();
+    let generation = loaded["generation"].as_u64().unwrap();
+
+    let state = gateway_state(port).await;
+    assert_eq!(state["request_defaults"]["max_tokens"], 64);
+    assert_eq!(state["loaded_models"][0]["request_defaults"]["top_p"], 0.9);
+    assert_eq!(
+        state["restore_selection"]["request_defaults"]["max_tokens"],
+        64
+    );
+    assert_eq!(state["restore_status"], "loaded");
+
+    let merged = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .send_json(json!({
+                "messages": [{"role": "user", "content": "Hello"}],
+                "request_defaults": {"max_tokens": 128, "temperature": 0.4},
+                "temperature": 0.7,
+                "stream": false
+            }))
+            .unwrap()
+            .into_body()
+            .read_json::<Value>()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(merged["max_tokens_echo"], 128);
+    assert_eq!(merged["temperature_echo"], 0.7);
+    assert_eq!(merged["top_p_echo"], 0.9);
+
+    let defaults_only = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .send_json(json!({
+                "messages": [{"role": "user", "content": "Hello again"}],
+                "stream": false
+            }))
+            .unwrap()
+            .into_body()
+            .read_json::<Value>()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(defaults_only["max_tokens_echo"], 64);
+    assert_eq!(defaults_only["temperature_echo"], 0.2);
+    assert_eq!(defaults_only["top_p_echo"], 0.9);
+
+    let updated = tokio::task::spawn_blocking({
+        let mut load_request = load_request.clone();
+        load_request["request_defaults"] = json!({"max_tokens": 32});
+        move || {
+            ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+                .send_json(load_request)
+                .unwrap()
+                .into_body()
+                .read_json::<Value>()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(updated["already_loaded"], true);
+    assert_eq!(updated["backend_pid"], backend_pid);
+    assert_eq!(updated["backend_port"], backend_port);
+    assert_eq!(updated["generation"], generation);
+    assert_eq!(updated["request_defaults"], json!({"max_tokens": 32}));
+
+    let invalid_load = tokio::task::spawn_blocking(move || {
+        let mut invalid = load_request;
+        invalid["request_defaults"] = json!(true);
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(invalid)
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(invalid_load.status().as_u16(), 400);
+
+    let invalid_chat = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_json(json!({
+                "messages": [{"role": "user", "content": "Hello"}],
+                "request_defaults": true
+            }))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(invalid_chat.status().as_u16(), 400);
+
+    gateway.stop().await;
+    upstream.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn runtime_load_rolls_back_when_local_state_commit_fails() {
     let _env_lock = TEST_ENV_LOCK.lock().await;
     let temp = temp_root("rust-gateway-state-rollback");
@@ -1594,7 +1738,10 @@ async fn remote_admins_can_load_multiple_models_with_owner_unload_policy() {
         port,
         "/omni/model/load",
         "admin-a",
-        json!({"model": "qwen3.5-35b-a3b-q4_k_m"}),
+        json!({
+            "model": "qwen3.5-35b-a3b-q4_k_m",
+            "request_defaults": {"max_tokens": 11}
+        }),
     )
     .await;
     assert_eq!(qwen_load["model"], "qwen3.5-35b-a3b-q4_k_m");
@@ -1604,7 +1751,10 @@ async fn remote_admins_can_load_multiple_models_with_owner_unload_policy() {
         port,
         "/omni/model/load",
         "admin-b",
-        json!({"model": "gemma-4-e4b-it-q4_k_m"}),
+        json!({
+            "model": "gemma-4-e4b-it-q4_k_m",
+            "request_defaults": {"max_tokens": 22}
+        }),
     )
     .await;
     assert_eq!(gemma_load["model"], "gemma-4-e4b-it-q4_k_m");
@@ -1624,8 +1774,10 @@ async fn remote_admins_can_load_multiple_models_with_owner_unload_policy() {
 
     let qwen_chat = remote_chat(port, "inference", "qwen3.5-35b-a3b-q4_k_m").await;
     assert_eq!(qwen_chat["model_echo"], "qwen3.5-35b-a3b-q4_k_m");
+    assert_eq!(qwen_chat["max_tokens_echo"], 11);
     let gemma_chat = remote_chat(port, "inference", "gemma-4-e4b-it-q4_k_m").await;
     assert_eq!(gemma_chat["model_echo"], "gemma-4-e4b-it-q4_k_m");
+    assert_eq!(gemma_chat["max_tokens_echo"], 22);
 
     let missing_chat = tokio::task::spawn_blocking(move || {
         ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -2159,6 +2311,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "choices": [{"message": {"content": "fake backend"}, "finish_reason": "stop"}],
             "model_echo": payload.get("model"),
+            "max_tokens_echo": payload.get("max_tokens"),
+            "temperature_echo": payload.get("temperature"),
+            "top_p_echo": payload.get("top_p"),
             "usage": {"prompt_tokens": 3, "completion_tokens": 2},
         })
 
@@ -2398,9 +2553,15 @@ fn response_payload(request_line: &str, body: &str) -> (String, &'static str) {
         let model = extract_json_string(body, "model")
             .map(|value| format!(r#""{value}""#))
             .unwrap_or_else(|| "null".to_string());
+        let max_tokens = extract_json_number(body, "max_tokens")
+            .unwrap_or_else(|| "null".to_string());
+        let temperature = extract_json_number(body, "temperature")
+            .unwrap_or_else(|| "null".to_string());
+        let top_p = extract_json_number(body, "top_p")
+            .unwrap_or_else(|| "null".to_string());
         return (
             format!(
-                r#"{{"choices":[{{"message":{{"content":"fake backend"}},"finish_reason":"stop"}}],"model_echo":{model},"usage":{{"prompt_tokens":3,"completion_tokens":2}}}}"#
+                r#"{{"choices":[{{"message":{{"content":"fake backend"}},"finish_reason":"stop"}}],"model_echo":{model},"max_tokens_echo":{max_tokens},"temperature_echo":{temperature},"top_p_echo":{top_p},"usage":{{"prompt_tokens":3,"completion_tokens":2}}}}"#
             ),
             "application/json",
         );
@@ -2422,6 +2583,18 @@ fn extract_json_string(body: &str, key: &str) -> Option<String> {
     let value = after_colon.strip_prefix('"')?;
     let end = value.find('"')?;
     Some(value[..end].to_string())
+}
+
+fn extract_json_number(body: &str, key: &str) -> Option<String> {
+    let needle = format!(r#""{key}""#);
+    let start = body.find(&needle)?;
+    let after_key = &body[start + needle.len()..];
+    let colon = after_key.find(':')?;
+    let value = after_key[colon + 1..].trim_start();
+    let end = value
+        .find(|ch: char| !matches!(ch, '0'..='9' | '-' | '+' | '.' | 'e' | 'E'))
+        .unwrap_or(value.len());
+    (end > 0).then(|| value[..end].to_string())
 }
 
 fn write_response(stream: &mut TcpStream, body: &str, content_type: &str) {

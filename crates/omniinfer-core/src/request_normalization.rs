@@ -7,6 +7,8 @@ const DISABLED_REASONING_EFFORTS: &[&str] = &["none", "off", "disabled", "false"
 pub enum RequestNormalizationError {
     #[error("cannot parse boolean value from {0}")]
     Bool(String),
+    #[error("request_defaults must be an object")]
+    RequestDefaultsNotObject,
     #[error("omni_stream must be an object")]
     OmniStreamNotObject,
     #[error("omni_stream.format must be 'lines'")]
@@ -42,7 +44,15 @@ pub struct NormalizedChatRequest {
 }
 
 pub fn normalize_chat_request(
+    payload: Value,
+    default_thinking: bool,
+) -> Result<NormalizedChatRequest, RequestNormalizationError> {
+    normalize_chat_request_with_defaults(payload, &Map::new(), default_thinking)
+}
+
+pub fn normalize_chat_request_with_defaults(
     mut payload: Value,
+    runtime_defaults: &Map<String, Value>,
     default_thinking: bool,
 ) -> Result<NormalizedChatRequest, RequestNormalizationError> {
     let Some(map) = payload.as_object_mut() else {
@@ -52,10 +62,21 @@ pub fn normalize_chat_request(
             line_stream: LineStreamOptions::default(),
         });
     };
+    let request_defaults = match map.remove("request_defaults") {
+        Some(Value::Object(defaults)) => Some(defaults),
+        Some(_) => return Err(RequestNormalizationError::RequestDefaultsNotObject),
+        None => None,
+    };
+    let mut effective = runtime_defaults.clone();
+    if let Some(defaults) = request_defaults.as_ref() {
+        effective.extend(defaults.clone());
+    }
+    effective.extend(std::mem::take(map));
+    payload = Value::Object(effective);
+    let map = payload
+        .as_object_mut()
+        .expect("effective chat request should remain an object");
     let line_stream = resolve_line_stream_options(map)?;
-    let request_defaults = map
-        .remove("request_defaults")
-        .and_then(|value| value.as_object().cloned());
     apply_thinking_mode(map, default_thinking)?;
     normalize_legacy_function_tools(map);
     Ok(NormalizedChatRequest {
@@ -318,8 +339,43 @@ mod tests {
         .expect("normalize");
         assert_eq!(request.request_defaults.unwrap()["temperature"], json!(0.2));
         assert!(request.payload.get("request_defaults").is_none());
+        assert_eq!(request.payload["temperature"], json!(0.2));
         assert!(request.line_stream.enabled);
         assert_eq!(request.line_stream.max_line_chars, 80);
         assert!(request.line_stream.include_reasoning);
+    }
+
+    #[test]
+    fn merges_runtime_nested_and_explicit_defaults_in_precedence_order() {
+        let runtime_defaults = serde_json::from_value(json!({
+            "max_tokens": 64,
+            "temperature": 0.1,
+            "top_p": 0.9
+        }))
+        .unwrap();
+        let request = normalize_chat_request_with_defaults(
+            json!({
+                "messages": [{"role": "user", "content": "Hello"}],
+                "request_defaults": {"max_tokens": 128, "temperature": 0.4},
+                "temperature": 0.7
+            }),
+            &runtime_defaults,
+            false,
+        )
+        .expect("normalize");
+
+        assert_eq!(request.payload["max_tokens"], json!(128));
+        assert_eq!(request.payload["temperature"], json!(0.7));
+        assert_eq!(request.payload["top_p"], json!(0.9));
+        assert_eq!(
+            request.payload["messages"],
+            json!([{"role": "user", "content": "Hello"}])
+        );
+    }
+
+    #[test]
+    fn rejects_non_object_request_defaults() {
+        let error = normalize_chat_request(json!({"request_defaults": true}), false).unwrap_err();
+        assert_eq!(error, RequestNormalizationError::RequestDefaultsNotObject);
     }
 }
