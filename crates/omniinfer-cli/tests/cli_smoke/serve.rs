@@ -32,9 +32,8 @@ fn serve_detach_starts_lan_gateway_with_api_key() {
         .arg(port.to_string())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Local Base URL:"))
-        .stdout(predicate::str::contains("API Key: lan-key"))
-        .stdout(predicate::str::contains("Curl:"));
+        .stdout(predicate::str::contains("Local Gateway URL:"))
+        .stdout(predicate::str::contains("API Key: lan-key"));
 
     let health = wait_for_http_json(port, "/health?deep=true");
     assert_eq!(health["status"], "ok");
@@ -114,7 +113,7 @@ fn serve_detach_external_backend_runs_without_python_upstream() {
         "serve failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stdout.contains("OmniInfer service is ready"));
-    assert!(stdout.contains(&format!("Local Base URL: http://127.0.0.1:{port}/v1")));
+    assert!(stdout.contains(&format!("Local Gateway URL: http://127.0.0.1:{port}")));
 
     let health = wait_for_http_json(port, "/health");
     assert_eq!(health["status"], "ok");
@@ -286,7 +285,7 @@ fn serve_detach_starts_gateway_and_writes_state() {
         .success()
         .stdout(predicate::str::contains("OmniInfer service is ready"))
         .stdout(predicate::str::contains(format!(
-            "Local Base URL: http://127.0.0.1:{}/v1",
+            "Local Gateway URL: http://127.0.0.1:{}",
             port
         )));
 
@@ -334,7 +333,7 @@ fn serve_detach_ignores_config_host_by_default() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "Local Base URL: http://127.0.0.1:{port}/v1"
+            "Local Gateway URL: http://127.0.0.1:{port}"
         )));
 
     let health = wait_for_http_json(port, "/health?deep=true");
@@ -1374,10 +1373,9 @@ fn serve_detach_starts_cloudflare_tunnel() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "OpenAI Base URL: https://example-test.trycloudflare.com/v1",
+            "Public Gateway URL: https://example-test.trycloudflare.com",
         ))
-        .stdout(predicate::str::contains("API Key: test-key"))
-        .stdout(predicate::str::contains("Curl:"));
+        .stdout(predicate::str::contains("API Key: test-key"));
 
     let health = wait_for_http_json(port, "/health?deep=true");
     assert_eq!(health["status"], "ok");
@@ -1412,6 +1410,190 @@ fn serve_detach_starts_cloudflare_tunnel() {
         "detached cloudflared must survive continued log writes"
     );
     stop_rust_serve(&source_root, &state_root, port);
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_replacement_cleans_orphaned_cloudflare_tunnel() {
+    let port = free_port();
+    let source_root = temp_repo_root("serve-cloudflare-replace-source");
+    let state_root = temp_repo_root("serve-cloudflare-replace-state");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create state config");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{port},"startup_timeout":10}}"#),
+    )
+    .expect("write config");
+    let cloudflared = fake_cloudflared_launcher(&state_root);
+
+    let mut first = Command::cargo_bin("omniinfer").expect("binary exists");
+    first
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .args(["serve", "--detach", "--cloudflare", "--cloudflared-path"])
+        .arg(&cloudflared)
+        .args(["--api-key", "test-key", "--port"])
+        .arg(port.to_string())
+        .assert()
+        .success();
+
+    let state_path = state_root
+        .join(".local")
+        .join("run")
+        .join(format!("serve-{port}.json"));
+    let old_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("old state"))
+            .expect("old state JSON");
+    let old_run_id = old_state["run_id"]
+        .as_str()
+        .expect("old run ID")
+        .to_string();
+    let old_tunnel_pid = old_state["cloudflared_pid"]
+        .as_u64()
+        .expect("old tunnel PID") as u32;
+
+    let shutdown = omniinfer_core::http_client::post_json(
+        &format!("http://127.0.0.1:{port}/omni/shutdown"),
+        &serde_json::json!({}),
+        Duration::from_secs(3),
+    )
+    .expect("shutdown old gateway");
+    assert!(shutdown.status < 400);
+    assert!(wait_for_port_closed(port));
+    assert!(
+        StdCommand::new("kill")
+            .args(["-0", &old_tunnel_pid.to_string()])
+            .status()
+            .expect("check old tunnel")
+            .success(),
+        "the reproduction requires an orphaned tunnel before replacement"
+    );
+
+    let mut replacement = Command::cargo_bin("omniinfer").expect("binary exists");
+    replacement
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .args([
+            "serve",
+            "--detach",
+            "--lan",
+            "--api-key",
+            "test-key",
+            "--port",
+        ])
+        .arg(port.to_string())
+        .assert()
+        .success();
+
+    let new_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("replacement state"))
+            .expect("replacement state JSON");
+    assert_ne!(new_state["run_id"], old_run_id);
+    assert_eq!(new_state["phase"], "ready");
+    assert!(new_state["cloudflared_pid"].is_null());
+    assert!(
+        !StdCommand::new("kill")
+            .args(["-0", &old_tunnel_pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("check cleaned tunnel")
+            .success(),
+        "replacement must stop the old tunnel before publishing new state"
+    );
+
+    stop_rust_serve(&source_root, &state_root, port);
+    assert!(!state_path.exists());
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+}
+
+#[test]
+fn concurrent_serve_operation_fails_while_port_lock_is_held() {
+    let port = free_port();
+    let source_root = temp_repo_root("serve-port-lock-source");
+    let state_root = temp_repo_root("serve-port-lock-state");
+    let run_dir = state_root.join(".local").join("run");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(&run_dir).expect("create run directory");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(run_dir.join(format!("serve-{port}.lock")))
+        .expect("open port lock");
+    lock.try_lock().expect("hold port lock");
+
+    let mut cmd = Command::cargo_bin("omniinfer").expect("binary exists");
+    cmd.env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .args(["serve", "--detach", "--port"])
+        .arg(port.to_string())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "another serve operation already owns port",
+        ));
+    drop(lock);
+    assert!(wait_for_port_closed(port));
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_stop_rejects_mismatched_process_identity() {
+    let port = free_port();
+    let source_root = temp_repo_root("serve-identity-source");
+    let state_root = temp_repo_root("serve-identity-state");
+    let run_dir = state_root.join(".local").join("run");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(&run_dir).expect("create run directory");
+    let mut unrelated = StdCommand::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("start unrelated process");
+    let mut identity = omniinfer_core::serve_state::capture_process_identity(unrelated.id())
+        .expect("capture unrelated identity");
+    identity.start_time = identity.start_time.saturating_add(1);
+    fs::write(
+        run_dir.join(format!("serve-{port}.json")),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "run_id": "mismatched-test",
+            "phase": "starting",
+            "pid": unrelated.id(),
+            "gateway_process": identity,
+            "port": port
+        }))
+        .expect("encode mismatched state"),
+    )
+    .expect("write mismatched state");
+
+    let mut stop = Command::cargo_bin("omniinfer").expect("binary exists");
+    stop.env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .args(["serve", "stop", "--port"])
+        .arg(port.to_string())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "process identity does not match serve state",
+        ));
+    assert!(
+        unrelated
+            .try_wait()
+            .expect("check unrelated process")
+            .is_none()
+    );
+    unrelated.kill().expect("stop unrelated process");
+    unrelated.wait().expect("reap unrelated process");
     fs::remove_dir_all(source_root).ok();
     fs::remove_dir_all(state_root).ok();
 }
