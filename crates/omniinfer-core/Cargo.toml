@@ -13,3 +13,6 @@ rand.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 sysinfo.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

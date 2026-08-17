@@ -26,9 +26,21 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn stop_serve(port: u16) -> Result<()> {
+    let _port_lock = serve_state::try_lock_serve_port(port)?;
+    let info = serve_state::load_serve_pid_info(port)?;
+    stop_serve_locked(port, info, true)
+}
+
+fn stop_serve_locked(
+    port: u16,
+    info: Option<serve_state::ServePidInfo>,
+    print_status: bool,
+) -> Result<()> {
+    if let Some(info) = info.as_ref() {
+        validate_recorded_processes(info, port)?;
+    }
     let mut config = config::load_app_config().unwrap_or_default();
     config.port = port;
-    let info = serve_state::load_serve_pid_info(port).ok().flatten();
     let url = format!("{}/omni/shutdown", config.service_base_url());
     let shutdown_accepted =
         match http_client::post_json(&url, &serde_json::json!({}), SHUTDOWN_REQUEST_TIMEOUT) {
@@ -44,39 +56,284 @@ pub(crate) fn stop_serve(port: u16) -> Result<()> {
             Duration::ZERO
         },
     );
+    gateway_closed = gateway_closed
+        && recorded_process_exited(
+            info.as_ref().and_then(|value| value.pid),
+            info.as_ref()
+                .and_then(|value| value.gateway_process.as_ref()),
+            LegacyProcessKind::Gateway,
+            info.as_ref(),
+            port,
+        );
     let mut backend_closed = info
         .as_ref()
         .and_then(|value| value.backend_port)
         .is_none_or(|backend_port| wait_for_local_port_closed(backend_port, Duration::ZERO));
+    backend_closed = backend_closed
+        && recorded_process_exited(
+            info.as_ref().and_then(|value| value.backend_pid),
+            info.as_ref()
+                .and_then(|value| value.backend_process.as_ref()),
+            LegacyProcessKind::Backend,
+            info.as_ref(),
+            port,
+        );
     if info.is_some() && (!gateway_closed || !backend_closed) {
         if let Some(pid) = info.as_ref().and_then(|value| value.backend_pid) {
-            stop_process(pid);
+            stop_recorded_process(
+                pid,
+                info.as_ref()
+                    .and_then(|value| value.backend_process.as_ref()),
+                LegacyProcessKind::Backend,
+                info.as_ref(),
+                port,
+            )?;
         }
         if let Some(pid) = info.as_ref().and_then(|value| value.pid) {
-            stop_process(pid);
+            stop_recorded_process(
+                pid,
+                info.as_ref()
+                    .and_then(|value| value.gateway_process.as_ref()),
+                LegacyProcessKind::Gateway,
+                info.as_ref(),
+                port,
+            )?;
         }
         gateway_closed = wait_for_local_port_closed(port, FORCED_SHUTDOWN_TIMEOUT);
+        gateway_closed = gateway_closed
+            && wait_for_recorded_process_exit(
+                info.as_ref().and_then(|value| value.pid),
+                info.as_ref()
+                    .and_then(|value| value.gateway_process.as_ref()),
+                LegacyProcessKind::Gateway,
+                info.as_ref(),
+                port,
+                FORCED_SHUTDOWN_TIMEOUT,
+            );
         backend_closed = info
             .as_ref()
             .and_then(|value| value.backend_port)
             .is_none_or(|backend_port| {
                 wait_for_local_port_closed(backend_port, FORCED_SHUTDOWN_TIMEOUT)
             });
+        backend_closed = backend_closed
+            && wait_for_recorded_process_exit(
+                info.as_ref().and_then(|value| value.backend_pid),
+                info.as_ref()
+                    .and_then(|value| value.backend_process.as_ref()),
+                LegacyProcessKind::Backend,
+                info.as_ref(),
+                port,
+                FORCED_SHUTDOWN_TIMEOUT,
+            );
     }
+    let mut tunnel_closed = true;
     if let Some(pid) = info.as_ref().and_then(|value| value.cloudflared_pid) {
-        stop_process(pid);
+        stop_recorded_process(
+            pid,
+            info.as_ref()
+                .and_then(|value| value.cloudflared_process.as_ref()),
+            LegacyProcessKind::Cloudflared,
+            info.as_ref(),
+            port,
+        )?;
+        tunnel_closed = wait_for_recorded_process_exit(
+            Some(pid),
+            info.as_ref()
+                .and_then(|value| value.cloudflared_process.as_ref()),
+            LegacyProcessKind::Cloudflared,
+            info.as_ref(),
+            port,
+            FORCED_SHUTDOWN_TIMEOUT,
+        );
     }
 
-    if (shutdown_accepted || info.is_some()) && gateway_closed && backend_closed {
-        let _ = serve_state::remove_serve_pid_info(port);
-        println!("OmniInfer service stopped on port {port}");
+    if (shutdown_accepted || info.is_some()) && gateway_closed && backend_closed && tunnel_closed {
+        remove_recorded_serve_state(port, info.as_ref())?;
+        if print_status {
+            println!("OmniInfer service stopped on port {port}");
+        }
         Ok(())
     } else if !shutdown_accepted && info.is_none() {
-        println!("OmniInfer service is not running on port {port}");
+        if print_status {
+            println!("OmniInfer service is not running on port {port}");
+        }
         Ok(())
     } else {
         anyhow::bail!("failed to stop OmniInfer service on port {port} within the shutdown timeout")
     }
+}
+
+#[derive(Clone, Copy)]
+enum LegacyProcessKind {
+    Gateway,
+    Cloudflared,
+    Backend,
+}
+
+fn validate_recorded_processes(info: &serve_state::ServePidInfo, port: u16) -> Result<()> {
+    for (pid, identity, kind, label) in [
+        (
+            info.pid,
+            info.gateway_process.as_ref(),
+            LegacyProcessKind::Gateway,
+            "gateway",
+        ),
+        (
+            info.cloudflared_pid,
+            info.cloudflared_process.as_ref(),
+            LegacyProcessKind::Cloudflared,
+            "cloudflared",
+        ),
+        (
+            info.backend_pid,
+            info.backend_process.as_ref(),
+            LegacyProcessKind::Backend,
+            "backend",
+        ),
+    ] {
+        let Some(pid) = pid else {
+            continue;
+        };
+        if let Some(identity) = identity {
+            if identity.pid != pid
+                || serve_state::process_identity_status(identity)
+                    == serve_state::ProcessIdentityStatus::Mismatched
+            {
+                anyhow::bail!(
+                    "refusing to stop {label} PID {pid}: process identity does not match serve state"
+                );
+            }
+        } else if legacy_process_status(pid, kind, info, port) == LegacyProcessStatus::Mismatched {
+            anyhow::bail!(
+                "refusing to stop legacy {label} PID {pid}: process ownership could not be verified"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyProcessStatus {
+    Running,
+    Exited,
+    Mismatched,
+}
+
+fn legacy_process_status(
+    pid: u32,
+    kind: LegacyProcessKind,
+    info: &serve_state::ServePidInfo,
+    port: u16,
+) -> LegacyProcessStatus {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let pid = sysinfo::Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always)
+            .without_tasks(),
+    );
+    let Some(process) = system.process(pid) else {
+        return LegacyProcessStatus::Exited;
+    };
+    let args = process
+        .cmd()
+        .iter()
+        .map(|value| value.to_string_lossy())
+        .collect::<Vec<_>>();
+    let joined = args.join(" ");
+    let joined_lower = joined.to_ascii_lowercase();
+    let port_text = port.to_string();
+    let matches = match kind {
+        LegacyProcessKind::Gateway => {
+            joined_lower.contains("gateway")
+                && args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--port" && pair[1] == port_text)
+        }
+        LegacyProcessKind::Cloudflared => {
+            joined_lower.contains("cloudflared")
+                && joined_lower.contains("tunnel")
+                && joined.contains(&format!("127.0.0.1:{port}"))
+        }
+        LegacyProcessKind::Backend => {
+            let backend_port = info.backend_port.map(|value| value.to_string());
+            let model = info
+                .model
+                .as_deref()
+                .filter(|value| !value.trim().is_empty());
+            backend_port
+                .as_ref()
+                .is_some_and(|value| joined.contains(value))
+                && model.is_some_and(|value| joined.contains(value))
+        }
+    };
+    if matches {
+        LegacyProcessStatus::Running
+    } else {
+        LegacyProcessStatus::Mismatched
+    }
+}
+
+fn recorded_process_exited(
+    pid: Option<u32>,
+    identity: Option<&serve_state::ProcessIdentity>,
+    kind: LegacyProcessKind,
+    info: Option<&serve_state::ServePidInfo>,
+    port: u16,
+) -> bool {
+    let Some(pid) = pid else {
+        return true;
+    };
+    if let Some(identity) = identity {
+        return serve_state::process_identity_status(identity)
+            != serve_state::ProcessIdentityStatus::Running;
+    }
+    info.is_some_and(|info| {
+        legacy_process_status(pid, kind, info, port) != LegacyProcessStatus::Running
+    })
+}
+
+fn wait_for_recorded_process_exit(
+    pid: Option<u32>,
+    identity: Option<&serve_state::ProcessIdentity>,
+    kind: LegacyProcessKind,
+    info: Option<&serve_state::ServePidInfo>,
+    port: u16,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !recorded_process_exited(pid, identity, kind, info, port) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    recorded_process_exited(pid, identity, kind, info, port)
+}
+
+fn stop_recorded_process(
+    pid: u32,
+    identity: Option<&serve_state::ProcessIdentity>,
+    kind: LegacyProcessKind,
+    info: Option<&serve_state::ServePidInfo>,
+    port: u16,
+) -> Result<()> {
+    if !recorded_process_exited(Some(pid), identity, kind, info, port) {
+        stop_process(pid);
+    }
+    Ok(())
+}
+
+fn remove_recorded_serve_state(port: u16, info: Option<&serve_state::ServePidInfo>) -> Result<()> {
+    if let Some(run_id) = info.and_then(|value| value.run_id.as_deref()) {
+        serve_state::remove_serve_pid_info_if_run_id(port, run_id)?;
+    } else {
+        serve_state::remove_serve_pid_info(port)?;
+    }
+    Ok(())
 }
 
 fn wait_for_local_port_closed(port: u16, timeout: Duration) -> bool {
@@ -112,6 +369,7 @@ fn cleanup_failed_serve(
     gateway: &mut std::process::Child,
     cloudflared: Option<&mut std::process::Child>,
     port: u16,
+    run_id: &str,
 ) {
     if let Some(tunnel) = cloudflared {
         stop_process(tunnel.id());
@@ -150,7 +408,7 @@ fn cleanup_failed_serve(
     }
 
     if gateway_exited && gateway_closed {
-        let _ = serve_state::remove_serve_pid_info(port);
+        let _ = serve_state::remove_serve_pid_info_if_run_id(port, run_id);
     } else {
         eprintln!(
             "OmniInfer: failed startup cleanup did not fully stop the gateway on port {port}; run `omniinfer serve stop --port {port}`"
@@ -164,6 +422,7 @@ fn cleanup_smoke_serve(
     port: u16,
     backend_pid: Option<u32>,
     backend_port: Option<u16>,
+    run_id: &str,
 ) -> Result<()> {
     let mut cleanup_errors = Vec::new();
     if let Some(tunnel) = cloudflared
@@ -207,7 +466,7 @@ fn cleanup_smoke_serve(
         cleanup_errors.push(format!("backend port {backend_port} is still in use"));
     }
     if cleanup_errors.is_empty() {
-        let _ = serve_state::remove_serve_pid_info(port);
+        serve_state::remove_serve_pid_info_if_run_id(port, run_id)?;
         println!("Smoke test cleanup complete; gateway/backend stopped and port {port} released");
         Ok(())
     } else {
@@ -335,6 +594,15 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
     }
     reject_embedded_serve_backend(args)?;
     let public_config = config.clone();
+    let mut port_lock = Some(serve_state::try_lock_serve_port(public_config.port)?);
+    if let Some(existing) = serve_state::load_serve_pid_info(public_config.port)? {
+        stop_serve_locked(public_config.port, Some(existing), false).map_err(|error| {
+            anyhow::anyhow!(
+                "cannot replace the existing managed serve state on port {}: {error}",
+                public_config.port
+            )
+        })?;
+    }
     ensure_serve_port_available(&public_config)?;
     let cloudflared = if args.cloudflare {
         Some(resolve_cloudflared(args.cloudflared_path.as_deref())?)
@@ -344,6 +612,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
     let log_path = paths::local_logs_dir().join(format!("serve-{}.log", public_config.port));
     println!("Starting OmniInfer service on port {}...", config.port);
     println!("Log: {}", log_path.display());
+    let run_id = format!("serve-{:032x}", rand::random::<u128>());
     let mut rust_gateway = start_rust_gateway_child(
         &public_config,
         args,
@@ -353,24 +622,80 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         &admin_api_keys,
         public_model_root.as_deref(),
     )?;
-    if let Err(error) = wait_for_gateway_ready(&public_config) {
-        cleanup_failed_serve(&mut rust_gateway, None, public_config.port);
+    let Some(gateway_process) = serve_state::capture_process_identity(rust_gateway.id()) else {
+        cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
+        anyhow::bail!("gateway exited before its process identity could be recorded");
+    };
+    let mut serve_info = serve_state::ServePidInfo {
+        run_id: Some(run_id.clone()),
+        phase: Some("starting".to_string()),
+        pid: Some(rust_gateway.id()),
+        gateway_process: Some(gateway_process),
+        cloudflared_pid: None,
+        cloudflared_process: None,
+        port: Some(public_config.port),
+        log: Some(log_path.display().to_string()),
+        public_url: None,
+        openai_base_url: None,
+        backend: None,
+        model: None,
+        mmproj: None,
+        ctx_size: None,
+        backend_ready: Some(false),
+        backend_pid: None,
+        backend_process: None,
+        backend_port: None,
+    };
+    if let Err(error) = serve_state::save_serve_pid_info(&serve_info) {
+        cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
         return Err(error.into());
+    }
+    if let Err(error) = wait_for_gateway_ready(&public_config) {
+        cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
+        return Err(error);
     }
     let mut cloudflared_child = None;
     let mut public_url = None;
     if let Some(cloudflared) = cloudflared {
         let local_url = format!("http://127.0.0.1:{}", config.port);
-        let (child, url) =
-            match start_cloudflare_quick_tunnel(&cloudflared, &local_url, &log_path, args.detach) {
-                Ok(result) => result,
-                Err(error) => {
-                    cleanup_failed_serve(&mut rust_gateway, None, public_config.port);
-                    return Err(error);
-                }
-            };
+        let (child, url) = match start_cloudflare_quick_tunnel(
+            &cloudflared,
+            &local_url,
+            &log_path,
+            args.detach,
+            |child| {
+                let Some(identity) = serve_state::capture_process_identity(child.id()) else {
+                    anyhow::bail!(
+                        "cloudflared exited before its process identity could be recorded"
+                    );
+                };
+                serve_info.cloudflared_pid = Some(child.id());
+                serve_info.cloudflared_process = Some(identity);
+                serve_state::save_serve_pid_info(&serve_info)?;
+                Ok(())
+            },
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
+                return Err(error);
+            }
+        };
         cloudflared_child = Some(child);
         public_url = Some(url);
+        serve_info.public_url = public_url.clone();
+        serve_info.openai_base_url = public_url
+            .as_ref()
+            .map(|url| format!("{}/v1", url.trim_end_matches('/')));
+        if let Err(error) = serve_state::save_serve_pid_info(&serve_info) {
+            cleanup_failed_serve(
+                &mut rust_gateway,
+                cloudflared_child.as_mut(),
+                public_config.port,
+                &run_id,
+            );
+            return Err(error.into());
+        }
     }
     let configure_result = (|| -> Result<()> {
         if let Some(backend) = args
@@ -426,6 +751,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 &mut rust_gateway,
                 cloudflared_child.as_mut(),
                 public_config.port,
+                &run_id,
             );
             return Err(error);
         }
@@ -437,35 +763,42 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 &mut rust_gateway,
                 cloudflared_child.as_mut(),
                 public_config.port,
+                &run_id,
             );
             return Err(error);
         }
     };
     let backend_pid = json_u64(&state, "backend_pid").and_then(|value| u32::try_from(value).ok());
     let backend_port = json_u64(&state, "backend_port").and_then(|value| u16::try_from(value).ok());
-    if let Err(error) = serve_state::save_serve_pid_info(&serve_state::ServePidInfo {
-        pid: Some(rust_gateway.id()),
-        cloudflared_pid: cloudflared_child.as_ref().map(std::process::Child::id),
-        port: Some(public_config.port),
-        log: Some(log_path.display().to_string()),
-        public_url: public_url.clone(),
-        openai_base_url: public_url
-            .as_ref()
-            .map(|url| format!("{}/v1", url.trim_end_matches('/'))),
-        backend: json_str(&state, "backend").map(str::to_string),
-        model: json_str(&state, "model").map(str::to_string),
-        mmproj: json_str(&state, "mmproj").map(str::to_string),
-        ctx_size: json_u64(&state, "ctx_size").and_then(|value| u32::try_from(value).ok()),
-        backend_ready: json_bool(&state, "backend_ready"),
-        backend_pid,
-        backend_port,
-    }) {
+    serve_info.phase = Some("ready".to_string());
+    serve_info.backend = json_str(&state, "backend").map(str::to_string);
+    serve_info.model = json_str(&state, "model").map(str::to_string);
+    serve_info.mmproj = json_str(&state, "mmproj").map(str::to_string);
+    serve_info.ctx_size = json_u64(&state, "ctx_size").and_then(|value| u32::try_from(value).ok());
+    serve_info.backend_ready = json_bool(&state, "backend_ready");
+    serve_info.backend_pid = backend_pid;
+    serve_info.backend_process = backend_pid.and_then(serve_state::capture_process_identity);
+    serve_info.backend_port = backend_port;
+    if backend_pid.is_some() && serve_info.backend_process.is_none() {
         cleanup_failed_serve(
             &mut rust_gateway,
             cloudflared_child.as_mut(),
             public_config.port,
+            &run_id,
+        );
+        anyhow::bail!("backend exited before its process identity could be recorded");
+    }
+    if let Err(error) = serve_state::save_serve_pid_info(&serve_info) {
+        cleanup_failed_serve(
+            &mut rust_gateway,
+            cloudflared_child.as_mut(),
+            public_config.port,
+            &run_id,
         );
         return Err(error.into());
+    }
+    if !args.smoke_test {
+        drop(port_lock.take());
     }
     let mut smoke_text = None;
     let mut smoke_failed = false;
@@ -522,6 +855,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
             public_config.port,
             backend_pid,
             backend_port,
+            &run_id,
         );
         if let Err(cleanup_error) = cleanup_result {
             if smoke_failed {
@@ -532,12 +866,17 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         if smoke_failed {
             anyhow::bail!("smoke test failed");
         }
+        drop(port_lock.take());
         return Ok(());
     }
     if !args.detach {
         println!("Press Ctrl+C to stop.");
-        let status =
-            wait_for_foreground_service(rust_gateway, cloudflared_child, public_config.port)?;
+        let status = wait_for_foreground_service(
+            rust_gateway,
+            cloudflared_child,
+            public_config.port,
+            &run_id,
+        )?;
         if !status.success() {
             anyhow::bail!("OmniInfer service exited with status {status}");
         }
@@ -604,13 +943,14 @@ fn wait_for_foreground_service(
     mut rust_gateway: std::process::Child,
     cloudflared_child: Option<std::process::Child>,
     port: u16,
+    run_id: &str,
 ) -> Result<std::process::ExitStatus> {
     let status = rust_gateway.wait()?;
     if let Some(mut tunnel) = cloudflared_child {
         let _ = tunnel.kill();
         let _ = tunnel.wait();
     }
-    let _ = serve_state::remove_serve_pid_info(port);
+    let _ = serve_state::remove_serve_pid_info_if_run_id(port, run_id);
     Ok(status)
 }
 

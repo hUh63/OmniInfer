@@ -511,6 +511,11 @@ Detached services can be checked or stopped without remembering process IDs:
 ./omniinfer serve stop --port 9000
 ```
 
+Serve startup records each managed process before continuing. Starting the same
+port again first removes the verified previous gateway, backend, and tunnel;
+if ownership cannot be verified, startup stops with an error and preserves the
+existing state for inspection.
+
 The generic `./omniinfer shutdown` command uses the configured port when it has
 a matching serve-state record. Otherwise, it targets the only service recorded
 under the active `--state-root`. If several non-default services are recorded,
