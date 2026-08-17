@@ -95,12 +95,6 @@ impl RuntimeProcess {
             .metadata()
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let stdout = log_handle
-            .try_clone()
-            .map_err(|source| RuntimeProcessError::CloneLog {
-                path: options.log_path.display().to_string(),
-                source,
-            })?;
         let stderr = log_handle
             .try_clone()
             .map_err(|source| RuntimeProcessError::CloneLog {
@@ -112,7 +106,7 @@ impl RuntimeProcess {
             .args(plan.command.iter().skip(1))
             .current_dir(&plan.cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
+            .stdout(Stdio::from(log_handle))
             .stderr(Stdio::from(stderr));
         for (key, value) in &options.env {
             command.env(key, value);
@@ -613,6 +607,7 @@ mod tests {
             client_endpoint: format!("http://127.0.0.1:{port}"),
             readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
+        let start_started = Instant::now();
         let mut process = RuntimeProcess::start(
             &plan,
             RuntimeProcessOptions {
@@ -623,6 +618,10 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(
+            start_started.elapsed() < Duration::from_secs(10),
+            "runtime start must not block on a redundant diagnostic log handle"
+        );
 
         let stop_started = Instant::now();
         process.stop(Duration::from_secs(2)).unwrap();
