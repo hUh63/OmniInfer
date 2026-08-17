@@ -1087,7 +1087,7 @@ fn build_runtime_resource_budget(
     let base = weights
         .checked_add(projector)
         .ok_or_else(|| anyhow::anyhow!("model artifact size overflow"))?;
-    let parameter_proxy = base.checked_mul(2).unwrap_or(u64::MAX).max(GIB);
+    let parameter_proxy = base.saturating_mul(2).max(GIB);
     let ctx = u64::from(ctx_size.max(1));
     let kv_cache = checked_scaled(parameter_proxy, 3, 100)?
         .checked_mul(ctx)
@@ -1527,10 +1527,12 @@ mod tests {
 
     #[test]
     fn failed_load_transaction_rolls_back_reservation() {
-        let mut manager = RustRuntimeManager::default();
-        manager.resource_ledger = Some(ResourceLedger::new(
-            ResourceCapacity::new(1, BTreeMap::from([(MemoryDomain::Host, 1024)])).unwrap(),
-        ));
+        let mut manager = RustRuntimeManager {
+            resource_ledger: Some(ResourceLedger::new(
+                ResourceCapacity::new(1, BTreeMap::from([(MemoryDomain::Host, 1024)])).unwrap(),
+            )),
+            ..Default::default()
+        };
         let reservation = manager
             .resource_ledger
             .as_mut()
