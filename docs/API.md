@@ -218,6 +218,8 @@ The active runtime and the persisted startup selection are reported separately:
 - `restore_selection` describes the model OmniInfer will try to restore on the next direct `serve` startup, or is `null` when no restore is configured.
 - `restore_status` is `not_configured`, `pending`, or `loaded`.
 - `restore_completed` is true only when a loaded runtime matches the persisted backend, model, `mmproj`, and context size.
+- `generation` and `route_state` identify the currently routable runtime generation.
+- `resource_ledger` reports capacity, reserved, committed, and available bytes by host, CUDA-device, or unified-memory domain.
 
 Example:
 
