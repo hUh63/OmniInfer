@@ -335,6 +335,7 @@ impl RustRuntimeManager {
             mmproj_path.as_deref(),
             plan.ctx_size.unwrap_or(DEFAULT_LOAD_CONTEXT_SIZE),
             budget_cuda_devices.as_deref(),
+            cuda_selection.is_none() && budget_cuda_devices.is_some(),
         )?;
         let reservation_id = self.reserve_runtime_resources(
             &requested_model_key,
@@ -1039,6 +1040,7 @@ fn build_runtime_resource_budget(
     mmproj: Option<&str>,
     ctx_size: u32,
     cuda_visible_devices: Option<&str>,
+    replicate_across_domains: bool,
 ) -> Result<ResourceBudget> {
     let domains = if cfg!(target_os = "macos")
         || backend
@@ -1074,10 +1076,11 @@ fn build_runtime_resource_budget(
                 "model artifact size is unknown; provide a non-zero resource_budget_bytes value"
             )
         })?;
-        return Ok(ResourceBudget::from_components(distribute_component(
+        return Ok(ResourceBudget::from_components(assign_component(
             "client_provided_total",
             total,
             &domains,
+            replicate_across_domains,
         )?)?);
     };
     let weights = weights.max(1);
@@ -1107,27 +1110,42 @@ fn build_runtime_resource_budget(
         ("framework_overhead", framework),
         ("allocator_slack", allocator_slack),
     ] {
-        components.extend(distribute_component(name, bytes, &domains)?);
+        components.extend(assign_component(
+            name,
+            bytes,
+            &domains,
+            replicate_across_domains,
+        )?);
     }
     if projector > 0 {
-        components.extend(distribute_component("mmproj", projector, &domains)?);
+        components.extend(assign_component(
+            "mmproj",
+            projector,
+            &domains,
+            replicate_across_domains,
+        )?);
     }
     let estimated = ResourceBudget::from_components(components)?;
     if let Some(explicit_total) = explicit_total {
-        let estimated_total = estimated
-            .domains()
-            .values()
-            .try_fold(0_u64, |total, bytes| total.checked_add(*bytes))
-            .ok_or_else(|| anyhow::anyhow!("resource budget overflow"))?;
-        if explicit_total < estimated_total {
+        let estimated_minimum = if replicate_across_domains {
+            estimated.domains().values().copied().max().unwrap_or(0)
+        } else {
+            estimated
+                .domains()
+                .values()
+                .try_fold(0_u64, |total, bytes| total.checked_add(*bytes))
+                .ok_or_else(|| anyhow::anyhow!("resource budget overflow"))?
+        };
+        if explicit_total < estimated_minimum {
             anyhow::bail!(
-                "resource_budget_bytes is below the estimated minimum of {estimated_total} bytes"
+                "resource_budget_bytes is below the estimated minimum of {estimated_minimum} bytes"
             );
         }
-        return Ok(ResourceBudget::from_components(distribute_component(
+        return Ok(ResourceBudget::from_components(assign_component(
             "client_provided_total",
             explicit_total,
             &domains,
+            replicate_across_domains,
         )?)?);
     }
     Ok(estimated)
@@ -1169,6 +1187,28 @@ fn checked_scaled(value: u64, numerator: u64, denominator: u64) -> Result<u64> {
         .checked_mul(numerator)
         .and_then(|scaled| scaled.checked_div(denominator))
         .ok_or_else(|| anyhow::anyhow!("resource budget overflow"))
+}
+
+fn assign_component(
+    name: &str,
+    bytes: u64,
+    domains: &[MemoryDomain],
+    replicate_across_domains: bool,
+) -> Result<Vec<BudgetComponent>> {
+    if replicate_across_domains {
+        if domains.is_empty() || bytes == 0 {
+            anyhow::bail!("resource component requires non-zero bytes and at least one domain");
+        }
+        return Ok(domains
+            .iter()
+            .map(|domain| BudgetComponent {
+                name: name.to_string(),
+                domain: domain.clone(),
+                bytes,
+            })
+            .collect());
+    }
+    distribute_component(name, bytes, domains)
 }
 
 fn distribute_component(
@@ -1527,6 +1567,19 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_multi_gpu_mapping_reserves_full_budget_per_device() {
+        let domains = vec![
+            MemoryDomain::Cuda("0".to_string()),
+            MemoryDomain::Cuda("1".to_string()),
+        ];
+        let components = assign_component("weights", 101, &domains, true).unwrap();
+        let budget = ResourceBudget::from_components(components).unwrap();
+
+        assert_eq!(budget.domains()[&MemoryDomain::Cuda("0".to_string())], 101);
+        assert_eq!(budget.domains()[&MemoryDomain::Cuda("1".to_string())], 101);
+    }
+
+    #[test]
     fn explicit_budget_cannot_understate_local_estimate() {
         let root = std::env::temp_dir().join(format!(
             "omniinfer-resource-budget-{}-{:?}",
@@ -1555,6 +1608,7 @@ mod tests {
             None,
             512,
             None,
+            false,
         );
 
         assert!(result.is_err());
