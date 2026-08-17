@@ -1270,6 +1270,12 @@ fn detect_available_resources(
     Ok(domains)
 }
 
+#[cfg(test)]
+fn detect_cuda_device_ids() -> Result<Vec<String>> {
+    Ok(vec!["0".to_string()])
+}
+
+#[cfg(not(test))]
 fn detect_cuda_device_ids() -> Result<Vec<String>> {
     let output = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=index", "--format=csv,noheader,nounits"])
@@ -1284,6 +1290,20 @@ fn detect_cuda_device_ids() -> Result<Vec<String>> {
     Ok(devices)
 }
 
+#[cfg(test)]
+fn cuda_available_bytes(visible_devices: &str) -> Result<BTreeMap<MemoryDomain, u64>> {
+    const TEST_CUDA_CAPACITY: u64 = 1024 * GIB;
+    let requested = parse_cuda_devices(visible_devices);
+    if requested.is_empty() {
+        anyhow::bail!("CUDA device selection is empty");
+    }
+    Ok(requested
+        .into_iter()
+        .map(|device| (MemoryDomain::Cuda(device), TEST_CUDA_CAPACITY))
+        .collect())
+}
+
+#[cfg(not(test))]
 fn cuda_available_bytes(visible_devices: &str) -> Result<BTreeMap<MemoryDomain, u64>> {
     let requested = parse_cuda_devices(visible_devices);
     if requested.is_empty() {
