@@ -31,6 +31,7 @@ pub struct RuntimeProcess {
     child: Child,
     log_handle: File,
     stop_command: Option<Vec<String>>,
+    stopped: bool,
     info: RuntimeProcessInfo,
 }
 
@@ -158,6 +159,7 @@ impl RuntimeProcess {
             child,
             log_handle,
             stop_command: plan.stop_command.clone(),
+            stopped: false,
             info,
         })
     }
@@ -171,9 +173,15 @@ impl RuntimeProcess {
     }
 
     pub fn stop(&mut self, grace: Duration) -> Result<(), RuntimeProcessError> {
-        terminate_runtime(&mut self.child, self.stop_command.as_deref(), grace)?;
+        if self.stopped {
+            return Ok(());
+        }
+        let result = terminate_runtime(&mut self.child, self.stop_command.as_deref(), grace);
+        if self.child.try_wait().ok().flatten().is_some() {
+            self.stopped = true;
+        }
         self.log_handle.sync_all().ok();
-        Ok(())
+        result
     }
 }
 
@@ -309,7 +317,7 @@ fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), RuntimeProc
             child.kill()?;
         }
         let _ = child.wait();
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -559,6 +567,52 @@ mod tests {
             .parse::<u32>()
             .unwrap();
         assert!(process_exited(child_pid, Duration::from_secs(3)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_stop_does_not_run_stop_hook_again_on_drop() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let root = temp_root("runtime-process-idempotent-stop");
+        let server = write_test_server(&root, port);
+        let hook = root.join("count-stop.sh");
+        let count = root.join("stop-count");
+        fs::write(&hook, "#!/usr/bin/env bash\nprintf 'x' >> \"$1\"\n").unwrap();
+        make_executable(&hook);
+        let plan = ExternalRuntimePlan {
+            command: test_script_command(&server),
+            stop_command: Some(vec![
+                "bash".to_string(),
+                hook.display().to_string(),
+                count.display().to_string(),
+            ]),
+            cwd: root.clone(),
+            port,
+            ctx_size: None,
+            log_file_name: "runtime.log".to_string(),
+            proxy_model_ref: None,
+            protocol: crate::runtime_plan::ExternalServerProtocol::LlamaCppServer,
+            client_endpoint: format!("http://127.0.0.1:{port}"),
+            readiness_probe: RuntimeReadinessProbe::HttpHealth,
+        };
+        let mut process = RuntimeProcess::start(
+            &plan,
+            RuntimeProcessOptions {
+                log_path: root.join("runtime.log"),
+                env: Vec::new(),
+                startup_timeout: Duration::from_secs(5),
+                health_host: "127.0.0.1".to_string(),
+            },
+        )
+        .unwrap();
+
+        process.stop(Duration::from_secs(2)).unwrap();
+        drop(process);
+
+        assert_eq!(fs::read_to_string(count).unwrap(), "x");
         fs::remove_dir_all(root).ok();
     }
 
