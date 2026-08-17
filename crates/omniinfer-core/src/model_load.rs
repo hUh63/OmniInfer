@@ -16,6 +16,7 @@ pub struct ModelLoadRequest {
     pub backend_port: Option<u16>,
     pub config: Option<String>,
     pub backend_extra_args: Vec<String>,
+    pub request_defaults: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,14 +152,18 @@ pub fn build_model_load_payload(
             ),
         );
     }
-    if let Some(profile) = profile {
-        let chat_args = parse_backend_chat_extra_args(family, &profile.infer_extra_args)?;
-        if !chat_args.request_overrides.is_empty() {
-            payload.insert(
-                "request_defaults".to_string(),
-                Value::Object(chat_args.request_overrides),
-            );
-        }
+    let request_defaults = if let Some(explicit_defaults) = request.request_defaults.as_ref() {
+        explicit_defaults.clone()
+    } else if let Some(profile) = profile {
+        parse_backend_chat_extra_args(family, &profile.infer_extra_args)?.request_overrides
+    } else {
+        Map::new()
+    };
+    if !request_defaults.is_empty() || request.request_defaults.is_some() {
+        payload.insert(
+            "request_defaults".to_string(),
+            Value::Object(request_defaults),
+        );
     }
 
     Ok(ModelLoadPlan {
@@ -434,6 +439,52 @@ mod tests {
             plan.payload["request_defaults"]["temperature"],
             serde_json::json!(0.2)
         );
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn explicit_request_defaults_replace_profile_defaults_for_restore() {
+        let cwd = temp_dir("request-defaults");
+        let model = cwd.join("model.gguf");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(&model, "").unwrap();
+        let profile = BackendProfile {
+            path: cwd.join("profile.json"),
+            backend_id: None,
+            family: Some("llama.cpp".to_string()),
+            load_extra_args: Vec::new(),
+            infer_extra_args: vec![
+                "--temp".to_string(),
+                "0.2".to_string(),
+                "--top-p".to_string(),
+                "0.9".to_string(),
+            ],
+        };
+        let request = ModelLoadRequest {
+            model: model.display().to_string(),
+            request_defaults: Some(
+                serde_json::from_value(serde_json::json!({
+                    "temperature": 0.7,
+                    "max_tokens": 64
+                }))
+                .unwrap(),
+            ),
+            ..ModelLoadRequest::default()
+        };
+
+        let plan = build_model_load_payload(
+            &request,
+            &[backend("llama.cpp-linux-cuda", "llama.cpp", true)],
+            None,
+            Some("llama.cpp-linux-cuda"),
+            Some(&profile),
+            &cwd,
+        )
+        .unwrap();
+
+        assert_eq!(plan.payload["request_defaults"]["temperature"], 0.7);
+        assert_eq!(plan.payload["request_defaults"]["max_tokens"], 64);
+        assert!(plan.payload["request_defaults"].get("top_p").is_none());
         std::fs::remove_dir_all(cwd).ok();
     }
 

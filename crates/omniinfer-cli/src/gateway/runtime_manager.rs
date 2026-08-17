@@ -266,6 +266,13 @@ impl RustRuntimeManager {
                 ctx_size,
                 &effective_launch_args,
             ) {
+                local_state::save_selected_backend(&backend.id)?;
+                local_state::save_selected_model(
+                    &resolved_model.model_path,
+                    mmproj_path.as_deref(),
+                    ctx_size,
+                    &requested_request_defaults,
+                )?;
                 let loaded_key = self.promote_loaded_model_key(
                     &loaded_key,
                     &requested_model_key,
@@ -278,12 +285,6 @@ impl RustRuntimeManager {
                 loaded.request_defaults = requested_request_defaults.clone();
                 let response = model_load_response(loaded, true);
                 self.default_model_key = Some(loaded_key);
-                local_state::save_selected_backend(&backend.id)?;
-                local_state::save_selected_model(
-                    &resolved_model.model_path,
-                    mmproj_path.as_deref(),
-                    ctx_size,
-                )?;
                 return Ok(LoadModelOutcome::Success(response));
             }
             let requested = RequestedRuntimeConfig {
@@ -363,6 +364,7 @@ impl RustRuntimeManager {
                 &resolved_model.model_path,
                 mmproj_path.as_deref(),
                 plan.ctx_size,
+                &requested_request_defaults,
             )?;
             let generation = manager.take_generation()?;
             let allocation_id = manager
@@ -901,12 +903,14 @@ fn annotate_restore_state(
             && loaded.model == selected.model
             && loaded.mmproj == selected.mmproj
             && loaded.ctx_size == selected.ctx_size
+            && loaded.request_defaults == selected.request_defaults
     });
     payload["restore_selection"] = json!({
         "backend": persistent_state.selected_backend,
         "model": selected.model,
         "mmproj": selected.mmproj,
         "ctx_size": selected.ctx_size,
+        "request_defaults": selected.request_defaults,
     });
     payload["restore_status"] = json!(if completed { "loaded" } else { "pending" });
     payload["restore_completed"] = json!(completed);

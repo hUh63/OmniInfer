@@ -389,6 +389,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 mmproj: args.mmproj.clone(),
                 ctx_size: args.ctx_size,
                 backend_port: args.backend_port,
+                request_defaults: None,
                 restored: false,
             })
             .or_else(|| restore_model.clone())
@@ -403,6 +404,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 backend_port: model.backend_port,
                 config: None,
                 backend_extra_args: Vec::new(),
+                request_defaults: model.request_defaults,
             };
             let (response, plan) = load_model_with_request_for_config_and_autostart(
                 &request,
@@ -549,6 +551,7 @@ struct ServeModelRequest {
     mmproj: Option<String>,
     ctx_size: Option<u32>,
     backend_port: Option<u16>,
+    request_defaults: Option<serde_json::Map<String, serde_json::Value>>,
     restored: bool,
 }
 
@@ -592,6 +595,7 @@ fn resolve_serve_restore_model(args: &ServeArgs) -> Option<ServeModelRequest> {
         mmproj: selected.mmproj,
         ctx_size: selected.ctx_size,
         backend_port: args.backend_port,
+        request_defaults: Some(selected.request_defaults),
         restored: true,
     })
 }

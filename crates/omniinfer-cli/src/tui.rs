@@ -213,6 +213,7 @@ fn load_remembered_model(
         backend_port: None,
         config: None,
         backend_extra_args: Vec::new(),
+        request_defaults: Some(model.request_defaults.clone()),
     };
     if let Some(backend) = reuse_loaded_remembered_model(config, model) {
         notice("Reusing already loaded model", NoticeKind::Success);
@@ -252,7 +253,7 @@ fn reuse_loaded_remembered_model(
         return None;
     }
     let backend = json_str(&state, "backend")?.to_string();
-    if state_matches_model(&state, &model.model) {
+    if state_matches_remembered_model(&state, model) {
         return Some(backend);
     }
     for row in state
@@ -261,11 +262,21 @@ fn reuse_loaded_remembered_model(
         .into_iter()
         .flatten()
     {
-        if state_matches_model(row, &model.model) {
+        if state_matches_remembered_model(row, model) {
             return Some(backend);
         }
     }
     None
+}
+
+fn state_matches_remembered_model(state: &Value, model: &local_state::SelectedModel) -> bool {
+    state_matches_model(state, &model.model)
+        && state
+            .get("request_defaults")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+            == model.request_defaults
 }
 
 fn get_running_state(config: &config::AppConfig) -> Option<Value> {
@@ -618,6 +629,7 @@ fn load_model_interactive(config: &config::AppConfig, model: &str) -> Result<Str
         backend_port: None,
         config: None,
         backend_extra_args: Vec::new(),
+        request_defaults: None,
     };
     let (response, plan) = load_model_with_request_for_config(&request, false, config)?;
     if plan.auto_selected {
@@ -991,6 +1003,31 @@ mod backend_model_tests {
         assert!(!model_supported_by_backend(
             Path::new("weights.safetensors"),
             Some(&backend)
+        ));
+    }
+
+    #[test]
+    fn remembered_model_reuse_requires_matching_request_defaults() {
+        let model = local_state::SelectedModel {
+            model: "/models/model.gguf".to_string(),
+            mmproj: None,
+            ctx_size: Some(4096),
+            request_defaults: serde_json::from_value(serde_json::json!({"max_tokens": 64}))
+                .unwrap(),
+        };
+        assert!(state_matches_remembered_model(
+            &serde_json::json!({
+                "model_path": "/models/model.gguf",
+                "request_defaults": {"max_tokens": 64}
+            }),
+            &model,
+        ));
+        assert!(!state_matches_remembered_model(
+            &serde_json::json!({
+                "model_path": "/models/model.gguf",
+                "request_defaults": {"max_tokens": 128}
+            }),
+            &model,
         ));
     }
 }

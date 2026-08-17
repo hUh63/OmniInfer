@@ -486,6 +486,7 @@ fn serve_detach_restores_last_model_when_model_is_omitted() {
         "selected_model": model.display().to_string(),
         "selected_mmproj": mmproj.display().to_string(),
         "selected_ctx_size": 4096,
+        "selected_request_defaults": {"max_tokens": 64, "temperature": 0.2},
     });
     fs::write(
         state_root.join(".local").join("config").join("state.json"),
@@ -518,6 +519,8 @@ fn serve_detach_restores_last_model_when_model_is_omitted() {
     assert_eq!(body["model"], model.display().to_string());
     assert_eq!(body["mmproj"], mmproj.display().to_string());
     assert_eq!(body["ctx_size"], 4096);
+    assert_eq!(body["request_defaults"]["max_tokens"], 64);
+    assert_eq!(body["request_defaults"]["temperature"], 0.2);
     let request = gateway.request();
     assert!(request.starts_with("GET /health?deep=true HTTP/1.1"));
     gateway.join();

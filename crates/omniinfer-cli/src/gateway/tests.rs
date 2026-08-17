@@ -598,6 +598,11 @@ async fn runtime_request_defaults_merge_without_restarting_backend() {
     let state = gateway_state(port).await;
     assert_eq!(state["request_defaults"]["max_tokens"], 64);
     assert_eq!(state["loaded_models"][0]["request_defaults"]["top_p"], 0.9);
+    assert_eq!(
+        state["restore_selection"]["request_defaults"]["max_tokens"],
+        64
+    );
+    assert_eq!(state["restore_status"], "loaded");
 
     let merged = tokio::task::spawn_blocking(move || {
         ureq::post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
