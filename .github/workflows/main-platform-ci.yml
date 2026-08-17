@@ -1,6 +1,7 @@
 name: Main Platform CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -10,12 +11,16 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   main-platform-check:
     name: Main Platform Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 8
+    # Keep the normal target below three minutes while allowing one minute
+    # for transient hosted-runner and cache variance.
+    timeout-minutes: 4
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +36,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
-      - name: Run core unit tests
-        run: cargo test -p omniinfer-core
-
-      - name: Run CLI binary unit tests
-        run: cargo test -p omniinfer-cli --bin omniinfer
+      - name: Run platform unit tests
+        run: cargo test --locked --workspace --lib --bins

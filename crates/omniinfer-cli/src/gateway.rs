@@ -84,6 +84,12 @@ pub fn run_gateway_blocking(config: GatewayConfig) -> Result<()> {
 }
 
 pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
+    let addr: SocketAddr = format!("{}:{}", config.listen_host, config.listen_port).parse()?;
+    let listener = TcpListener::bind(addr).await?;
+    run_gateway_with_listener(config, listener).await
+}
+
+async fn run_gateway_with_listener(config: GatewayConfig, listener: TcpListener) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let state = GatewayState {
         backend_host: "127.0.0.1".to_string(),
@@ -101,8 +107,6 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     let app = axum::Router::new()
         .fallback(proxy_request)
         .with_state(state);
-    let addr: SocketAddr = format!("{}:{}", config.listen_host, config.listen_port).parse()?;
-    let listener = TcpListener::bind(addr).await?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

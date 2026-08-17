@@ -1835,26 +1835,37 @@ async fn spawn_test_gateway_with_runtime_options(
 ) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
     let (tx, rx) = oneshot::channel();
     let stopped = Arc::new(AtomicBool::new(false));
     let stopped_for_task = Arc::clone(&stopped);
     tokio::spawn(async move {
         tokio::select! {
-            result = run_gateway(GatewayConfig {
+            result = run_gateway_with_listener(GatewayConfig {
                 listen_host: "127.0.0.1".to_string(),
                 listen_port: port,
                 runtime_startup_timeout,
                 access_policy,
                 public_model_root,
-            }) => {
+            }, listener) => {
                 let _ = result;
             }
             _ = rx => {}
         }
         stopped_for_task.store(true, Ordering::SeqCst);
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("test gateway must become ready");
     TestServer {
         port,
         stop: Some(tx),
@@ -2065,11 +2076,11 @@ fn install_fake_llama_server(root: &std::path::Path, backend_id: &str) {
         .join("bin")
         .join(launcher_name);
     std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
-        install_fake_llama_server_windows(&launcher);
+        install_fake_llama_server_native(&launcher);
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let script = r#"#!/usr/bin/env bash
 port=""
@@ -2081,7 +2092,7 @@ while [ "$#" -gt 0 ]; do
 done
 delay_file="$(dirname "$0")/startup-delay-ms"
 delay_ms="$(cat "$delay_file" 2>/dev/null || printf 0)"
-python3 - "$port" "$delay_ms" <<'PY'
+exec python3 - "$port" "$delay_ms" <<'PY'
 import json
 import sys
 import time
@@ -2187,7 +2198,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 printf 'vla-server: bound to %s. ready.\n' "$bind"
-python3 - "$bind" <<'PY'
+exec python3 - "$bind" <<'PY'
 import socket
 import sys
 
@@ -2230,7 +2241,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-python3 - "$port" <<'PY'
+exec python3 - "$port" <<'PY'
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -2293,8 +2304,8 @@ PY
     }
 }
 
-#[cfg(windows)]
-fn install_fake_llama_server_windows(launcher: &std::path::Path) {
+#[cfg(any(windows, target_os = "macos"))]
+fn install_fake_llama_server_native(launcher: &std::path::Path) {
     let source = launcher.with_file_name("fake-llama-server.rs");
     let code = r##"
 use std::io::{BufRead, BufReader, Read, Write};
@@ -2429,8 +2440,11 @@ fn write_response(stream: &mut TcpStream, body: &str, content_type: &str) {
         .arg("-o")
         .arg(launcher)
         .status()
-        .expect("compile fake llama-server.exe");
-    assert!(status.success(), "failed to compile fake llama-server.exe");
+        .expect("compile native fake llama-server");
+    assert!(
+        status.success(),
+        "failed to compile native fake llama-server"
+    );
 }
 
 struct EnvGuard {

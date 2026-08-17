@@ -29,7 +29,6 @@ pub struct RuntimeProcessInfo {
 #[derive(Debug)]
 pub struct RuntimeProcess {
     child: Child,
-    log_handle: File,
     stop_command: Option<Vec<String>>,
     stopped: bool,
     info: RuntimeProcessInfo,
@@ -96,12 +95,6 @@ impl RuntimeProcess {
             .metadata()
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let stdout = log_handle
-            .try_clone()
-            .map_err(|source| RuntimeProcessError::CloneLog {
-                path: options.log_path.display().to_string(),
-                source,
-            })?;
         let stderr = log_handle
             .try_clone()
             .map_err(|source| RuntimeProcessError::CloneLog {
@@ -113,7 +106,7 @@ impl RuntimeProcess {
             .args(plan.command.iter().skip(1))
             .current_dir(&plan.cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
+            .stdout(Stdio::from(log_handle))
             .stderr(Stdio::from(stderr));
         for (key, value) in &options.env {
             command.env(key, value);
@@ -157,7 +150,6 @@ impl RuntimeProcess {
         };
         Ok(Self {
             child,
-            log_handle,
             stop_command: plan.stop_command.clone(),
             stopped: false,
             info,
@@ -180,7 +172,8 @@ impl RuntimeProcess {
         if self.child.try_wait().ok().flatten().is_some() {
             self.stopped = true;
         }
-        self.log_handle.sync_all().ok();
+        // The child owns the cloned log descriptors, which close when it exits.
+        // Diagnostic logs do not require a blocking durability fsync on every stop.
         result
     }
 }
@@ -264,7 +257,7 @@ fn appended_log_contains(path: &Path, cursor: &mut u64, tail: &mut Vec<u8>, mark
 }
 
 fn health_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
-    let Ok(mut stream) = TcpStream::connect((host, port)) else {
+    let Some(mut stream) = connect_endpoint(host, port, timeout) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(timeout));
@@ -287,15 +280,19 @@ fn health_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
 }
 
 fn tcp_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
+    connect_endpoint(host, port, timeout).is_some()
+}
+
+fn connect_endpoint(host: &str, port: u16, timeout: Duration) -> Option<TcpStream> {
     let Ok(addrs) = (host, port).to_socket_addrs() else {
-        return false;
+        return None;
     };
     for addr in addrs {
-        if TcpStream::connect_timeout(&addr, timeout).is_ok() {
-            return true;
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
+            return Some(stream);
         }
     }
-    false
+    None
 }
 
 fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), RuntimeProcessError> {
@@ -396,21 +393,37 @@ fn run_stop_hook(command: &[String], timeout: Duration) -> Result<(), RuntimePro
 
 #[cfg(unix)]
 fn signal_process_group(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
-        .args([signal, "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let signal = match signal {
+        "-TERM" => libc::SIGTERM,
+        "-KILL" => libc::SIGKILL,
+        _ => return,
+    };
+    let Some(process_group) = process_group_id(pid) else {
+        return;
+    };
+    // SAFETY: kill(2) does not dereference pointers. A negative PID targets
+    // the process group created for this child by isolate_process_tree().
+    unsafe {
+        libc::kill(-process_group, signal);
+    }
 }
 
 #[cfg(unix)]
 fn process_group_exists(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let Some(process_group) = process_group_id(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks for the process group's existence and
+    // permissions; it does not deliver a signal or dereference pointers.
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn process_group_id(pid: u32) -> Option<libc::pid_t> {
+    libc::pid_t::try_from(pid).ok().filter(|pid| *pid > 0)
 }
 
 #[cfg(windows)]
@@ -598,6 +611,7 @@ mod tests {
             client_endpoint: format!("http://127.0.0.1:{port}"),
             readiness_probe: RuntimeReadinessProbe::HttpHealth,
         };
+        let start_started = Instant::now();
         let mut process = RuntimeProcess::start(
             &plan,
             RuntimeProcessOptions {
@@ -608,11 +622,26 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(
+            start_started.elapsed() < Duration::from_secs(10),
+            "runtime start must honor the readiness timeout"
+        );
 
+        let stop_started = Instant::now();
         process.stop(Duration::from_secs(2)).unwrap();
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(10),
+            "runtime stop must not block on diagnostic log durability"
+        );
         drop(process);
 
         assert_eq!(fs::read_to_string(count).unwrap(), "x");
+        assert!(
+            fs::read_to_string(root.join("runtime.log"))
+                .unwrap()
+                .contains("fixture ready"),
+            "runtime logs must remain readable after normal handle close"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -768,9 +797,13 @@ mod tests {
 
     fn write_test_server(root: &Path, port: u16) -> PathBuf {
         fs::create_dir_all(root).unwrap();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
-            let executable = root.join("server.exe");
+            let executable = root.join(if cfg!(windows) {
+                "server.exe"
+            } else {
+                "server"
+            });
             compile_test_exe(
                 root,
                 "server.rs",
@@ -782,6 +815,8 @@ use std::net::{{TcpListener, TcpStream}};
 
 fn main() {{
     let listener = TcpListener::bind("127.0.0.1:{port}").unwrap();
+    println!("fixture ready");
+    std::io::stdout().flush().unwrap();
     for stream in listener.incoming().flatten() {{
         handle(stream);
     }}
@@ -815,14 +850,14 @@ fn handle(mut stream: TcpStream) {{
             );
             return executable;
         }
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         {
             let script = root.join("server.sh");
             fs::write(
                 &script,
                 format!(
                     r#"#!/usr/bin/env bash
-python3 - <<'PY'
+exec python3 - <<'PY'
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -837,6 +872,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+print("fixture ready", flush=True)
 HTTPServer(("127.0.0.1", {port}), Handler).serve_forever()
 PY
 "#
@@ -890,7 +926,7 @@ fn main() {
         #[cfg(not(windows))]
         {
             let script = root.join("sleep.sh");
-            fs::write(&script, "#!/usr/bin/env bash\nsleep 30\n").unwrap();
+            fs::write(&script, "#!/usr/bin/env bash\nexec sleep 30\n").unwrap();
             make_executable(&script);
             script
         }
@@ -926,7 +962,7 @@ fn main() {
             let script = root.join("stop-hook.sh");
             fs::write(
                 &script,
-                "#!/usr/bin/env bash\ncase \"$1\" in success) exit 0;; failure) echo 'injected stop failure' >&2; exit 9;; timeout) sleep 30;; *) exit 2;; esac\n",
+                "#!/usr/bin/env bash\ncase \"$1\" in success) exit 0;; failure) echo 'injected stop failure' >&2; exit 9;; timeout) exec sleep 30;; *) exit 2;; esac\n",
             )
             .unwrap();
             make_executable(&script);
@@ -934,7 +970,7 @@ fn main() {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn compile_test_exe(root: &Path, source_name: &str, executable: &Path, code: &str) {
         let source = root.join(source_name);
         fs::write(&source, code).unwrap();
@@ -944,8 +980,8 @@ fn main() {
             .arg("-o")
             .arg(executable)
             .status()
-            .expect("compile Windows test process");
-        assert!(status.success(), "failed to compile Windows test process");
+            .expect("compile native test process");
+        assert!(status.success(), "failed to compile native test process");
     }
 
     fn temp_root(name: &str) -> PathBuf {
@@ -964,12 +1000,12 @@ fn main() {
         fs::set_permissions(path, permissions).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn test_script_command(path: &Path) -> Vec<String> {
         vec!["bash".to_string(), path.display().to_string()]
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn test_script_command(path: &Path) -> Vec<String> {
         vec![path.display().to_string()]
     }
