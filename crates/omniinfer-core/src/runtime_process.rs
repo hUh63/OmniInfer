@@ -257,7 +257,7 @@ fn appended_log_contains(path: &Path, cursor: &mut u64, tail: &mut Vec<u8>, mark
 }
 
 fn health_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
-    let Ok(mut stream) = TcpStream::connect((host, port)) else {
+    let Some(mut stream) = connect_endpoint(host, port, timeout) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(timeout));
@@ -280,15 +280,19 @@ fn health_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
 }
 
 fn tcp_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
+    connect_endpoint(host, port, timeout).is_some()
+}
+
+fn connect_endpoint(host: &str, port: u16, timeout: Duration) -> Option<TcpStream> {
     let Ok(addrs) = (host, port).to_socket_addrs() else {
-        return false;
+        return None;
     };
     for addr in addrs {
-        if TcpStream::connect_timeout(&addr, timeout).is_ok() {
-            return true;
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
+            return Some(stream);
         }
     }
-    false
+    None
 }
 
 fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), RuntimeProcessError> {
@@ -620,7 +624,7 @@ mod tests {
         .unwrap();
         assert!(
             start_started.elapsed() < Duration::from_secs(10),
-            "runtime start must not block on a redundant diagnostic log handle"
+            "runtime start must honor the readiness timeout"
         );
 
         let stop_started = Instant::now();

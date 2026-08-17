@@ -39,11 +39,5 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
-      - name: Verify runtime lifecycle latency
-        if: matrix.os == 'macos-15'
-        run: >-
-          cargo test --locked -p omniinfer-core
-          runtime_process::tests::explicit_stop_does_not_run_stop_hook_again_on_drop
-
       - name: Run platform unit tests
         run: cargo test --locked --workspace --lib --bins
