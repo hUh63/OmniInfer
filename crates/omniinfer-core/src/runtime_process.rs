@@ -797,9 +797,13 @@ mod tests {
 
     fn write_test_server(root: &Path, port: u16) -> PathBuf {
         fs::create_dir_all(root).unwrap();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
-            let executable = root.join("server.exe");
+            let executable = root.join(if cfg!(windows) {
+                "server.exe"
+            } else {
+                "server"
+            });
             compile_test_exe(
                 root,
                 "server.rs",
@@ -844,7 +848,7 @@ fn handle(mut stream: TcpStream) {{
             );
             return executable;
         }
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         {
             let script = root.join("server.sh");
             fs::write(
@@ -964,7 +968,7 @@ fn main() {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn compile_test_exe(root: &Path, source_name: &str, executable: &Path, code: &str) {
         let source = root.join(source_name);
         fs::write(&source, code).unwrap();
@@ -974,8 +978,8 @@ fn main() {
             .arg("-o")
             .arg(executable)
             .status()
-            .expect("compile Windows test process");
-        assert!(status.success(), "failed to compile Windows test process");
+            .expect("compile native test process");
+        assert!(status.success(), "failed to compile native test process");
     }
 
     fn temp_root(name: &str) -> PathBuf {

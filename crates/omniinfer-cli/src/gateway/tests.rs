@@ -2076,11 +2076,11 @@ fn install_fake_llama_server(root: &std::path::Path, backend_id: &str) {
         .join("bin")
         .join(launcher_name);
     std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
-        install_fake_llama_server_windows(&launcher);
+        install_fake_llama_server_native(&launcher);
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let script = r#"#!/usr/bin/env bash
 port=""
@@ -2304,8 +2304,8 @@ PY
     }
 }
 
-#[cfg(windows)]
-fn install_fake_llama_server_windows(launcher: &std::path::Path) {
+#[cfg(any(windows, target_os = "macos"))]
+fn install_fake_llama_server_native(launcher: &std::path::Path) {
     let source = launcher.with_file_name("fake-llama-server.rs");
     let code = r##"
 use std::io::{BufRead, BufReader, Read, Write};
@@ -2440,8 +2440,11 @@ fn write_response(stream: &mut TcpStream, body: &str, content_type: &str) {
         .arg("-o")
         .arg(launcher)
         .status()
-        .expect("compile fake llama-server.exe");
-    assert!(status.success(), "failed to compile fake llama-server.exe");
+        .expect("compile native fake llama-server");
+    assert!(
+        status.success(),
+        "failed to compile native fake llama-server"
+    );
 }
 
 struct EnvGuard {
