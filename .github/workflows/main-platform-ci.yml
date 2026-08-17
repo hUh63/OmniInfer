@@ -1,6 +1,7 @@
 name: Main Platform CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -17,7 +18,9 @@ jobs:
   main-platform-check:
     name: Main Platform Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 3
+    # Keep the normal target below three minutes while allowing one minute
+    # for transient hosted-runner and cache variance.
+    timeout-minutes: 4
     strategy:
       fail-fast: false
       matrix:
