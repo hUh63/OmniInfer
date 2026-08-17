@@ -815,6 +815,8 @@ use std::net::{{TcpListener, TcpStream}};
 
 fn main() {{
     let listener = TcpListener::bind("127.0.0.1:{port}").unwrap();
+    println!("fixture ready");
+    std::io::stdout().flush().unwrap();
     for stream in listener.incoming().flatten() {{
         handle(stream);
     }}
