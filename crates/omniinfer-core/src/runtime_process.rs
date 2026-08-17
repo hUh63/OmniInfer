@@ -29,7 +29,6 @@ pub struct RuntimeProcessInfo {
 #[derive(Debug)]
 pub struct RuntimeProcess {
     child: Child,
-    log_handle: File,
     stop_command: Option<Vec<String>>,
     stopped: bool,
     info: RuntimeProcessInfo,
@@ -157,7 +156,6 @@ impl RuntimeProcess {
         };
         Ok(Self {
             child,
-            log_handle,
             stop_command: plan.stop_command.clone(),
             stopped: false,
             info,
@@ -180,7 +178,8 @@ impl RuntimeProcess {
         if self.child.try_wait().ok().flatten().is_some() {
             self.stopped = true;
         }
-        self.log_handle.sync_all().ok();
+        // The child owns the cloned log descriptors, which close when it exits.
+        // Diagnostic logs do not require a blocking durability fsync on every stop.
         result
     }
 }
@@ -609,10 +608,21 @@ mod tests {
         )
         .unwrap();
 
+        let stop_started = Instant::now();
         process.stop(Duration::from_secs(2)).unwrap();
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(10),
+            "runtime stop must not block on diagnostic log durability"
+        );
         drop(process);
 
         assert_eq!(fs::read_to_string(count).unwrap(), "x");
+        assert!(
+            fs::read_to_string(root.join("runtime.log"))
+                .unwrap()
+                .contains("fixture ready"),
+            "runtime logs must remain readable after normal handle close"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -837,6 +847,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+print("fixture ready", flush=True)
 HTTPServer(("127.0.0.1", {port}), Handler).serve_forever()
 PY
 "#
