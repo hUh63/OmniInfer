@@ -998,12 +998,12 @@ fn main() {
         fs::set_permissions(path, permissions).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn test_script_command(path: &Path) -> Vec<String> {
         vec!["bash".to_string(), path.display().to_string()]
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn test_script_command(path: &Path) -> Vec<String> {
         vec![path.display().to_string()]
     }
