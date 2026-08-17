@@ -395,21 +395,37 @@ fn run_stop_hook(command: &[String], timeout: Duration) -> Result<(), RuntimePro
 
 #[cfg(unix)]
 fn signal_process_group(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
-        .args([signal, "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let signal = match signal {
+        "-TERM" => libc::SIGTERM,
+        "-KILL" => libc::SIGKILL,
+        _ => return,
+    };
+    let Some(process_group) = process_group_id(pid) else {
+        return;
+    };
+    // SAFETY: kill(2) does not dereference pointers. A negative PID targets
+    // the process group created for this child by isolate_process_tree().
+    unsafe {
+        libc::kill(-process_group, signal);
+    }
 }
 
 #[cfg(unix)]
 fn process_group_exists(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let Some(process_group) = process_group_id(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks for the process group's existence and
+    // permissions; it does not deliver a signal or dereference pointers.
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn process_group_id(pid: u32) -> Option<libc::pid_t> {
+    libc::pid_t::try_from(pid).ok().filter(|pid| *pid > 0)
 }
 
 #[cfg(windows)]

@@ -958,6 +958,7 @@ dependencies = [
 name = "omniinfer-core"
 version = "0.3.22"
 dependencies = [
+ "libc",
  "rand",
  "serde",
  "serde_json",
