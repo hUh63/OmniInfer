@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,10 @@ use omniinfer_core::backend_registry::{self, BackendRegistry, BackendScope};
 use omniinfer_core::local_state;
 use omniinfer_core::model_artifacts::{discover_llama_cpp_model_artifacts, maybe_auto_mmproj};
 use omniinfer_core::model_load::DEFAULT_LOAD_CONTEXT_SIZE;
+use omniinfer_core::resource_ledger::{
+    AllocationId, BudgetComponent, MemoryDomain, ReservationId, ResourceBudget, ResourceCapacity,
+    ResourceLedger,
+};
 use omniinfer_core::runtime_plan::{
     ExternalRuntimeRequest, ExternalServerProtocol, build_external_runtime_plan,
 };
@@ -20,11 +25,26 @@ const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(3
 const WSL_ROCM_COLD_START_INITIAL_ATTEMPT: Duration = Duration::from_secs(120);
 const WSL_ROCM_COLD_START_RETRY_COOLDOWN: Duration = Duration::from_secs(90);
 
-#[derive(Default)]
 pub(super) struct RustRuntimeManager {
     selected_backend: Option<String>,
     loaded: BTreeMap<String, LoadedRustRuntime>,
     default_model_key: Option<String>,
+    resource_ledger: Option<ResourceLedger>,
+    next_capacity_snapshot: u64,
+    next_generation: u64,
+}
+
+impl Default for RustRuntimeManager {
+    fn default() -> Self {
+        Self {
+            selected_backend: None,
+            loaded: BTreeMap::new(),
+            default_model_key: None,
+            resource_ledger: None,
+            next_capacity_snapshot: 1,
+            next_generation: 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +54,24 @@ pub(super) struct RuntimeProxyTarget {
     pub(super) protocol: ExternalServerProtocol,
     pub(super) backend_id: String,
     pub(super) model: Option<String>,
+    pub(super) generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeRouteState {
+    Ready,
+    Draining,
+    Failed,
+}
+
+impl RuntimeRouteState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Draining => "draining",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 struct LoadedRustRuntime {
@@ -51,6 +89,10 @@ struct LoadedRustRuntime {
     client_endpoint: String,
     process: RuntimeProcess,
     proxy_model_ref: Option<String>,
+    generation: u64,
+    route_state: RuntimeRouteState,
+    allocation_id: AllocationId,
+    resource_budget: ResourceBudget,
 }
 
 #[derive(Debug, Clone)]
@@ -85,10 +127,31 @@ impl RustRuntimeManager {
     }
 
     pub(super) fn stop_runtime(&mut self) -> Result<Value> {
-        for (_, mut loaded) in std::mem::take(&mut self.loaded) {
-            loaded.process.stop(Duration::from_secs(8))?;
+        let keys = self.loaded.keys().cloned().collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for key in keys {
+            let stop_result = {
+                let loaded = self
+                    .loaded
+                    .get_mut(&key)
+                    .expect("runtime key came from the loaded map");
+                loaded.route_state = RuntimeRouteState::Draining;
+                loaded.process.stop(Duration::from_secs(8))
+            };
+            match stop_result {
+                Ok(()) => self.remove_runtime_and_release(&key),
+                Err(error) => {
+                    if let Some(loaded) = self.loaded.get_mut(&key) {
+                        loaded.route_state = RuntimeRouteState::Failed;
+                    }
+                    failures.push(format!("{key}: {error}"));
+                }
+            }
         }
-        self.default_model_key = None;
+        self.select_fallback_default();
+        if !failures.is_empty() {
+            anyhow::bail!("failed to stop runtimes: {}", failures.join("; "));
+        }
         let selected_model_preserved = local_state::load_state()
             .ok()
             .is_some_and(|state| state.selected_model.is_some());
@@ -101,8 +164,11 @@ impl RustRuntimeManager {
         }))
     }
 
-    pub(super) fn has_loaded_runtime(&self) -> bool {
-        !self.loaded.is_empty()
+    pub(super) fn has_loaded_runtime(&mut self) -> bool {
+        self.reap_exited_runtimes();
+        self.loaded
+            .values()
+            .any(|loaded| loaded.route_state == RuntimeRouteState::Ready)
     }
 
     pub(super) fn load_model(
@@ -112,6 +178,7 @@ impl RustRuntimeManager {
         startup_timeout: Duration,
         owner_admin_id: Option<String>,
     ) -> Result<LoadModelOutcome> {
+        self.reap_exited_runtimes();
         let model = json_required_str(&payload, "model")?.to_string();
         let public_model_id = payload
             .get("public_model_id")
@@ -253,23 +320,54 @@ impl RustRuntimeManager {
             ));
         let (runtime_env, cuda_selection) =
             runtime_env_for_backend(backend, &effective_launch_args);
-        let process = start_runtime_with_cold_start_policy(
-            &backend.id,
-            &plan,
-            RuntimeProcessOptions {
-                log_path,
-                env: runtime_env,
-                startup_timeout,
-                health_host: backend_host.clone(),
-            },
-        )?;
-        self.selected_backend = Some(backend.id.clone());
-        local_state::save_selected_backend(&backend.id)?;
-        local_state::save_selected_model(
+        let budget_cuda_devices = if backend.capabilities.iter().any(|value| value == "cuda") {
+            match cuda_selection.as_ref() {
+                Some(selection) => Some(selection.visible_devices.clone()),
+                None => Some(detect_cuda_device_ids()?.join(",")),
+            }
+        } else {
+            None
+        };
+        let resource_budget = build_runtime_resource_budget(
+            &payload,
+            backend,
             &resolved_model.model_path,
             mmproj_path.as_deref(),
-            plan.ctx_size,
+            plan.ctx_size.unwrap_or(DEFAULT_LOAD_CONTEXT_SIZE),
+            budget_cuda_devices.as_deref(),
         )?;
+        let reservation_id = self.reserve_runtime_resources(
+            &requested_model_key,
+            &resource_budget,
+            budget_cuda_devices.as_deref(),
+        )?;
+        let transaction = self.with_reservation(reservation_id, |manager| {
+            let process = start_runtime_with_cold_start_policy(
+                &backend.id,
+                &plan,
+                RuntimeProcessOptions {
+                    log_path,
+                    env: runtime_env,
+                    startup_timeout,
+                    health_host: backend_host.clone(),
+                },
+            )?;
+            local_state::save_selected_backend(&backend.id)?;
+            local_state::save_selected_model(
+                &resolved_model.model_path,
+                mmproj_path.as_deref(),
+                plan.ctx_size,
+            )?;
+            let generation = manager.take_generation()?;
+            let allocation_id = manager
+                .resource_ledger
+                .as_mut()
+                .expect("reservation requires a resource ledger")
+                .commit(reservation_id)?;
+            Ok((process, generation, allocation_id))
+        })?;
+        let (process, generation, allocation_id) = transaction;
+        self.selected_backend = Some(backend.id.clone());
         self.loaded.insert(
             requested_model_key.clone(),
             LoadedRustRuntime {
@@ -291,6 +389,10 @@ impl RustRuntimeManager {
                 client_endpoint: plan.client_endpoint.clone(),
                 proxy_model_ref: plan.proxy_model_ref.clone(),
                 process,
+                generation,
+                route_state: RuntimeRouteState::Ready,
+                allocation_id,
+                resource_budget: resource_budget.clone(),
             },
         );
         self.default_model_key = Some(requested_model_key.clone());
@@ -320,18 +422,32 @@ impl RustRuntimeManager {
                 "model '{model_key}' is owned by admin '{owner}' and cannot be unloaded by admin '{admin_id}'"
             );
         }
-        let Some(mut loaded) = self.loaded.remove(&model_key) else {
-            anyhow::bail!("model is not loaded: {model}");
+        let (generation, stop_result) = {
+            let loaded = self
+                .loaded
+                .get_mut(&model_key)
+                .expect("resolved runtime key must exist");
+            loaded.route_state = RuntimeRouteState::Draining;
+            (
+                loaded.generation,
+                loaded.process.stop(Duration::from_secs(8)),
+            )
         };
-        loaded.process.stop(Duration::from_secs(8))?;
-        if self.default_model_key.as_deref() == Some(&model_key) {
-            self.default_model_key = self.loaded.keys().next_back().cloned();
+        if let Err(error) = stop_result {
+            if let Some(loaded) = self.loaded.get_mut(&model_key) {
+                loaded.route_state = RuntimeRouteState::Failed;
+            }
+            return Err(error.into());
         }
+        self.remove_runtime_and_release(&model_key);
+        self.select_fallback_default();
         Ok(json!({
             "ok": true,
             "unloaded": true,
             "model": model_key,
             "owner_admin_id": owner,
+            "generation": generation,
+            "resources_released": true,
         }))
     }
 
@@ -352,17 +468,21 @@ impl RustRuntimeManager {
             .ok_or_else(|| anyhow::anyhow!("no installed backend available"))
     }
 
-    pub(super) fn proxy_base_for_model(&self, requested_model: Option<&str>) -> Option<String> {
+    pub(super) fn proxy_base_for_model(&mut self, requested_model: Option<&str>) -> Option<String> {
         self.proxy_target_for_model(requested_model)
             .and_then(|target| target.base_url)
     }
 
     pub(super) fn proxy_target_for_model(
-        &self,
+        &mut self,
         requested_model: Option<&str>,
     ) -> Option<RuntimeProxyTarget> {
+        self.reap_exited_runtimes();
         let key = self.resolve_proxy_model_key(requested_model)?;
         let loaded = self.loaded.get(&key)?;
+        if loaded.route_state != RuntimeRouteState::Ready {
+            return None;
+        }
         Some(RuntimeProxyTarget {
             base_url: loaded
                 .external_server_protocol
@@ -372,6 +492,7 @@ impl RustRuntimeManager {
             protocol: loaded.external_server_protocol,
             backend_id: loaded.backend_id.clone(),
             model: loaded.proxy_model_ref.clone(),
+            generation: loaded.generation,
         })
     }
 
@@ -441,16 +562,19 @@ impl RustRuntimeManager {
         requested_key.to_string()
     }
 
-    pub(super) fn loaded_models_payload(&self) -> Value {
+    pub(super) fn loaded_models_payload(&mut self) -> Value {
+        self.reap_exited_runtimes();
         json!({
             "object": "list",
             "data": self.loaded.values().map(loaded_runtime_payload).collect::<Vec<_>>(),
         })
     }
 
-    pub(super) fn loaded_runtime_summaries(&self) -> Vec<LoadedRuntimeSummary> {
+    pub(super) fn loaded_runtime_summaries(&mut self) -> Vec<LoadedRuntimeSummary> {
+        self.reap_exited_runtimes();
         self.loaded
             .values()
+            .filter(|loaded| loaded.route_state == RuntimeRouteState::Ready)
             .map(|loaded| LoadedRuntimeSummary {
                 id: loaded.model_key.clone(),
                 owner_admin_id: loaded.owner_admin_id.clone(),
@@ -459,7 +583,8 @@ impl RustRuntimeManager {
             .collect()
     }
 
-    pub(super) fn snapshot(&self) -> Value {
+    pub(super) fn snapshot(&mut self) -> Value {
+        self.reap_exited_runtimes();
         let persistent_state = local_state::load_state().unwrap_or_default();
         let selected_backend = self
             .selected_backend
@@ -490,6 +615,10 @@ impl RustRuntimeManager {
                     "runtime_mode": "external_server",
                     "backend_pid": info.pid,
                     "backend_port": info.port,
+                    "generation": loaded.generation,
+                    "route_state": loaded.route_state.as_str(),
+                    "allocation_id": loaded.allocation_id.get(),
+                    "resource_budget": resource_budget_payload(&loaded.resource_budget),
                     "launch_args": loaded.launch_args,
                     "cuda_visible_devices": loaded.cuda_visible_devices,
                     "warning": loaded.cuda_warning,
@@ -545,7 +674,137 @@ impl RustRuntimeManager {
             }),
         };
         annotate_restore_state(&mut payload, &persistent_state, &self.loaded);
+        payload["resource_ledger"] = self.resource_ledger_payload();
         payload
+    }
+
+    fn with_reservation<T>(
+        &mut self,
+        reservation_id: ReservationId,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let result = operation(self);
+        if result.is_err() {
+            self.resource_ledger
+                .as_mut()
+                .expect("reservation requires a resource ledger")
+                .rollback(reservation_id);
+        }
+        result
+    }
+
+    fn take_generation(&mut self) -> Result<u64> {
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("runtime generation overflow"))?;
+        Ok(generation)
+    }
+
+    fn reserve_runtime_resources(
+        &mut self,
+        request_id: &str,
+        budget: &ResourceBudget,
+        cuda_visible_devices: Option<&str>,
+    ) -> Result<ReservationId> {
+        let observed = detect_available_resources(cuda_visible_devices)?;
+        let current_usage = self
+            .resource_ledger
+            .as_ref()
+            .map(|ledger| ledger.snapshot())
+            .map(|snapshot| {
+                merge_domain_totals(&snapshot.reserved, &snapshot.committed)
+                    .map(|usage| (snapshot, usage))
+            })
+            .transpose()?;
+        let mut capacities = current_usage
+            .as_ref()
+            .map(|(snapshot, _)| snapshot.capacities.clone())
+            .unwrap_or_default();
+        for (domain, available) in observed {
+            let used = current_usage
+                .as_ref()
+                .and_then(|(_, usage)| usage.get(&domain))
+                .copied()
+                .unwrap_or(0);
+            capacities.insert(
+                domain,
+                available
+                    .checked_add(used)
+                    .ok_or_else(|| anyhow::anyhow!("resource capacity overflow"))?,
+            );
+        }
+        let snapshot_id = self.next_capacity_snapshot;
+        self.next_capacity_snapshot = self
+            .next_capacity_snapshot
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("resource capacity snapshot overflow"))?;
+        let capacity = ResourceCapacity::new(snapshot_id, capacities)?;
+        match self.resource_ledger.as_mut() {
+            Some(ledger) => ledger.update_capacity(capacity)?,
+            None => self.resource_ledger = Some(ResourceLedger::new(capacity)),
+        }
+        Ok(self
+            .resource_ledger
+            .as_mut()
+            .expect("resource ledger was initialized")
+            .reserve(request_id, budget.clone())?)
+    }
+
+    fn reap_exited_runtimes(&mut self) {
+        let exited = self
+            .loaded
+            .iter_mut()
+            .filter_map(|(key, loaded)| match loaded.process.has_exited() {
+                Ok(true) => Some(key.clone()),
+                Ok(false) => None,
+                Err(_) => {
+                    loaded.route_state = RuntimeRouteState::Failed;
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for key in exited {
+            self.remove_runtime_and_release(&key);
+        }
+        self.select_fallback_default();
+    }
+
+    fn remove_runtime_and_release(&mut self, key: &str) {
+        if let Some(loaded) = self.loaded.remove(key)
+            && let Some(ledger) = self.resource_ledger.as_mut()
+        {
+            ledger.release(loaded.allocation_id);
+        }
+    }
+
+    fn select_fallback_default(&mut self) {
+        if self.default_model_key.as_ref().is_some_and(|key| {
+            self.loaded
+                .get(key)
+                .is_some_and(|loaded| loaded.route_state == RuntimeRouteState::Ready)
+        }) {
+            return;
+        }
+        self.default_model_key = self.loaded.iter().rev().find_map(|(key, loaded)| {
+            (loaded.route_state == RuntimeRouteState::Ready).then(|| key.clone())
+        });
+    }
+
+    fn resource_ledger_payload(&self) -> Value {
+        let Some(ledger) = self.resource_ledger.as_ref() else {
+            return Value::Null;
+        };
+        let snapshot = ledger.snapshot();
+        let available = snapshot.available().unwrap_or_default();
+        json!({
+            "capacity_snapshot_id": snapshot.capacity_snapshot_id,
+            "capacity_bytes": domain_bytes_payload(&snapshot.capacities),
+            "reserved_bytes": domain_bytes_payload(&snapshot.reserved),
+            "committed_bytes": domain_bytes_payload(&snapshot.committed),
+            "available_bytes": domain_bytes_payload(&available),
+        })
     }
 }
 
@@ -626,10 +885,11 @@ fn annotate_restore_state(
         return;
     };
     let completed = loaded_runtimes.values().any(|loaded| {
-        persistent_state
-            .selected_backend
-            .as_deref()
-            .is_none_or(|backend| loaded.backend_id == backend)
+        loaded.route_state == RuntimeRouteState::Ready
+            && persistent_state
+                .selected_backend
+                .as_deref()
+                .is_none_or(|backend| loaded.backend_id == backend)
             && loaded.model == selected.model
             && loaded.mmproj == selected.mmproj
             && loaded.ctx_size == selected.ctx_size
@@ -674,6 +934,10 @@ fn model_load_response(loaded: &LoadedRustRuntime, already_loaded: bool) -> Valu
         "selected_ctx_size": loaded.ctx_size,
         "backend_pid": info.pid,
         "backend_port": info.port,
+        "generation": loaded.generation,
+        "route_state": loaded.route_state.as_str(),
+        "allocation_id": loaded.allocation_id.get(),
+        "resource_budget": resource_budget_payload(&loaded.resource_budget),
         "launch_command": info.command,
         "log_path": info.log_path.display().to_string(),
         "external_server_protocol": loaded.external_server_protocol.as_str(),
@@ -749,6 +1013,10 @@ fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
         "runtime_mode": "external_server",
         "backend_pid": info.pid,
         "backend_port": info.port,
+        "generation": loaded.generation,
+        "route_state": loaded.route_state.as_str(),
+        "allocation_id": loaded.allocation_id.get(),
+        "resource_budget": resource_budget_payload(&loaded.resource_budget),
         "launch_args": loaded.launch_args,
         "cuda_visible_devices": loaded.cuda_visible_devices,
         "warning": loaded.cuda_warning,
@@ -758,6 +1026,293 @@ fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
         "client_endpoint": loaded.client_endpoint,
         "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
         "backend_log": info.log_path.display().to_string(),
+    })
+}
+
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+fn build_runtime_resource_budget(
+    payload: &Value,
+    backend: &backend_registry::BackendSpec,
+    model: &str,
+    mmproj: Option<&str>,
+    ctx_size: u32,
+    cuda_visible_devices: Option<&str>,
+) -> Result<ResourceBudget> {
+    let domains = if cfg!(target_os = "macos")
+        || backend
+            .capabilities
+            .iter()
+            .any(|value| value == "shared-memory")
+    {
+        vec![MemoryDomain::Unified("system".to_string())]
+    } else if backend.capabilities.iter().any(|value| value == "cuda") {
+        let devices = parse_cuda_devices(cuda_visible_devices.ok_or_else(|| {
+            anyhow::anyhow!("CUDA resource budgeting requires a selected device")
+        })?);
+        if devices.is_empty() {
+            anyhow::bail!("CUDA resource budgeting requires a selected device");
+        }
+        devices.into_iter().map(MemoryDomain::Cuda).collect()
+    } else {
+        vec![MemoryDomain::Host]
+    };
+    let explicit_total = payload
+        .get("resource_budget_bytes")
+        .and_then(Value::as_u64)
+        .filter(|bytes| *bytes > 0);
+    let weights = artifact_size_bytes(&PathBuf::from(model))?;
+    let projector = mmproj
+        .map(|path| artifact_size_bytes(&PathBuf::from(path)))
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let Some(weights) = weights else {
+        let total = explicit_total.ok_or_else(|| {
+            anyhow::anyhow!(
+                "model artifact size is unknown; provide a non-zero resource_budget_bytes value"
+            )
+        })?;
+        return Ok(ResourceBudget::from_components(distribute_component(
+            "client_provided_total",
+            total,
+            &domains,
+        )?)?);
+    };
+    let weights = weights.max(1);
+    let base = weights
+        .checked_add(projector)
+        .ok_or_else(|| anyhow::anyhow!("model artifact size overflow"))?;
+    let parameter_proxy = base.checked_mul(2).unwrap_or(u64::MAX).max(GIB);
+    let ctx = u64::from(ctx_size.max(1));
+    let kv_cache = checked_scaled(parameter_proxy, 3, 100)?
+        .checked_mul(ctx)
+        .and_then(|bytes| bytes.checked_div(u64::from(DEFAULT_LOAD_CONTEXT_SIZE)))
+        .unwrap_or(u64::MAX)
+        .max(256 * MIB);
+    let activation_ctx = ctx.min(u64::from(DEFAULT_LOAD_CONTEXT_SIZE) * 4);
+    let activation = checked_scaled(parameter_proxy, 1, 100)?
+        .checked_mul(activation_ctx)
+        .and_then(|bytes| bytes.checked_div(u64::from(DEFAULT_LOAD_CONTEXT_SIZE)))
+        .unwrap_or(u64::MAX)
+        .max(128 * MIB);
+    let framework = checked_scaled(base, 8, 100)?.max(384 * MIB);
+    let allocator_slack = checked_scaled(base, 4, 100)?.max(160 * MIB);
+    let mut components = Vec::new();
+    for (name, bytes) in [
+        ("weights", weights),
+        ("kv_cache", kv_cache),
+        ("activation", activation),
+        ("framework_overhead", framework),
+        ("allocator_slack", allocator_slack),
+    ] {
+        components.extend(distribute_component(name, bytes, &domains)?);
+    }
+    if projector > 0 {
+        components.extend(distribute_component("mmproj", projector, &domains)?);
+    }
+    let estimated = ResourceBudget::from_components(components)?;
+    if let Some(explicit_total) = explicit_total {
+        let estimated_total = estimated
+            .domains()
+            .values()
+            .try_fold(0_u64, |total, bytes| total.checked_add(*bytes))
+            .ok_or_else(|| anyhow::anyhow!("resource budget overflow"))?;
+        if explicit_total < estimated_total {
+            anyhow::bail!(
+                "resource_budget_bytes is below the estimated minimum of {estimated_total} bytes"
+            );
+        }
+        return Ok(ResourceBudget::from_components(distribute_component(
+            "client_provided_total",
+            explicit_total,
+            &domains,
+        )?)?);
+    }
+    Ok(estimated)
+}
+
+fn artifact_size_bytes(path: &PathBuf) -> Result<Option<u64>> {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(None);
+    };
+    if metadata.is_file() {
+        return Ok(Some(metadata.len()));
+    }
+    if !metadata.is_dir() {
+        return Ok(None);
+    }
+    let mut total = 0_u64;
+    let mut pending = vec![path.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                total = total
+                    .checked_add(entry.metadata()?.len())
+                    .ok_or_else(|| anyhow::anyhow!("model artifact size overflow"))?;
+            }
+        }
+    }
+    Ok((total > 0).then_some(total))
+}
+
+fn checked_scaled(value: u64, numerator: u64, denominator: u64) -> Result<u64> {
+    value
+        .checked_mul(numerator)
+        .and_then(|scaled| scaled.checked_div(denominator))
+        .ok_or_else(|| anyhow::anyhow!("resource budget overflow"))
+}
+
+fn distribute_component(
+    name: &str,
+    bytes: u64,
+    domains: &[MemoryDomain],
+) -> Result<Vec<BudgetComponent>> {
+    let count = u64::try_from(domains.len())?;
+    if count == 0 || bytes == 0 {
+        anyhow::bail!("resource component requires non-zero bytes and at least one domain");
+    }
+    let base = bytes / count;
+    let remainder = bytes % count;
+    domains
+        .iter()
+        .enumerate()
+        .map(|(index, domain)| {
+            let bytes = base + u64::from(u64::try_from(index)? < remainder);
+            Ok(BudgetComponent {
+                name: name.to_string(),
+                domain: domain.clone(),
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn parse_cuda_devices(visible_devices: &str) -> Vec<String> {
+    let mut devices = visible_devices
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    devices.sort();
+    devices.dedup();
+    devices
+}
+
+fn detect_available_resources(
+    cuda_visible_devices: Option<&str>,
+) -> Result<BTreeMap<MemoryDomain, u64>> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    let available_memory = system.available_memory();
+    if available_memory == 0 {
+        anyhow::bail!("available system memory could not be detected");
+    }
+    let mut domains = BTreeMap::from([
+        (MemoryDomain::Host, available_memory),
+        (
+            MemoryDomain::Unified("system".to_string()),
+            available_memory,
+        ),
+    ]);
+    if let Some(devices) = cuda_visible_devices {
+        domains.extend(cuda_available_bytes(devices)?);
+    }
+    Ok(domains)
+}
+
+fn detect_cuda_device_ids() -> Result<Vec<String>> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=index", "--format=csv,noheader,nounits"])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("nvidia-smi device query failed");
+    }
+    let devices = parse_cuda_devices(&String::from_utf8_lossy(&output.stdout).replace('\n', ","));
+    if devices.is_empty() {
+        anyhow::bail!("nvidia-smi did not report any CUDA devices");
+    }
+    Ok(devices)
+}
+
+fn cuda_available_bytes(visible_devices: &str) -> Result<BTreeMap<MemoryDomain, u64>> {
+    let requested = parse_cuda_devices(visible_devices);
+    if requested.is_empty() {
+        anyhow::bail!("CUDA device selection is empty");
+    }
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=index,uuid,memory.free",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("nvidia-smi memory query failed");
+    }
+    let rows = String::from_utf8_lossy(&output.stdout);
+    let mut available = BTreeMap::new();
+    for requested_device in &requested {
+        let memory_mib = rows.lines().find_map(|line| {
+            let parts = line.split(',').map(str::trim).collect::<Vec<_>>();
+            (parts.len() >= 3 && (parts[0] == *requested_device || parts[1] == *requested_device))
+                .then(|| parts[2].parse::<u64>().ok())
+                .flatten()
+        });
+        let memory_mib = memory_mib.ok_or_else(|| {
+            anyhow::anyhow!(
+                "selected CUDA device was not reported by nvidia-smi: {requested_device}"
+            )
+        })?;
+        available.insert(
+            MemoryDomain::Cuda(requested_device.clone()),
+            memory_mib
+                .checked_mul(MIB)
+                .ok_or_else(|| anyhow::anyhow!("CUDA capacity overflow"))?,
+        );
+    }
+    Ok(available)
+}
+
+fn merge_domain_totals(
+    left: &BTreeMap<MemoryDomain, u64>,
+    right: &BTreeMap<MemoryDomain, u64>,
+) -> Result<BTreeMap<MemoryDomain, u64>> {
+    let mut merged = left.clone();
+    for (domain, bytes) in right {
+        let total = merged.entry(domain.clone()).or_insert(0);
+        *total = total
+            .checked_add(*bytes)
+            .ok_or_else(|| anyhow::anyhow!("resource usage overflow"))?;
+    }
+    Ok(merged)
+}
+
+fn domain_bytes_payload(domains: &BTreeMap<MemoryDomain, u64>) -> Value {
+    Value::Object(
+        domains
+            .iter()
+            .map(|(domain, bytes)| (domain.key(), json!(bytes)))
+            .collect(),
+    )
+}
+
+fn resource_budget_payload(budget: &ResourceBudget) -> Value {
+    json!({
+        "domains_bytes": domain_bytes_payload(budget.domains()),
+        "components": budget.components().iter().map(|component| json!({
+            "name": component.name,
+            "domain": component.domain.key(),
+            "bytes": component.bytes,
+        })).collect::<Vec<_>>(),
     })
 }
 

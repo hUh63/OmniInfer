@@ -153,6 +153,10 @@ impl RuntimeProcess {
         &self.info
     }
 
+    pub fn has_exited(&mut self) -> Result<bool, RuntimeProcessError> {
+        Ok(self.child.try_wait()?.is_some())
+    }
+
     pub fn stop(&mut self, grace: Duration) -> Result<(), RuntimeProcessError> {
         terminate_runtime(&mut self.child, self.stop_command.as_deref(), grace)?;
         self.log_handle.sync_all().ok();
