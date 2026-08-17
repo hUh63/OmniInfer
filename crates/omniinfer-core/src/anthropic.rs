@@ -130,6 +130,7 @@ pub fn anthropic_request_to_openai(body: &Value) -> Value {
 
     copy_field(body, &mut output, "max_tokens", "max_tokens");
     copy_field(body, &mut output, "stop_sequences", "stop");
+    copy_field(body, &mut output, "request_defaults", "request_defaults");
     for field in ["temperature", "top_p", "top_k", "stream"] {
         copy_field(body, &mut output, field, field);
     }
@@ -549,10 +550,12 @@ mod tests {
         let request = anthropic_request_to_openai(&json!({
             "model": "test-model",
             "max_tokens": 100,
+            "request_defaults": {"temperature": 0.2},
             "messages": [{"role": "user", "content": "hello"}],
         }));
         assert_eq!(request["model"], "test-model");
         assert_eq!(request["max_tokens"], 100);
+        assert_eq!(request["request_defaults"]["temperature"], 0.2);
         assert_eq!(
             request["messages"][0],
             json!({"role": "user", "content": "hello"})

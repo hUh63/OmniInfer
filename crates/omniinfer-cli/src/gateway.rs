@@ -25,7 +25,7 @@ use omniinfer_core::gateway_auth::{
 };
 use omniinfer_core::model_catalog;
 use omniinfer_core::public_models;
-use omniinfer_core::request_normalization::normalize_chat_request;
+use omniinfer_core::request_normalization::normalize_chat_request_with_defaults;
 use omniinfer_core::{local_state, paths};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -486,6 +486,15 @@ async fn try_handle_rust_endpoint(
         (&Method::POST, "/omni/model/select" | "/omni/model/load") => {
             let body = request.into_body().collect().await?.to_bytes();
             let mut payload: Value = serde_json::from_slice(&body)?;
+            if payload
+                .get("request_defaults")
+                .is_some_and(|defaults| !defaults.is_object())
+            {
+                return Ok(Some(json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": {"message": "request_defaults must be an object"}}),
+                )));
+            }
             if let Err(error) = normalize_public_model_select(&mut payload, state, auth.remote) {
                 return Ok(Some(json_response(
                     public_model_error_status(&error),
@@ -556,9 +565,7 @@ async fn try_handle_rust_endpoint(
         (&Method::POST, "/v1/chat/completions") => {
             let body = request.into_body().collect().await?.to_bytes();
             let raw_payload: Value = serde_json::from_slice(&body)?;
-            let mut normalized_payload = normalize_chat_request(raw_payload.clone(), false)?;
-            let requested_model = normalized_payload
-                .payload
+            let requested_model = raw_payload
                 .get("model")
                 .and_then(Value::as_str)
                 .map(str::to_string);
@@ -579,6 +586,19 @@ async fn try_handle_rust_endpoint(
                     },
                     json!({"error": {"message": message}}),
                 )));
+            };
+            let mut normalized_payload = match normalize_chat_request_with_defaults(
+                raw_payload.clone(),
+                &target.request_defaults,
+                false,
+            ) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return Ok(Some(json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({"error": {"message": error.to_string()}}),
+                    )));
+                }
             };
             let Some(base_url) = target.base_url.as_deref() else {
                 return Ok(Some(backend_protocol_not_supported(
@@ -698,7 +718,6 @@ async fn try_handle_rust_endpoint(
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let openai_payload = anthropic_request_to_openai(&payload);
-            let mut normalized = normalize_chat_request(openai_payload, false)?;
             let mut target = {
                 let mut runtime = state.runtime.lock().await;
                 runtime.proxy_target_for_model(response_model.as_deref())
@@ -711,6 +730,19 @@ async fn try_handle_rust_endpoint(
                     StatusCode::SERVICE_UNAVAILABLE,
                     json!({"error": {"message": "no model is loaded"}}),
                 )));
+            };
+            let mut normalized = match normalize_chat_request_with_defaults(
+                openai_payload,
+                &target.request_defaults,
+                false,
+            ) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return Ok(Some(json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({"error": {"message": error.to_string()}}),
+                    )));
+                }
             };
             let Some(base_url) = target.base_url.as_deref() else {
                 return Ok(Some(backend_protocol_not_supported(
