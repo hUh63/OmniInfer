@@ -117,9 +117,10 @@ impl RuntimeProcess {
         for (key, value) in &options.env {
             command.env(key, value);
         }
+        isolate_process_tree(&mut command);
         hide_child_window(&mut command);
         let mut child = command.spawn()?;
-        if !wait_runtime_ready(
+        let readiness = wait_runtime_ready(
             &options.health_host,
             plan.port,
             &plan.readiness_probe,
@@ -127,13 +128,25 @@ impl RuntimeProcess {
             &mut child,
             &options.log_path,
             log_start_offset,
-        )? {
-            let _ = terminate_runtime(
-                &mut child,
-                plan.stop_command.as_deref(),
-                Duration::from_secs(2),
-            );
-            return Err(RuntimeProcessError::ReadyTimeout);
+        );
+        match readiness {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = terminate_runtime(
+                    &mut child,
+                    plan.stop_command.as_deref(),
+                    Duration::from_secs(2),
+                );
+                return Err(RuntimeProcessError::ReadyTimeout);
+            }
+            Err(error) => {
+                let _ = terminate_runtime(
+                    &mut child,
+                    plan.stop_command.as_deref(),
+                    Duration::from_secs(2),
+                );
+                return Err(error);
+            }
         }
         let info = RuntimeProcessInfo {
             pid: child.id(),
@@ -278,20 +291,44 @@ fn tcp_endpoint_ready(host: &str, port: u16, timeout: Duration) -> bool {
 }
 
 fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), RuntimeProcessError> {
-    if child.try_wait()?.is_some() {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        let _ = child.try_wait()?;
+        signal_process_group(pid, "-TERM");
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            let child_exited = child.try_wait()?.is_some();
+            if child_exited && !process_group_exists(pid) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        signal_process_group(pid, "-KILL");
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
+        let _ = child.wait();
         return Ok(());
     }
-    terminate_process(child.id());
-    let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
+
+    #[cfg(not(unix))]
+    {
         if child.try_wait()?.is_some() {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(50));
+        terminate_process(child.id());
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        child.kill()?;
+        let _ = child.wait();
+        Ok(())
     }
-    child.kill()?;
-    let _ = child.wait();
-    Ok(())
 }
 
 fn terminate_runtime(
@@ -299,9 +336,6 @@ fn terminate_runtime(
     stop_command: Option<&[String]>,
     grace: Duration,
 ) -> Result<(), RuntimeProcessError> {
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
     let hook_result = stop_command
         .map(|command| run_stop_hook(command, grace.min(Duration::from_secs(5))))
         .transpose();
@@ -353,12 +387,22 @@ fn run_stop_hook(command: &[String], timeout: Duration) -> Result<(), RuntimePro
 }
 
 #[cfg(unix)]
-fn terminate_process(pid: u32) {
+fn signal_process_group(pid: u32, signal: &str) {
     let _ = Command::new("kill")
-        .arg(pid.to_string())
+        .args([signal, "--", &format!("-{pid}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(unix)]
+fn process_group_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(windows)]
@@ -380,6 +424,18 @@ fn hide_child_window(command: &mut Command) {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
+fn isolate_process_tree(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
     {
         let _ = command;
     }
@@ -456,6 +512,53 @@ mod tests {
         let pid = process.info().pid;
         drop(process);
         assert!(process_exited(pid, Duration::from_secs(3)));
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_exit_reaps_process_group_descendants() {
+        let root = temp_root("runtime-process-group-early-exit");
+        fs::create_dir_all(&root).unwrap();
+        let script = root.join("spawn-child-and-exit.sh");
+        fs::write(
+            &script,
+            "#!/usr/bin/env bash\nsleep 30 &\necho $! > child.pid\nexit 7\n",
+        )
+        .unwrap();
+        make_executable(&script);
+        let plan = ExternalRuntimePlan {
+            command: test_script_command(&script),
+            stop_command: None,
+            cwd: root.clone(),
+            port: 9,
+            ctx_size: None,
+            log_file_name: "runtime.log".to_string(),
+            proxy_model_ref: None,
+            protocol: crate::runtime_plan::ExternalServerProtocol::LlamaCppServer,
+            client_endpoint: "http://127.0.0.1:9".to_string(),
+            readiness_probe: RuntimeReadinessProbe::HttpHealth,
+        };
+
+        let error = RuntimeProcess::start(
+            &plan,
+            RuntimeProcessOptions {
+                log_path: root.join("runtime.log"),
+                env: Vec::new(),
+                startup_timeout: Duration::from_secs(2),
+                health_host: "127.0.0.1".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RuntimeProcessError::EarlyExit));
+        let child_pid = fs::read_to_string(root.join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(process_exited(child_pid, Duration::from_secs(3)));
         fs::remove_dir_all(root).ok();
     }
 

@@ -446,7 +446,7 @@ impl RustRuntimeManager {
             "unloaded": true,
             "model": model_key,
             "owner_admin_id": owner,
-            "generation": generation,
+            "invalidated_generation": generation,
             "resources_released": true,
         }))
     }
@@ -1453,6 +1453,10 @@ pub(super) fn pick_runtime_port(host: &str) -> Result<u16> {
 mod tests {
     use super::*;
 
+    fn test_budget(bytes: u64) -> ResourceBudget {
+        ResourceBudget::from_domains(BTreeMap::from([(MemoryDomain::Host, bytes)])).unwrap()
+    }
+
     #[test]
     fn detects_llama_context_args() {
         assert!(launch_args_have_ctx_size(
@@ -1479,6 +1483,82 @@ mod tests {
             "vllm",
             &["--gpu-memory-utilization".to_string(), "0.9".to_string()]
         ));
+    }
+
+    #[test]
+    fn failed_load_transaction_rolls_back_reservation() {
+        let mut manager = RustRuntimeManager::default();
+        manager.resource_ledger = Some(ResourceLedger::new(
+            ResourceCapacity::new(1, BTreeMap::from([(MemoryDomain::Host, 1024)])).unwrap(),
+        ));
+        let reservation = manager
+            .resource_ledger
+            .as_mut()
+            .unwrap()
+            .reserve("failed-load", test_budget(768))
+            .unwrap();
+
+        let result: Result<()> = manager.with_reservation(reservation, |_| {
+            Err(anyhow::anyhow!("simulated readiness timeout"))
+        });
+
+        assert!(result.is_err());
+        let snapshot = manager.resource_ledger.as_ref().unwrap().snapshot();
+        assert!(snapshot.reserved.is_empty());
+        assert!(snapshot.committed.is_empty());
+    }
+
+    #[test]
+    fn multi_gpu_components_are_split_into_non_overlapping_domains() {
+        let domains = vec![
+            MemoryDomain::Cuda("0".to_string()),
+            MemoryDomain::Cuda("1".to_string()),
+        ];
+        let components = distribute_component("weights", 101, &domains).unwrap();
+        let budget = ResourceBudget::from_components(components).unwrap();
+
+        assert_eq!(budget.domains()[&MemoryDomain::Cuda("0".to_string())], 51);
+        assert_eq!(budget.domains()[&MemoryDomain::Cuda("1".to_string())], 50);
+        assert!(
+            !budget
+                .domains()
+                .contains_key(&MemoryDomain::Cuda("0,1".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_budget_cannot_understate_local_estimate() {
+        let root = std::env::temp_dir().join(format!(
+            "omniinfer-resource-budget-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let model = root.join("model.gguf");
+        fs::write(&model, vec![0_u8; 1024]).unwrap();
+        let backend_id = if cfg!(target_os = "linux") {
+            "llama.cpp-linux"
+        } else if cfg!(target_os = "macos") {
+            "llama.cpp-mac-intel"
+        } else {
+            "llama.cpp-cpu"
+        };
+        let registry = BackendRegistry::load_current();
+        let backend = registry
+            .get(backend_id)
+            .expect("test platform should expose a CPU external backend");
+
+        let result = build_runtime_resource_budget(
+            &json!({"resource_budget_bytes": 1024}),
+            backend,
+            model.to_str().unwrap(),
+            None,
+            512,
+            None,
+        );
+
+        assert!(result.is_err());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
