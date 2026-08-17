@@ -1854,7 +1854,19 @@ async fn spawn_test_gateway_with_runtime_options(
         }
         stopped_for_task.store(true, Ordering::SeqCst);
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("test gateway must become ready");
     TestServer {
         port,
         stop: Some(tx),
