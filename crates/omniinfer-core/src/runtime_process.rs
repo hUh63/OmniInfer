@@ -851,7 +851,7 @@ fn handle(mut stream: TcpStream) {{
                 &script,
                 format!(
                     r#"#!/usr/bin/env bash
-python3 - <<'PY'
+exec python3 - <<'PY'
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -920,7 +920,7 @@ fn main() {
         #[cfg(not(windows))]
         {
             let script = root.join("sleep.sh");
-            fs::write(&script, "#!/usr/bin/env bash\nsleep 30\n").unwrap();
+            fs::write(&script, "#!/usr/bin/env bash\nexec sleep 30\n").unwrap();
             make_executable(&script);
             script
         }
@@ -956,7 +956,7 @@ fn main() {
             let script = root.join("stop-hook.sh");
             fs::write(
                 &script,
-                "#!/usr/bin/env bash\ncase \"$1\" in success) exit 0;; failure) echo 'injected stop failure' >&2; exit 9;; timeout) sleep 30;; *) exit 2;; esac\n",
+                "#!/usr/bin/env bash\ncase \"$1\" in success) exit 0;; failure) echo 'injected stop failure' >&2; exit 9;; timeout) exec sleep 30;; *) exit 2;; esac\n",
             )
             .unwrap();
             make_executable(&script);

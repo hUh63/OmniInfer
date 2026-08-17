@@ -2092,7 +2092,7 @@ while [ "$#" -gt 0 ]; do
 done
 delay_file="$(dirname "$0")/startup-delay-ms"
 delay_ms="$(cat "$delay_file" 2>/dev/null || printf 0)"
-python3 - "$port" "$delay_ms" <<'PY'
+exec python3 - "$port" "$delay_ms" <<'PY'
 import json
 import sys
 import time
@@ -2198,7 +2198,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 printf 'vla-server: bound to %s. ready.\n' "$bind"
-python3 - "$bind" <<'PY'
+exec python3 - "$bind" <<'PY'
 import socket
 import sys
 
@@ -2241,7 +2241,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-python3 - "$port" <<'PY'
+exec python3 - "$port" <<'PY'
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
