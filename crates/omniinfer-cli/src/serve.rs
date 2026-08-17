@@ -3,6 +3,10 @@ use std::fs::OpenOptions;
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -533,9 +537,11 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         return Ok(());
     }
     if !args.detach {
+        let ctrl_c_handler = install_foreground_ctrl_c_handler(public_config.port);
         println!("Press Ctrl+C to stop.");
         let status =
             wait_for_foreground_service(rust_gateway, cloudflared_child, public_config.port)?;
+        drop(ctrl_c_handler);
         if !status.success() {
             anyhow::bail!("OmniInfer service exited with status {status}");
         }
@@ -608,6 +614,53 @@ fn wait_for_foreground_service(
     }
     let _ = serve_state::remove_serve_pid_info(port);
     Ok(status)
+}
+
+struct ForegroundCtrlCHandler {
+    stopped: Arc<AtomicBool>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for ForegroundCtrlCHandler {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn install_foreground_ctrl_c_handler(port: u16) -> ForegroundCtrlCHandler {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stopped_for_task = Arc::clone(&stopped);
+    let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+    let thread = thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async move {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    if result.is_ok() && !stopped_for_task.swap(true, Ordering::SeqCst) {
+                        let _ = stop_serve(port);
+                    }
+                }
+                _ = cancel_rx => {}
+            }
+        });
+    });
+    ForegroundCtrlCHandler {
+        stopped,
+        cancel: Some(cancel),
+        thread: Some(thread),
+    }
 }
 
 fn reject_embedded_serve_backend(args: &ServeArgs) -> Result<()> {
@@ -897,8 +950,17 @@ fn start_rust_gateway_child(
     hide_child_window(&mut command);
     if args.detach {
         detach_child_process(&mut command);
+    } else {
+        #[cfg(unix)]
+        isolate_child_process_group(&mut command);
     }
     Ok(command.spawn()?)
+}
+
+#[cfg(unix)]
+fn isolate_child_process_group(command: &mut ProcessCommand) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
 }
 
 pub(crate) fn detach_child_process(command: &mut ProcessCommand) {

@@ -22,7 +22,7 @@ if [ "$is_android" -eq 1 ]; then
     exit 1
 fi
 
-rust_cli="$SCRIPT_DIR/target/debug/omniinfer-rs"
+rust_cli="$SCRIPT_DIR/target/debug/omniinfer"
 
 if [ -x "$rust_cli" ]; then
     exec "$rust_cli" "$@"

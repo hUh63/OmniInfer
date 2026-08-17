@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use omniinfer_core::{
-    chat_stream, config, http_client, local_state, model_load, paths, serve_state,
+    backend_profiles, chat_stream, config, http_client, local_state, model_load, paths, serve_state,
 };
 use serde_json::Value;
 
@@ -108,6 +108,11 @@ impl TuiGatewayGuard {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let child = command.spawn()?;
         let guard = Self {
             port: config.port,
@@ -172,7 +177,7 @@ pub fn run_server(args: &ServeArgs) -> Result<()> {
     print_header("OmniInfer Server", "Interactive gateway launcher");
     let config = config::load_app_config().unwrap_or_default();
     let backend =
-        choose_backend(&config)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
+        choose_backend(&config, false)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
     let model =
         choose_model(&config, true)?.ok_or_else(|| anyhow::anyhow!("No model selected."))?;
     let mut args = args.clone();
@@ -182,7 +187,7 @@ pub fn run_server(args: &ServeArgs) -> Result<()> {
 }
 
 fn setup_model_flow(config: &config::AppConfig) -> Result<String> {
-    choose_backend(config)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
+    choose_backend(config, true)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
     loop {
         let model =
             choose_model(config, false)?.ok_or_else(|| anyhow::anyhow!("No model selected."))?;
@@ -290,13 +295,20 @@ fn model_reference_matches(left: &str, right: &str) -> bool {
     left_path.exists() && right_path.exists() && same_path(left_path, right_path)
 }
 
-fn choose_backend(config: &config::AppConfig) -> Result<Option<String>> {
+fn choose_backend(
+    config: &config::AppConfig,
+    select_through_gateway: bool,
+) -> Result<Option<String>> {
     loop {
-        let payload = get_local_json_for_config(
-            "/omni/backends?scope=compatible",
-            Duration::from_secs(10),
-            config,
-        )?;
+        let payload = if select_through_gateway {
+            get_local_json_for_config(
+                "/omni/backends?scope=compatible",
+                Duration::from_secs(10),
+                config,
+            )?
+        } else {
+            rust_backend_payload(BackendScope::Compatible)
+        };
         let rows = payload
             .get("data")
             .and_then(Value::as_array)
@@ -365,7 +377,12 @@ fn choose_backend(config: &config::AppConfig) -> Result<Option<String>> {
             }
             continue;
         }
-        select_backend_for_config(&backend, config)?;
+        if select_through_gateway {
+            select_backend_for_config(&backend, config)?;
+        } else {
+            local_state::save_selected_backend(&backend)?;
+            backend_profiles::ensure_backend_profile_template(&rows[index])?;
+        }
         notice(&format!("Selected backend: {backend}"), NoticeKind::Success);
         println!();
         return Ok(Some(backend));
@@ -657,7 +674,7 @@ fn chat_loop(config: &config::AppConfig, backend: String) -> Result<()> {
         match message {
             "/exit" => return Ok(()),
             "/backend" => {
-                if let Some(backend) = choose_backend(config)? {
+                if let Some(backend) = choose_backend(config, true)? {
                     session.messages.clear();
                     if let Some(model) = choose_model(config, true)? {
                         load_model_for_chat(
