@@ -4,11 +4,12 @@ pub(super) fn start_runtime_with_cold_start_policy(
     backend_id: &str,
     plan: &omniinfer_core::runtime_plan::ExternalRuntimePlan,
     options: RuntimeProcessOptions,
+    startup_cancelled: &AtomicBool,
 ) -> Result<RuntimeProcess, RuntimeProcessError> {
     let Some(initial_timeout) =
         wsl_rocm_cold_start_retry_timeout(backend_id, options.startup_timeout)
     else {
-        return RuntimeProcess::start(plan, options);
+        return RuntimeProcess::start_cancellable(plan, options, startup_cancelled);
     };
 
     let total_timeout = options.startup_timeout;
@@ -16,10 +17,11 @@ pub(super) fn start_runtime_with_cold_start_policy(
         total_timeout,
         initial_timeout,
         WSL_ROCM_COLD_START_RETRY_COOLDOWN,
+        startup_cancelled,
         |attempt_timeout| {
             let mut attempt_options = options.clone();
             attempt_options.startup_timeout = attempt_timeout;
-            RuntimeProcess::start(plan, attempt_options)
+            RuntimeProcess::start_cancellable(plan, attempt_options, startup_cancelled)
         },
     )
 }
@@ -36,6 +38,7 @@ pub(super) fn retry_after_ready_timeout<T>(
     total_timeout: Duration,
     initial_timeout: Duration,
     cooldown: Duration,
+    startup_cancelled: &AtomicBool,
     mut attempt: impl FnMut(Duration) -> Result<T, RuntimeProcessError>,
 ) -> Result<T, RuntimeProcessError> {
     let started = Instant::now();
@@ -50,7 +53,13 @@ pub(super) fn retry_after_ready_timeout<T>(
                 initial_timeout.as_secs(),
                 cooldown.as_secs()
             );
-            std::thread::sleep(cooldown);
+            let cooldown_deadline = Instant::now() + cooldown;
+            while Instant::now() < cooldown_deadline {
+                if startup_cancelled.load(Ordering::SeqCst) {
+                    return Err(RuntimeProcessError::Interrupted);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
             let remaining = total_timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return Err(RuntimeProcessError::ReadyTimeout);

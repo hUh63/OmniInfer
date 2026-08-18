@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -73,6 +76,7 @@ struct GatewayState {
     request_history_dir: PathBuf,
     client: Client<HttpConnector, Full<HyperBytes>>,
     shutdown: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
+    startup_cancelled: Arc<AtomicBool>,
     runtime: Arc<tokio::sync::Mutex<RustRuntimeManager>>,
 }
 
@@ -102,6 +106,7 @@ async fn run_gateway_with_listener(config: GatewayConfig, listener: TcpListener)
         request_history_dir: paths::local_dir().join("request_history"),
         client: Client::builder(TokioExecutor::new()).build_http(),
         shutdown: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
+        startup_cancelled: Arc::new(AtomicBool::new(false)),
         runtime: Arc::new(tokio::sync::Mutex::new(RustRuntimeManager::default())),
     };
     let app = axum::Router::new()

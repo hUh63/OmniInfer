@@ -215,10 +215,12 @@ fn wsl_rocm_cold_start_retry_requires_a_safe_total_budget() {
 fn ready_timeout_retries_once_with_the_remaining_budget() {
     let total_timeout = Duration::from_secs(300);
     let mut attempts = Vec::new();
+    let cancelled = AtomicBool::new(false);
     let result = retry_after_ready_timeout(
         total_timeout,
         Duration::from_secs(120),
         Duration::ZERO,
+        &cancelled,
         |timeout| {
             attempts.push(timeout);
             if attempts.len() == 1 {
@@ -240,10 +242,12 @@ fn ready_timeout_retries_once_with_the_remaining_budget() {
 #[test]
 fn cold_start_retry_does_not_mask_early_exit() {
     let mut attempts = 0;
+    let cancelled = AtomicBool::new(false);
     let error = retry_after_ready_timeout(
         Duration::from_secs(300),
         Duration::from_secs(120),
         Duration::ZERO,
+        &cancelled,
         |_| {
             attempts += 1;
             Err::<(), _>(RuntimeProcessError::EarlyExit)
@@ -258,10 +262,12 @@ fn cold_start_retry_does_not_mask_early_exit() {
 #[test]
 fn ready_timeout_does_not_retry_without_post_cooldown_budget() {
     let mut attempts = 0;
+    let cancelled = AtomicBool::new(false);
     let error = retry_after_ready_timeout(
         Duration::from_millis(1),
         Duration::ZERO,
         Duration::from_millis(1),
+        &cancelled,
         |_| {
             attempts += 1;
             Err::<(), _>(RuntimeProcessError::ReadyTimeout)

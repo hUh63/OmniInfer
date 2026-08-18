@@ -2,10 +2,6 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -17,6 +13,7 @@ use serde_json::Value;
 mod models;
 mod render;
 
+use crate::serve::{ForegroundCtrlCHandler, install_foreground_ctrl_c_handler, stop_process};
 use crate::{
     BackendScope, ServeArgs, advisor, backend_installer, get_local_json_for_config, json_bool,
     json_str, json_u64, load_model_with_request_for_config, post_local_json_for_config,
@@ -81,7 +78,7 @@ struct TuiGatewayGuard {
     port: u16,
     owned: bool,
     child: Option<Child>,
-    stopped: Arc<AtomicBool>,
+    _interrupt: Option<ForegroundCtrlCHandler>,
 }
 
 impl TuiGatewayGuard {
@@ -91,11 +88,12 @@ impl TuiGatewayGuard {
                 port: config.port,
                 owned: false,
                 child: None,
-                stopped: Arc::new(AtomicBool::new(false)),
+                _interrupt: None,
             });
         }
         print_section("Service", "Starting local OmniInfer gateway");
         print_kv("Port", &config.port.to_string());
+        let interrupt = install_foreground_ctrl_c_handler(config.port, true)?;
         let mut command = ProcessCommand::new(std::env::current_exe()?);
         paths::propagate_cli_roots(&mut command);
         command
@@ -108,40 +106,51 @@ impl TuiGatewayGuard {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = command.spawn()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let guard = Self {
             port: config.port,
             owned: true,
-            child: Some(child),
-            stopped: Arc::new(AtomicBool::new(false)),
+            child: Some(command.spawn()?),
+            _interrupt: Some(interrupt),
         };
+        let child_pid = guard
+            .child
+            .as_ref()
+            .expect("owned gateway has a child")
+            .id();
+        let gateway_process =
+            serve_state::capture_process_identity(child_pid).ok_or_else(|| {
+                anyhow::anyhow!("gateway exited before its process identity could be recorded")
+            })?;
+        if let Err(error) = serve_state::save_serve_pid_info(&serve_state::ServePidInfo {
+            phase: Some("starting".to_string()),
+            pid: Some(child_pid),
+            gateway_process: Some(gateway_process),
+            port: Some(config.port),
+            ..Default::default()
+        }) {
+            return Err(error.into());
+        }
+        guard
+            ._interrupt
+            .as_ref()
+            .expect("owned gateway has an interrupt handler")
+            .arm();
+        if guard
+            ._interrupt
+            .as_ref()
+            .is_some_and(ForegroundCtrlCHandler::interrupted)
+        {
+            return Err(anyhow::anyhow!("startup interrupted"));
+        }
         wait_for_gateway_ready(config)?;
-        guard.install_ctrl_c_handler();
         notice("Local gateway ready", NoticeKind::Success);
         println!();
         Ok(guard)
-    }
-
-    fn install_ctrl_c_handler(&self) {
-        if !self.owned {
-            return;
-        }
-        let port = self.port;
-        let stopped = Arc::clone(&self.stopped);
-        std::thread::spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            runtime.block_on(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    stop_tui_owned_gateway(port, &stopped);
-                    std::process::exit(130);
-                }
-            });
-        });
     }
 }
 
@@ -150,18 +159,14 @@ impl Drop for TuiGatewayGuard {
         if !self.owned {
             return;
         }
-        stop_tui_owned_gateway(self.port, &self.stopped);
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.try_wait();
+        let _ = stop_serve(self.port);
+        if let Some(child) = self.child.as_mut()
+            && child.try_wait().ok().flatten().is_none()
+        {
+            stop_process(child.id());
+            let _ = child.wait();
         }
     }
-}
-
-fn stop_tui_owned_gateway(port: u16, stopped: &AtomicBool) {
-    if stopped.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let _ = stop_serve(port);
 }
 
 pub fn run_server(args: &ServeArgs) -> Result<()> {
@@ -171,10 +176,9 @@ pub fn run_server(args: &ServeArgs) -> Result<()> {
     clear_screen();
     print_header("OmniInfer Server", "Interactive gateway launcher");
     let config = config::load_app_config().unwrap_or_default();
-    let backend =
-        choose_backend(&config)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
-    let model =
-        choose_model(&config, true)?.ok_or_else(|| anyhow::anyhow!("No model selected."))?;
+    let backend = choose_backend()?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
+    let model = choose_model(&config, true, Some(&backend))?
+        .ok_or_else(|| anyhow::anyhow!("No model selected."))?;
     let mut args = args.clone();
     args.backend = Some(backend);
     args.model = Some(model.display().to_string());
@@ -259,5 +263,40 @@ mod backend_model_tests {
             }),
             &model,
         ));
+    }
+
+    #[test]
+    fn model_picker_uses_explicit_backend_over_persisted_selection() {
+        let backends = serde_json::json!({
+            "data": [
+                {
+                    "id": "persisted-backend",
+                    "family": "llama.cpp",
+                    "model_artifact": "file",
+                    "selected": true
+                },
+                {
+                    "id": "chosen-backend",
+                    "family": "vla.cpp",
+                    "model_artifact": "vla-artifact",
+                    "selected": false
+                }
+            ]
+        });
+        let selected = selected_backend_info(&backends, Some("chosen-backend"))
+            .expect("chosen backend should be present");
+        assert_eq!(selected.family, "vla.cpp");
+        assert!(model_supported_by_backend(
+            Path::new("model.safetensors"),
+            Some(&selected)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("model.bin"),
+            Some(&selected)
+        ));
+        assert_eq!(
+            selected_backend_line(&backends, Some("chosen-backend")),
+            "Backend: chosen-backend (not installed)"
+        );
     }
 }

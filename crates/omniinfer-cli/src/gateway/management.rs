@@ -270,6 +270,7 @@ pub(super) async fn try_handle_rust_endpoint(
             )))
         }
         (&Method::POST, "/omni/shutdown") => {
+            state.startup_cancelled.store(true, Ordering::SeqCst);
             let result = tokio::task::spawn_blocking({
                 let runtime = Arc::clone(&state.runtime);
                 move || {
@@ -346,6 +347,7 @@ pub(super) async fn try_handle_rust_endpoint(
             let backend_host = state.backend_host.clone();
             let runtime_startup_timeout = state.runtime_startup_timeout;
             let runtime = Arc::clone(&state.runtime);
+            let startup_cancelled = Arc::clone(&state.startup_cancelled);
             let outcome = tokio::task::spawn_blocking(move || {
                 let handle = tokio::runtime::Handle::current();
                 handle.block_on(async move {
@@ -354,6 +356,7 @@ pub(super) async fn try_handle_rust_endpoint(
                         backend_host,
                         runtime_startup_timeout,
                         auth.admin_id.clone(),
+                        &startup_cancelled,
                     )
                 })
             })

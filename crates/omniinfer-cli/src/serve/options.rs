@@ -68,7 +68,14 @@ pub(super) fn wait_for_foreground_service(
         let _ = tunnel.kill();
         let _ = tunnel.wait();
     }
-    let _ = serve_state::remove_serve_pid_info_if_run_id(port, run_id);
+    let backend_closed = serve_state::load_serve_pid_info(port)
+        .ok()
+        .flatten()
+        .and_then(|value| value.backend_port)
+        .is_none_or(|backend_port| TcpStream::connect(("127.0.0.1", backend_port)).is_err());
+    if backend_closed {
+        let _ = serve_state::remove_serve_pid_info_if_run_id(port, run_id);
+    }
     Ok(status)
 }
 
