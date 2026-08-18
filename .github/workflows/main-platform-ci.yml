@@ -48,7 +48,7 @@ jobs:
         run: |
           bash tests/test_release_installer.sh
           bash tests/test_source_installer.sh
-          ./omniinfer --version
+          cargo run --locked -q -p omniinfer-cli -- --version
 
       - name: Test Linux source installer helpers
         if: runner.os == 'Linux'
@@ -61,4 +61,4 @@ jobs:
         run: |
           .\tests\test_release_installer.ps1
           .\tests\test_source_installer.ps1
-          .\omniinfer.ps1 --version
+          cargo run --locked -q -p omniinfer-cli -- --version
