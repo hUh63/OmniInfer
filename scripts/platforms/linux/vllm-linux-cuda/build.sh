@@ -6,6 +6,7 @@ BUILD_TYPE="Release"
 DRY_RUN=0
 CLEAN_BUILD=0
 SMOKE_TEST=0
+BUILD_FROM_SOURCE=0
 PYTHON_BIN="${OMNIINFER_VLLM_PYTHON:-3.12}"
 PIP_PACKAGE="${OMNIINFER_VLLM_PIP_PACKAGE:-}"
 INDEX_URL="${OMNIINFER_VLLM_INDEX_URL:-}"
@@ -45,6 +46,7 @@ Options:
                              Defaults to main
   --source-url <url>         Git URL for the default source checkout
   --source-root <path>       Default source checkout path
+  --from-source             Clone or update the configured source checkout
   --no-precompiled           Do not request vLLM precompiled extension wheels for source installs
   --clean                    Remove the previous vLLM runtime venv first
   --smoke-test               Run 'vllm --help' after installation
@@ -129,6 +131,10 @@ while (($# > 0)); do
       SOURCE_ROOT="${2:?missing value for --source-root}"
       shift 2
       ;;
+    --from-source)
+      BUILD_FROM_SOURCE=1
+      shift
+      ;;
     --no-precompiled)
       USE_PRECOMPILED=0
       shift
@@ -192,6 +198,10 @@ create_venv() {
 
   run_cmd uv venv --clear --python "${PYTHON_BIN}" "${PACKAGE_ROOT}"
 }
+
+if [[ ${BUILD_FROM_SOURCE} -eq 1 && -z "${SOURCE_DIR}" ]]; then
+  SOURCE_DIR="${SOURCE_ROOT}"
+fi
 
 if [[ -z "${PIP_PACKAGE}" && -z "${SOURCE_DIR}" ]]; then
   PIP_PACKAGE="vllm==0.24.0"

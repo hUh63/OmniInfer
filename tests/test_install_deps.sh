@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${REPO_ROOT}/scripts/install-deps.sh"
+source "${REPO_ROOT}/scripts/lib/source-install-deps.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TMP_ROOT}"' EXIT
 
@@ -28,7 +28,7 @@ assert_eq "prompt" "$(omni_install_deps_policy ask 0 1)"
 fix_output="$(omni_install_deps_print_fix apt libcublas-dev-12-5)"
 [[ "${fix_output}" == *"sudo apt-get update && sudo apt-get install -y libcublas-dev-12-5"* ]]
 [[ "${fix_output}" == *"CUDAToolkit_ROOT=/path/to/cuda"* ]]
-[[ "${fix_output}" == *"scripts/install-cuda-cublas-local.sh"* ]]
+[[ "${fix_output}" == *"scripts/platforms/linux/setup-cuda-cublas-local.sh"* ]]
 [[ "${fix_output}" == *"Ollama's bundled libraries"* ]]
 
 dry_run_output="$(OMNI_INSTALL_DEPS_DRY_RUN=1 omni_install_deps_run apt libcublas-dev-12-5)"
@@ -39,7 +39,7 @@ mkdir -p "${fake_cuda}/bin"
 printf '#!/usr/bin/env bash\nexit 0\n' > "${fake_cuda}/bin/nvcc"
 chmod +x "${fake_cuda}/bin/nvcc"
 
-local_cuda_dry_run="$(bash "${REPO_ROOT}/scripts/install-cuda-cublas-local.sh" \
+local_cuda_dry_run="$(bash "${REPO_ROOT}/scripts/platforms/linux/setup-cuda-cublas-local.sh" \
   --dry-run \
   --cache-dir "${TMP_ROOT}/empty-cache" \
   --staging-root "${TMP_ROOT}/cuda-stage" \

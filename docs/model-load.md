@@ -11,6 +11,7 @@ This document defines the stable gateway contract for loading a model through
   "backend": "<optional-backend-id>",
   "mmproj": "<optional-mmproj-path>",
   "ctx_size": 4096,
+  "resource_budget_bytes": 7516192768,
   "launch_args": ["-ngl", "999"],
   "request_defaults": {
     "temperature": 0.2,
@@ -29,13 +30,22 @@ This document defines the stable gateway contract for loading a model through
 | `backend` | string | load | maybe | Optional. If omitted, OmniInfer uses selected or automatic backend logic. |
 | `mmproj` | string | load | yes | Optional multimodal projector override. |
 | `ctx_size` / `ctx-size` | integer | load | yes | Optional context length override. |
+| `resource_budget_bytes` | positive integer | admission | yes | Optional explicit runtime memory budget. It is required when a reference backend cannot resolve the model to a local file or directory, and it cannot be lower than OmniInfer's local estimate when one is available. |
 | `launch_args` | string array or shell string | load | yes | Optional backend-native launch arguments for external server backends. |
 | `request_defaults` | object | generation defaults | no | Stored with the loaded runtime and merged into later inference requests. |
 | `strict_capabilities` | boolean | validation | no | Optional. When true, unsupported load options fail instead of being ignored with warnings. |
 
+The CLI exposes the same admission field as
+`model load --resource-budget-bytes <bytes>` and
+`serve --resource-budget-bytes <bytes>`. Supply it when a backend receives a
+remote model reference, such as a Hugging Face repository ID, and OmniInfer
+cannot inspect the artifact size locally.
+
 `request_defaults` is not a model-load setting. It is a convenient way for a
 client to attach generation defaults to the loaded runtime. Changing only
 `request_defaults` can reuse the current runtime when the load settings match.
+The effective defaults are exposed through runtime state and retained with the
+selected model so an automatic restore reapplies the same request behavior.
 
 Common generation defaults include:
 
@@ -67,9 +77,24 @@ Common generation defaults include:
   "selected_model": "models/Qwen3.5-2B-Q4_K_M.gguf",
   "selected_mmproj": null,
   "selected_ctx_size": 4096,
+  "generation": 1,
+  "route_state": "ready",
+  "allocation_id": 1,
+  "resource_budget": {
+    "domains_bytes": {"cuda:0": 7516192768},
+    "components": [
+      {"name": "weights", "domain": "cuda:0", "bytes": 5368709120}
+    ]
+  },
   "warnings": []
 }
 ```
+
+OmniInfer reserves the reported budget before starting the backend, commits the
+allocation only after readiness and local-state persistence succeed, and rolls
+it back on failure. For an explicit multi-GPU mapping that cannot be attributed
+reliably, the full budget is reserved on every candidate device rather than
+risk oversubscription.
 
 ## Idempotency and Reloads
 
@@ -180,6 +205,10 @@ terminate the distribution.
 `POST /v1/chat/completions` does not load or switch models. It accepts
 OpenAI-compatible generation parameters for the current request and merges them
 over the runtime `request_defaults`.
+
+The precedence is runtime defaults, then the request's nested
+`request_defaults`, then explicit top-level request fields. A non-object
+`request_defaults` value is rejected with HTTP 400.
 
 The following fields may appear in a chat request for compatibility but do not
 start or switch a runtime there: `model`, `backend`, `mmproj`, `ctx_size`, and

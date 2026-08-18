@@ -1,0 +1,357 @@
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use omniinfer_core::{config, paths};
+use rand::random;
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use url::Url;
+
+use crate::{
+    BenchRunArgs, get_local_json, json_bool, json_str, json_u64, post_local_json_for_config,
+};
+
+const BENCHMARK_SCHEMA_VERSION: &str = "1.2.0";
+const DEFAULT_PROMPT: &str = "Write a detailed but concise explanation of why local language-model inference speed varies across hardware and runtimes.";
+const MODEL_FORMATS: &[&str] = &[
+    "GGUF",
+    "MLX",
+    "Safetensors",
+    "MNN",
+    "TFLite",
+    "LiteRT",
+    "LITERTLM",
+    "ONNX",
+    "ExecuTorch",
+    "Other",
+];
+
+#[derive(Debug, Clone)]
+struct Measurement {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    prefill_tps: f64,
+    decode_tps: f64,
+    prefill_duration_ms: f64,
+    decode_duration_ms: f64,
+    ttft_ms: Option<f64>,
+    wall_time_ms: f64,
+}
+
+pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
+    validate_metadata(args)?;
+    let config = config::load_app_config().unwrap_or_default();
+    let state = get_local_json("/omni/state", Duration::from_secs(10))?;
+    if !json_bool(&state, "backend_ready").unwrap_or(false) {
+        anyhow::bail!(
+            "No benchmarkable runtime is ready. Load a model first with `omniinfer load -m <model>`."
+        );
+    }
+    json_str(&state, "model")
+        .ok_or_else(|| anyhow::anyhow!("OmniInfer state does not identify the loaded model."))?;
+    let loaded_backend = json_str(&state, "backend")
+        .ok_or_else(|| anyhow::anyhow!("OmniInfer state does not identify the loaded backend."))?;
+    if !valid_catalog_id(loaded_backend) {
+        anyhow::bail!(
+            "Loaded backend ID {loaded_backend:?} cannot be represented by the benchmark schema."
+        );
+    }
+    if let Some(expected) = args.backend_id.as_deref()
+        && expected != loaded_backend
+    {
+        anyhow::bail!("Loaded backend is {loaded_backend}, but --backend-id requested {expected}.");
+    }
+
+    let launch_args = command_array(&state, "launch_command")?;
+    let detected = detect_optimizations(loaded_backend, &launch_args);
+    let (optimization_mode, optimizations) = resolve_optimization_declaration(args, &detected)?;
+    let run_command = match args.run_command.as_deref() {
+        Some(command) => validated_command("--run-command", command)?.to_string(),
+        None if launch_args.is_empty() => anyhow::bail!(
+            "The loaded runtime does not expose a launch command. Pass --run-command with the effective runtime command."
+        ),
+        None => validated_command(
+            "captured runtime command",
+            &command_text(&redact_command_args(&launch_args)),
+        )?
+        .to_string(),
+    };
+
+    let context_size = args
+        .context_size
+        .or_else(|| json_u64(&state, "ctx_size").and_then(|value| u32::try_from(value).ok()))
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Context size is unavailable from the loaded runtime. Pass --context-size explicitly."
+            )
+        })?;
+    let batch_size = args
+        .batch_size
+        .or_else(|| infer_positive_flag(&launch_args, &["-b", "--batch-size", "--batch_size"]))
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Batch size is unavailable from the launch command. Pass --batch-size explicitly."
+            )
+        })?;
+    let (prompt, prompt_source) = read_prompt(args)?;
+    let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
+    let request = json!({
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": args.max_tokens,
+        "stream": false,
+        "think": false,
+    });
+    let timeout = Duration::from_secs(u64::from(args.timeout_seconds));
+
+    for index in 0..args.warmup_runs {
+        post_local_json_for_config("/v1/chat/completions", &request, timeout, &config)
+            .with_context(|| format!("warmup run {} failed", index + 1))?;
+    }
+
+    let started_at = OffsetDateTime::now_utc();
+    let mut measurements = Vec::with_capacity(usize::from(args.runs));
+    for index in 0..args.runs {
+        let started = Instant::now();
+        let response =
+            post_local_json_for_config("/v1/chat/completions", &request, timeout, &config)
+                .with_context(|| format!("measured run {} failed", index + 1))?;
+        let measurement = extract_measurement(&response, started.elapsed())
+            .with_context(|| format!("measured run {} returned incomplete metrics", index + 1))?;
+        let progress = format!(
+            "Run {}/{}: pp={} tg={} prefill={:.3} tok/s decode={:.3} tok/s",
+            index + 1,
+            args.runs,
+            measurement.prompt_tokens,
+            measurement.completion_tokens,
+            measurement.prefill_tps,
+            measurement.decode_tps,
+        );
+        if args.json {
+            eprintln!("{progress}");
+        } else {
+            println!("{progress}");
+        }
+        measurements.push(measurement);
+    }
+
+    let pp = consistent_token_count(&measurements, true)?;
+    let tg = consistent_token_count(&measurements, false)?;
+    if pp > 1_048_576 || tg > 1_048_576 {
+        anyhow::bail!("Measured PP/TG exceeds the submission contract limit of 1,048,576 tokens.");
+    }
+    if context_size > 4_194_304 {
+        anyhow::bail!("Context size exceeds the submission contract limit of 4,194,304.");
+    }
+    if batch_size > 1_048_576 {
+        anyhow::bail!("Batch size exceeds the submission contract limit of 1,048,576.");
+    }
+    if u64::from(context_size) < pp.saturating_add(tg) {
+        anyhow::bail!(
+            "Measured pp + tg is {}, which exceeds context size {context_size}.",
+            pp.saturating_add(tg)
+        );
+    }
+    let benchmark_id = args.benchmark_id.clone().unwrap_or_else(|| {
+        generated_benchmark_id(&args.catalog_model_id, loaded_backend, started_at)
+    });
+    validate_benchmark_id(&benchmark_id)?;
+    let payload = build_submission(BuildSubmission {
+        args,
+        benchmark_id: &benchmark_id,
+        loaded_backend,
+        run_command: &run_command,
+        optimization_mode,
+        optimizations: &optimizations,
+        context_size,
+        batch_size,
+        prompt_source: &prompt_source,
+        prompt_sha256: &prompt_sha256,
+        started_at,
+        measurements: &measurements,
+        pp,
+        tg,
+    })?;
+    let destination = result_path(args.output.as_deref(), &benchmark_id)?;
+    write_result_atomic(&destination, &payload)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        eprintln!("Benchmark saved: {}", destination.display());
+        eprintln!("Schema: {BENCHMARK_SCHEMA_VERSION}");
+    } else {
+        println!("Benchmark saved: {}", destination.display());
+        println!("Schema: {BENCHMARK_SCHEMA_VERSION}");
+    }
+    Ok(())
+}
+
+pub(crate) fn list(json_output: bool) -> Result<()> {
+    let directory = paths::benchmark_results_dir();
+    let mut rows = Vec::new();
+    if directory.is_dir() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json")
+                || path.is_symlink()
+            {
+                continue;
+            }
+            let Ok(raw) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_slice::<Value>(&raw) else {
+                continue;
+            };
+            if json_str(&payload, "schema_version") != Some(BENCHMARK_SCHEMA_VERSION) {
+                continue;
+            }
+            rows.push(json!({
+                "benchmark_id": json_str(&payload, "benchmark_id"),
+                "model_id": payload.pointer("/model/catalog_model_id").and_then(Value::as_str),
+                "backend_id": payload.pointer("/backend/catalog_backend_id").and_then(Value::as_str),
+                "started_at": payload.pointer("/protocol/started_at").and_then(Value::as_str),
+                "path": path.display().to_string(),
+            }));
+        }
+    }
+    rows.sort_by(|left, right| {
+        left["started_at"]
+            .as_str()
+            .cmp(&right["started_at"].as_str())
+            .reverse()
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No archived benchmark results in {}", directory.display());
+        return Ok(());
+    }
+    println!("Archived benchmark results:");
+    for row in rows {
+        println!(
+            "  {}  model={}  backend={}  {}",
+            json_str(&row, "benchmark_id").unwrap_or("-"),
+            json_str(&row, "model_id").unwrap_or("-"),
+            json_str(&row, "backend_id").unwrap_or("-"),
+            json_str(&row, "path").unwrap_or("-"),
+        );
+    }
+    Ok(())
+}
+
+mod validation;
+
+use validation::*;
+mod result;
+
+use result::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_sensitive_runtime_arguments() {
+        let args = vec![
+            "runtime".to_string(),
+            "--api-key".to_string(),
+            "secret-value".to_string(),
+            "TOKEN=another-secret".to_string(),
+            "--port".to_string(),
+            "9000".to_string(),
+        ];
+        assert_eq!(
+            redact_command_args(&args),
+            vec![
+                "runtime",
+                "--api-key",
+                "<redacted>",
+                "TOKEN=<redacted>",
+                "--port",
+                "9000",
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_known_optimization_markers() {
+        let detected = detect_optimizations(
+            "turboquant-mac",
+            &["runtime".to_string(), "--dflash-mode".to_string()],
+        );
+        assert_eq!(
+            detected.into_iter().collect::<Vec<_>>(),
+            vec!["dflash", "turboquant"]
+        );
+    }
+
+    #[test]
+    fn extracts_backend_and_observed_measurements() {
+        let backend = json!({
+            "usage": {"prompt_tokens": 64, "completion_tokens": 16},
+            "timings": {
+                "prompt_ms": 400.0,
+                "predicted_ms": 800.0
+            }
+        });
+        let value = extract_measurement(&backend, Duration::from_millis(1300)).unwrap();
+        assert_eq!(value.prefill_tps, 160.0);
+        assert_eq!(value.decode_tps, 20.0);
+
+        let observed = json!({
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            "omniinfer_metrics": {
+                "ttft_ms": 100,
+                "decode_ms": 500,
+                "observed_prefill_tps": 200.0,
+                "observed_decode_tps": 20.0
+            }
+        });
+        let value = extract_measurement(&observed, Duration::from_millis(650)).unwrap();
+        assert_eq!(value.prefill_tps, 200.0);
+        assert_eq!(value.decode_tps, 20.0);
+        assert_eq!(value.ttft_ms, Some(100.0));
+
+        let upstream_rates = json!({
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            "timings": {
+                "prompt_per_second": 400.0,
+                "predicted_per_second": 40.0
+            },
+            "omniinfer_metrics": {
+                "ttft_ms": 100,
+                "decode_ms": 500,
+                "observed_prefill_tps": 200.0,
+                "observed_decode_tps": 20.0
+            }
+        });
+        let value = extract_measurement(&upstream_rates, Duration::from_millis(650)).unwrap();
+        assert_eq!(value.prefill_tps, 400.0);
+        assert_eq!(value.decode_tps, 40.0);
+    }
+
+    #[test]
+    fn infers_common_batch_flags() {
+        assert_eq!(
+            infer_positive_flag(&["runtime".into(), "-b".into(), "256".into()], &["-b"]),
+            Some(256)
+        );
+        assert_eq!(
+            infer_positive_flag(
+                &["runtime".into(), "--batch-size=64".into()],
+                &["--batch-size"]
+            ),
+            Some(64)
+        );
+    }
+}

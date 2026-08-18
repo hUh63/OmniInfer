@@ -7,6 +7,7 @@ import argparse
 import hmac
 import html
 import io
+import ipaddress
 import json
 import os
 import re
@@ -112,6 +113,37 @@ def validate_dashboard_origin(value: str | None, host: str, port: int) -> None:
         or parsed.fragment
     ):
         raise PermissionError("missing or invalid Origin header")
+
+
+def validate_omniinfer_url(value: str) -> str:
+    """Return a canonical loopback gateway URL that cannot disclose admin keys."""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+        address = ipaddress.ip_address(host) if host is not None else None
+    except ValueError as error:
+        raise ValueError(f"Invalid OmniInfer URL: {value!r}") from error
+    if (
+        parsed.scheme != "http"
+        or address is None
+        or not address.is_loopback
+        or port is None
+        or port == 0
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "OmniInfer URL must be an HTTP loopback IP with an explicit port "
+            "and no credentials, path, query, or fragment"
+        )
+    if getattr(address, "scope_id", None) is not None:
+        raise ValueError("OmniInfer URL must not contain an IPv6 scope identifier")
+    canonical_host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    return f"http://{canonical_host}:{port}"
 
 
 def validate_arch_options(
@@ -323,7 +355,7 @@ def validate_loopback_omniinfer_url(value: Any) -> str:
     parsed = urllib.parse.urlsplit(normalized)
     if (
         parsed.scheme != "http"
-        or parsed.hostname != "127.0.0.1"
+        or parsed.hostname not in {"127.0.0.1", "::1"}
         or parsed.port is None
         or not 1 <= parsed.port <= 65535
         or parsed.username is not None
@@ -453,10 +485,20 @@ def public_profile_error(error: Exception, config: DemoConfig) -> str:
     return message
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep authorization headers on the explicitly configured loopback origin."""
+
+    def redirect_request(self, request: Any, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
 class OmniInferAPI:
     def __init__(self, base_url: str, admin_api_key: str | None = None):
         self.base_url = validate_loopback_omniinfer_url(base_url)
         self.admin_api_key = admin_api_key
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirectHandler()
+        )
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -472,7 +514,7 @@ class OmniInferAPI:
             method="POST" if body is not None else "GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=450) as response:
+            with self._opener.open(request, timeout=450) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
@@ -1298,6 +1340,7 @@ def parse_args() -> argparse.Namespace:
             "--server-arg, --tokenizer, or --stats-json"
         )
     try:
+        args.omniinfer_url = validate_omniinfer_url(args.omniinfer_url)
         validate_libero_object_task_id(args.task_id)
         if args.model_profiles is None:
             args.omniinfer_url = validate_loopback_omniinfer_url(args.omniinfer_url)

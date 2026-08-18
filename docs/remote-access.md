@@ -67,6 +67,12 @@ Manage a detached gateway with:
 ./omniinfer serve stop --port 9000
 ```
 
+OmniInfer keeps the gateway, backend, and Quick Tunnel under one managed serve
+record. Reusing the same port cleans up the verified previous record before a
+new service is published. A stale record with mismatched process identity is
+left untouched and reported as an error rather than risking an unrelated
+process.
+
 ## LAN and Cloudflare Together
 
 Use both flags when you want trusted devices on the same LAN and temporary public HTTPS clients to share the same gateway, model, and backend:

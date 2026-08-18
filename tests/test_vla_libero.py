@@ -341,11 +341,12 @@ class RuntimeContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn("sentencepiece==0.2.0", requirements.splitlines())
 
-    def test_readme_states_pi05_validation_scope_and_runtime_cleanup(self):
+    def test_readme_marks_pi05_experimental_and_explains_runtime_cleanup(self):
         readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
-        self.assertIn("real-checkpoint end-to-end", readme)
-        self.assertIn("not a full LIBERO benchmark", readme)
-        self.assertIn("not a complete\n> LIBERO benchmark", readme)
+        self.assertIn("PI0.5\nis an experimental request path", readme)
+        self.assertIn("has not published reproducible", readme)
+        self.assertIn("real-checkpoint rollout evidence", readme)
+        self.assertIn("Use SmolVLA for the currently validated", readme)
         self.assertIn("does\nnot unload the previous runtime", readme)
         self.assertIn("POST /omni/model/unload", readme)
         self.assertIn("409 model_reload_required", readme)
@@ -367,6 +368,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn('--runtime-root "$DEMO_ROOT/runtimes"', readme)
         self.assertIn("changing only", readme)
         self.assertIn("the port still shares OmniInfer state", readme)
+        self.assertIn("same host as the gateway", readme)
         self.assertIn(
             "scripts/platforms/linux/vla.cpp-linux-cuda/build.sh --from-source",
             readme,
@@ -725,6 +727,99 @@ class RuntimeContractTests(unittest.TestCase):
     def test_no_model_uses_existing_managed_runtime(self):
         self.assertIsNone(DEMO.DemoConfig(model=None).model_load_payload())
 
+    def test_omniinfer_api_accepts_only_canonical_loopback_origins(self):
+        self.assertEqual(
+            DEMO.OmniInferAPI("http://127.0.0.1:19000/").base_url,
+            "http://127.0.0.1:19000",
+        )
+        self.assertEqual(
+            DEMO.OmniInferAPI("http://[::1]:19000").base_url,
+            "http://[::1]:19000",
+        )
+        for value in (
+            "https://127.0.0.1:19000",
+            "http://localhost:19000",
+            "http://192.0.2.10:19000",
+            "http://user:password@127.0.0.1:19000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:19000/omni",
+            "http://127.0.0.1:19000?target=remote",
+            "http://127.0.0.1:19000#fragment",
+            "http://[::1%25lo]:19000",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    DEMO.OmniInferAPI(value, "admin-secret")
+
+    def test_omniinfer_api_ignores_environment_proxies(self):
+        with mock.patch.object(
+            DEMO.urllib.request, "build_opener", wraps=DEMO.urllib.request.build_opener
+        ) as build_opener:
+            DEMO.OmniInferAPI("http://127.0.0.1:19000", "admin-secret")
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertIsInstance(proxy_handler, DEMO.urllib.request.ProxyHandler)
+        self.assertEqual(proxy_handler.proxies, {})
+
+    def test_cli_rejects_remote_omniinfer_url_before_startup(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["demo.py", "--omniinfer-url", "https://attacker.example"],
+        ):
+            with self.assertRaises(SystemExit) as error:
+                DEMO.parse_args()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_omniinfer_api_does_not_follow_redirects_with_admin_key(self):
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            received_authorization = None
+
+            def do_GET(self):
+                type(self).received_authorization = self.headers.get("Authorization")
+                self.send_response(302)
+                self.send_header("Location", self.server.redirect_target)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        class TargetHandler(http.server.BaseHTTPRequestHandler):
+            requests = 0
+
+            def do_GET(self):
+                type(self).requests += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, _format, *_args):
+                return
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        source.redirect_target = f"http://127.0.0.1:{target.server_port}/capture"
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+        target_thread.start()
+        source_thread.start()
+        try:
+            api = DEMO.OmniInferAPI(
+                f"http://127.0.0.1:{source.server_port}", "admin-secret"
+            )
+            with self.assertRaisesRegex(RuntimeError, "HTTP 302"):
+                api._request("/omni/state")
+            self.assertEqual(RedirectHandler.received_authorization, "Bearer admin-secret")
+            self.assertEqual(TargetHandler.requests, 0)
+        finally:
+            source.shutdown()
+            target.shutdown()
+            source.server_close()
+            target.server_close()
+            source_thread.join(2)
+            target_thread.join(2)
+
     def test_configure_protoc_rejects_non_executable_path(self):
         with tempfile.TemporaryDirectory() as directory:
             candidate = Path(directory) / "protoc"
@@ -883,6 +978,14 @@ class MetricTests(unittest.TestCase):
         self.assertIn("reserve at least 10 GB", readme)
         self.assertIn("uv and Hugging Face", readme)
         self.assertIn("does not bundle", readme)
+
+    def test_readme_does_not_claim_an_unpublished_vla_prebuilt(self):
+        readme = (
+            REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md"
+        ).read_text()
+        self.assertIn("current prebuilt catalog", readme)
+        self.assertIn("`backend install` is not available", readme)
+        self.assertIn("source-build dependencies", readme)
 
     def test_state_exposes_only_the_ten_predefined_object_tasks(self):
         state = DEMO.DemoState(DEMO.DemoConfig())

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -8,11 +9,15 @@ use omniinfer_core::backend_registry::{self, BackendRegistry, BackendScope};
 use omniinfer_core::local_state;
 use omniinfer_core::model_artifacts::{discover_llama_cpp_model_artifacts, maybe_auto_mmproj};
 use omniinfer_core::model_load::DEFAULT_LOAD_CONTEXT_SIZE;
+use omniinfer_core::resource_ledger::{
+    AllocationId, BudgetComponent, MemoryDomain, ReservationId, ResourceBudget, ResourceCapacity,
+    ResourceLedger,
+};
 use omniinfer_core::runtime_plan::{
     ExternalRuntimeRequest, ExternalServerProtocol, build_external_runtime_plan,
 };
 use omniinfer_core::runtime_process::{RuntimeProcess, RuntimeProcessError, RuntimeProcessOptions};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::gpu_status::runtime_env_for_backend;
 
@@ -20,11 +25,26 @@ const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(3
 const WSL_ROCM_COLD_START_INITIAL_ATTEMPT: Duration = Duration::from_secs(120);
 const WSL_ROCM_COLD_START_RETRY_COOLDOWN: Duration = Duration::from_secs(90);
 
-#[derive(Default)]
 pub(super) struct RustRuntimeManager {
     selected_backend: Option<String>,
     loaded: BTreeMap<String, LoadedRustRuntime>,
     default_model_key: Option<String>,
+    resource_ledger: Option<ResourceLedger>,
+    next_capacity_snapshot: u64,
+    next_generation: u64,
+}
+
+impl Default for RustRuntimeManager {
+    fn default() -> Self {
+        Self {
+            selected_backend: None,
+            loaded: BTreeMap::new(),
+            default_model_key: None,
+            resource_ledger: None,
+            next_capacity_snapshot: 1,
+            next_generation: 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +54,25 @@ pub(super) struct RuntimeProxyTarget {
     pub(super) protocol: ExternalServerProtocol,
     pub(super) backend_id: String,
     pub(super) model: Option<String>,
+    pub(super) request_defaults: Map<String, Value>,
+    pub(super) generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeRouteState {
+    Ready,
+    Draining,
+    Failed,
+}
+
+impl RuntimeRouteState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Draining => "draining",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 struct LoadedRustRuntime {
@@ -44,6 +83,7 @@ struct LoadedRustRuntime {
     public_model_id: Option<String>,
     mmproj: Option<String>,
     ctx_size: Option<u32>,
+    request_defaults: Map<String, Value>,
     launch_args: Vec<String>,
     cuda_visible_devices: Option<String>,
     cuda_warning: Option<String>,
@@ -51,6 +91,10 @@ struct LoadedRustRuntime {
     client_endpoint: String,
     process: RuntimeProcess,
     proxy_model_ref: Option<String>,
+    generation: u64,
+    route_state: RuntimeRouteState,
+    allocation_id: AllocationId,
+    resource_budget: ResourceBudget,
 }
 
 #[derive(Debug, Clone)]
@@ -85,10 +129,31 @@ impl RustRuntimeManager {
     }
 
     pub(super) fn stop_runtime(&mut self) -> Result<Value> {
-        for (_, mut loaded) in std::mem::take(&mut self.loaded) {
-            loaded.process.stop(Duration::from_secs(8))?;
+        let keys = self.loaded.keys().cloned().collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for key in keys {
+            let stop_result = {
+                let loaded = self
+                    .loaded
+                    .get_mut(&key)
+                    .expect("runtime key came from the loaded map");
+                loaded.route_state = RuntimeRouteState::Draining;
+                loaded.process.stop(Duration::from_secs(8))
+            };
+            match stop_result {
+                Ok(()) => self.remove_runtime_and_release(&key),
+                Err(error) => {
+                    if let Some(loaded) = self.loaded.get_mut(&key) {
+                        loaded.route_state = RuntimeRouteState::Failed;
+                    }
+                    failures.push(format!("{key}: {error}"));
+                }
+            }
         }
-        self.default_model_key = None;
+        self.select_fallback_default();
+        if !failures.is_empty() {
+            anyhow::bail!("failed to stop runtimes: {}", failures.join("; "));
+        }
         let selected_model_preserved = local_state::load_state()
             .ok()
             .is_some_and(|state| state.selected_model.is_some());
@@ -101,8 +166,11 @@ impl RustRuntimeManager {
         }))
     }
 
-    pub(super) fn has_loaded_runtime(&self) -> bool {
-        !self.loaded.is_empty()
+    pub(super) fn has_loaded_runtime(&mut self) -> bool {
+        self.reap_exited_runtimes();
+        self.loaded
+            .values()
+            .any(|loaded| loaded.route_state == RuntimeRouteState::Ready)
     }
 
     pub(super) fn load_model(
@@ -112,7 +180,9 @@ impl RustRuntimeManager {
         startup_timeout: Duration,
         owner_admin_id: Option<String>,
     ) -> Result<LoadModelOutcome> {
+        self.reap_exited_runtimes();
         let model = json_required_str(&payload, "model")?.to_string();
+        let requested_request_defaults = request_defaults_from_payload(&payload)?;
         let public_model_id = payload
             .get("public_model_id")
             .and_then(Value::as_str)
@@ -196,6 +266,13 @@ impl RustRuntimeManager {
                 ctx_size,
                 &effective_launch_args,
             ) {
+                local_state::save_selected_backend(&backend.id)?;
+                local_state::save_selected_model(
+                    &resolved_model.model_path,
+                    mmproj_path.as_deref(),
+                    ctx_size,
+                    &requested_request_defaults,
+                )?;
                 let loaded_key = self.promote_loaded_model_key(
                     &loaded_key,
                     &requested_model_key,
@@ -203,16 +280,11 @@ impl RustRuntimeManager {
                 );
                 let loaded = self
                     .loaded
-                    .get(&loaded_key)
+                    .get_mut(&loaded_key)
                     .expect("promoted runtime should remain registered");
+                loaded.request_defaults = requested_request_defaults.clone();
                 let response = model_load_response(loaded, true);
                 self.default_model_key = Some(loaded_key);
-                local_state::save_selected_backend(&backend.id)?;
-                local_state::save_selected_model(
-                    &resolved_model.model_path,
-                    mmproj_path.as_deref(),
-                    ctx_size,
-                )?;
                 return Ok(LoadModelOutcome::Success(response));
             }
             let requested = RequestedRuntimeConfig {
@@ -222,6 +294,7 @@ impl RustRuntimeManager {
                 public_model_id: public_model_id.as_deref(),
                 mmproj: mmproj_path.as_deref(),
                 ctx_size,
+                request_defaults: &requested_request_defaults,
                 launch_args: &effective_launch_args,
             };
             return Ok(LoadModelOutcome::ReloadRequired(reload_required_response(
@@ -253,23 +326,56 @@ impl RustRuntimeManager {
             ));
         let (runtime_env, cuda_selection) =
             runtime_env_for_backend(backend, &effective_launch_args);
-        let process = start_runtime_with_cold_start_policy(
-            &backend.id,
-            &plan,
-            RuntimeProcessOptions {
-                log_path,
-                env: runtime_env,
-                startup_timeout,
-                health_host: backend_host.clone(),
-            },
-        )?;
-        self.selected_backend = Some(backend.id.clone());
-        local_state::save_selected_backend(&backend.id)?;
-        local_state::save_selected_model(
+        let budget_cuda_devices = if backend.capabilities.iter().any(|value| value == "cuda") {
+            match cuda_selection.as_ref() {
+                Some(selection) => Some(selection.visible_devices.clone()),
+                None => Some(detect_cuda_device_ids()?.join(",")),
+            }
+        } else {
+            None
+        };
+        let resource_budget = build_runtime_resource_budget(
+            &payload,
+            backend,
             &resolved_model.model_path,
             mmproj_path.as_deref(),
-            plan.ctx_size,
+            plan.ctx_size.unwrap_or(DEFAULT_LOAD_CONTEXT_SIZE),
+            budget_cuda_devices.as_deref(),
+            cuda_selection.is_none() && budget_cuda_devices.is_some(),
         )?;
+        let reservation_id = self.reserve_runtime_resources(
+            &requested_model_key,
+            &resource_budget,
+            budget_cuda_devices.as_deref(),
+        )?;
+        let transaction = self.with_reservation(reservation_id, |manager| {
+            let process = start_runtime_with_cold_start_policy(
+                &backend.id,
+                &plan,
+                RuntimeProcessOptions {
+                    log_path,
+                    env: runtime_env,
+                    startup_timeout,
+                    health_host: backend_host.clone(),
+                },
+            )?;
+            local_state::save_selected_backend(&backend.id)?;
+            local_state::save_selected_model(
+                &resolved_model.model_path,
+                mmproj_path.as_deref(),
+                plan.ctx_size,
+                &requested_request_defaults,
+            )?;
+            let generation = manager.take_generation()?;
+            let allocation_id = manager
+                .resource_ledger
+                .as_mut()
+                .expect("reservation requires a resource ledger")
+                .commit(reservation_id)?;
+            Ok((process, generation, allocation_id))
+        })?;
+        let (process, generation, allocation_id) = transaction;
+        self.selected_backend = Some(backend.id.clone());
         self.loaded.insert(
             requested_model_key.clone(),
             LoadedRustRuntime {
@@ -280,6 +386,7 @@ impl RustRuntimeManager {
                 public_model_id: public_model_id.clone(),
                 mmproj: mmproj_path.clone(),
                 ctx_size: plan.ctx_size,
+                request_defaults: requested_request_defaults,
                 launch_args: effective_launch_args,
                 cuda_visible_devices: cuda_selection
                     .as_ref()
@@ -291,6 +398,10 @@ impl RustRuntimeManager {
                 client_endpoint: plan.client_endpoint.clone(),
                 proxy_model_ref: plan.proxy_model_ref.clone(),
                 process,
+                generation,
+                route_state: RuntimeRouteState::Ready,
+                allocation_id,
+                resource_budget: resource_budget.clone(),
             },
         );
         self.default_model_key = Some(requested_model_key.clone());
@@ -320,18 +431,32 @@ impl RustRuntimeManager {
                 "model '{model_key}' is owned by admin '{owner}' and cannot be unloaded by admin '{admin_id}'"
             );
         }
-        let Some(mut loaded) = self.loaded.remove(&model_key) else {
-            anyhow::bail!("model is not loaded: {model}");
+        let (generation, stop_result) = {
+            let loaded = self
+                .loaded
+                .get_mut(&model_key)
+                .expect("resolved runtime key must exist");
+            loaded.route_state = RuntimeRouteState::Draining;
+            (
+                loaded.generation,
+                loaded.process.stop(Duration::from_secs(8)),
+            )
         };
-        loaded.process.stop(Duration::from_secs(8))?;
-        if self.default_model_key.as_deref() == Some(&model_key) {
-            self.default_model_key = self.loaded.keys().next_back().cloned();
+        if let Err(error) = stop_result {
+            if let Some(loaded) = self.loaded.get_mut(&model_key) {
+                loaded.route_state = RuntimeRouteState::Failed;
+            }
+            return Err(error.into());
         }
+        self.remove_runtime_and_release(&model_key);
+        self.select_fallback_default();
         Ok(json!({
             "ok": true,
             "unloaded": true,
             "model": model_key,
             "owner_admin_id": owner,
+            "invalidated_generation": generation,
+            "resources_released": true,
         }))
     }
 
@@ -352,17 +477,21 @@ impl RustRuntimeManager {
             .ok_or_else(|| anyhow::anyhow!("no installed backend available"))
     }
 
-    pub(super) fn proxy_base_for_model(&self, requested_model: Option<&str>) -> Option<String> {
+    pub(super) fn proxy_base_for_model(&mut self, requested_model: Option<&str>) -> Option<String> {
         self.proxy_target_for_model(requested_model)
             .and_then(|target| target.base_url)
     }
 
     pub(super) fn proxy_target_for_model(
-        &self,
+        &mut self,
         requested_model: Option<&str>,
     ) -> Option<RuntimeProxyTarget> {
+        self.reap_exited_runtimes();
         let key = self.resolve_proxy_model_key(requested_model)?;
         let loaded = self.loaded.get(&key)?;
+        if loaded.route_state != RuntimeRouteState::Ready {
+            return None;
+        }
         Some(RuntimeProxyTarget {
             base_url: loaded
                 .external_server_protocol
@@ -372,6 +501,8 @@ impl RustRuntimeManager {
             protocol: loaded.external_server_protocol,
             backend_id: loaded.backend_id.clone(),
             model: loaded.proxy_model_ref.clone(),
+            request_defaults: loaded.request_defaults.clone(),
+            generation: loaded.generation,
         })
     }
 
@@ -441,16 +572,19 @@ impl RustRuntimeManager {
         requested_key.to_string()
     }
 
-    pub(super) fn loaded_models_payload(&self) -> Value {
+    pub(super) fn loaded_models_payload(&mut self) -> Value {
+        self.reap_exited_runtimes();
         json!({
             "object": "list",
             "data": self.loaded.values().map(loaded_runtime_payload).collect::<Vec<_>>(),
         })
     }
 
-    pub(super) fn loaded_runtime_summaries(&self) -> Vec<LoadedRuntimeSummary> {
+    pub(super) fn loaded_runtime_summaries(&mut self) -> Vec<LoadedRuntimeSummary> {
+        self.reap_exited_runtimes();
         self.loaded
             .values()
+            .filter(|loaded| loaded.route_state == RuntimeRouteState::Ready)
             .map(|loaded| LoadedRuntimeSummary {
                 id: loaded.model_key.clone(),
                 owner_admin_id: loaded.owner_admin_id.clone(),
@@ -459,7 +593,8 @@ impl RustRuntimeManager {
             .collect()
     }
 
-    pub(super) fn snapshot(&self) -> Value {
+    pub(super) fn snapshot(&mut self) -> Value {
+        self.reap_exited_runtimes();
         let persistent_state = local_state::load_state().unwrap_or_default();
         let selected_backend = self
             .selected_backend
@@ -486,10 +621,14 @@ impl RustRuntimeManager {
                     "owner_admin_id": loaded.owner_admin_id,
                     "mmproj": loaded.mmproj,
                     "ctx_size": loaded.ctx_size,
-                    "request_defaults": {},
+                    "request_defaults": loaded.request_defaults,
                     "runtime_mode": "external_server",
                     "backend_pid": info.pid,
                     "backend_port": info.port,
+                    "generation": loaded.generation,
+                    "route_state": loaded.route_state.as_str(),
+                    "allocation_id": loaded.allocation_id.get(),
+                    "resource_budget": resource_budget_payload(&loaded.resource_budget),
                     "launch_args": loaded.launch_args,
                     "cuda_visible_devices": loaded.cuda_visible_devices,
                     "warning": loaded.cuda_warning,
@@ -545,533 +684,156 @@ impl RustRuntimeManager {
             }),
         };
         annotate_restore_state(&mut payload, &persistent_state, &self.loaded);
+        payload["resource_ledger"] = self.resource_ledger_payload();
         payload
     }
-}
 
-fn start_runtime_with_cold_start_policy(
-    backend_id: &str,
-    plan: &omniinfer_core::runtime_plan::ExternalRuntimePlan,
-    options: RuntimeProcessOptions,
-) -> Result<RuntimeProcess, RuntimeProcessError> {
-    let Some(initial_timeout) =
-        wsl_rocm_cold_start_retry_timeout(backend_id, options.startup_timeout)
-    else {
-        return RuntimeProcess::start(plan, options);
-    };
-
-    let total_timeout = options.startup_timeout;
-    retry_after_ready_timeout(
-        total_timeout,
-        initial_timeout,
-        WSL_ROCM_COLD_START_RETRY_COOLDOWN,
-        |attempt_timeout| {
-            let mut attempt_options = options.clone();
-            attempt_options.startup_timeout = attempt_timeout;
-            RuntimeProcess::start(plan, attempt_options)
-        },
-    )
-}
-
-fn wsl_rocm_cold_start_retry_timeout(
-    backend_id: &str,
-    total_timeout: Duration,
-) -> Option<Duration> {
-    (backend_id == "vllm-wsl2-rocm" && total_timeout >= WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET)
-        .then_some(WSL_ROCM_COLD_START_INITIAL_ATTEMPT)
-}
-
-fn retry_after_ready_timeout<T>(
-    total_timeout: Duration,
-    initial_timeout: Duration,
-    cooldown: Duration,
-    mut attempt: impl FnMut(Duration) -> Result<T, RuntimeProcessError>,
-) -> Result<T, RuntimeProcessError> {
-    let started = Instant::now();
-    match attempt(initial_timeout) {
-        Err(RuntimeProcessError::ReadyTimeout) => {
-            let remaining_before_cooldown = total_timeout.saturating_sub(started.elapsed());
-            if remaining_before_cooldown <= cooldown {
-                return Err(RuntimeProcessError::ReadyTimeout);
-            }
-            eprintln!(
-                "OmniInfer: WSL2 ROCm cold start did not become ready after {} seconds; cooling down for {} seconds before retry",
-                initial_timeout.as_secs(),
-                cooldown.as_secs()
-            );
-            std::thread::sleep(cooldown);
-            let remaining = total_timeout.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                return Err(RuntimeProcessError::ReadyTimeout);
-            }
-            eprintln!(
-                "OmniInfer: retrying WSL2 ROCm cold start once with the remaining {} seconds",
-                remaining.as_secs()
-            );
-            attempt(remaining)
+    fn with_reservation<T>(
+        &mut self,
+        reservation_id: ReservationId,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let result = operation(self);
+        if result.is_err() {
+            self.resource_ledger
+                .as_mut()
+                .expect("reservation requires a resource ledger")
+                .rollback(reservation_id);
         }
-        result => result,
+        result
     }
-}
 
-fn annotate_restore_state(
-    payload: &mut Value,
-    persistent_state: &local_state::LocalState,
-    loaded_runtimes: &BTreeMap<String, LoadedRustRuntime>,
-) {
-    let Some(selected) = persistent_state.selected_model.as_ref() else {
-        payload["restore_selection"] = Value::Null;
-        payload["restore_status"] = json!("not_configured");
-        payload["restore_completed"] = json!(false);
-        return;
-    };
-    let completed = loaded_runtimes.values().any(|loaded| {
-        persistent_state
-            .selected_backend
-            .as_deref()
-            .is_none_or(|backend| loaded.backend_id == backend)
-            && loaded.model == selected.model
-            && loaded.mmproj == selected.mmproj
-            && loaded.ctx_size == selected.ctx_size
-    });
-    payload["restore_selection"] = json!({
-        "backend": persistent_state.selected_backend,
-        "model": selected.model,
-        "mmproj": selected.mmproj,
-        "ctx_size": selected.ctx_size,
-    });
-    payload["restore_status"] = json!(if completed { "loaded" } else { "pending" });
-    payload["restore_completed"] = json!(completed);
-}
-
-fn same_load_configuration(
-    loaded: &LoadedRustRuntime,
-    backend_id: &str,
-    model_path: &str,
-    mmproj: Option<&str>,
-    ctx_size: Option<u32>,
-    launch_args: &[String],
-) -> bool {
-    loaded.backend_id == backend_id
-        && loaded.model == model_path
-        && loaded.mmproj.as_deref() == mmproj
-        && loaded.ctx_size == ctx_size
-        && loaded.launch_args == launch_args
-}
-
-fn model_load_response(loaded: &LoadedRustRuntime, already_loaded: bool) -> Value {
-    let info = loaded.process.info();
-    let mut response = json!({
-        "ok": true,
-        "already_loaded": already_loaded,
-        "requires_reload": false,
-        "model": loaded.model_key,
-        "owner_admin_id": loaded.owner_admin_id,
-        "selected_backend": loaded.backend_id,
-        "selected_model": loaded.model,
-        "selected_public_model_id": loaded.public_model_id,
-        "selected_mmproj": loaded.mmproj,
-        "selected_ctx_size": loaded.ctx_size,
-        "backend_pid": info.pid,
-        "backend_port": info.port,
-        "launch_command": info.command,
-        "log_path": info.log_path.display().to_string(),
-        "external_server_protocol": loaded.external_server_protocol.as_str(),
-        "client_endpoint": loaded.client_endpoint,
-        "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
-    });
-    if let Some(visible_devices) = loaded.cuda_visible_devices.as_deref() {
-        response["cuda_visible_devices"] = json!(visible_devices);
+    fn take_generation(&mut self) -> Result<u64> {
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("runtime generation overflow"))?;
+        Ok(generation)
     }
-    if let Some(warning) = loaded.cuda_warning.as_deref() {
-        response["warning"] = json!(warning);
-    }
-    response
-}
 
-struct RequestedRuntimeConfig<'a> {
-    backend_id: &'a str,
-    model_key: &'a str,
-    model_path: &'a str,
-    public_model_id: Option<&'a str>,
-    mmproj: Option<&'a str>,
-    ctx_size: Option<u32>,
-    launch_args: &'a [String],
-}
-
-fn reload_required_response(
-    loaded: &LoadedRustRuntime,
-    requested: &RequestedRuntimeConfig<'_>,
-) -> Value {
-    json!({
-        "ok": false,
-        "already_loaded": true,
-        "requires_reload": true,
-        "error": {
-            "code": "model_reload_required",
-            "message": format!(
-                "model '{}' is already loaded with different runtime settings; unload it before selecting the new configuration",
-                requested.model_key,
-            ),
-        },
-        "current": {
-            "backend": loaded.backend_id,
-            "model": loaded.model_key,
-            "model_path": loaded.model,
-            "public_model_id": loaded.public_model_id,
-            "mmproj": loaded.mmproj,
-            "ctx_size": loaded.ctx_size,
-            "launch_args": loaded.launch_args,
-        },
-        "requested": {
-            "backend": requested.backend_id,
-            "model": requested.model_key,
-            "model_path": requested.model_path,
-            "public_model_id": requested.public_model_id,
-            "mmproj": requested.mmproj,
-            "ctx_size": requested.ctx_size,
-            "launch_args": requested.launch_args,
-        },
-    })
-}
-
-fn loaded_runtime_payload(loaded: &LoadedRustRuntime) -> Value {
-    let info = loaded.process.info();
-    json!({
-        "id": loaded.model_key,
-        "owner_admin_id": loaded.owner_admin_id,
-        "backend": loaded.backend_id,
-        "model": loaded.model_key,
-        "model_path": loaded.model,
-        "public_model_id": loaded.public_model_id,
-        "mmproj": loaded.mmproj,
-        "ctx_size": loaded.ctx_size,
-        "runtime_mode": "external_server",
-        "backend_pid": info.pid,
-        "backend_port": info.port,
-        "launch_args": loaded.launch_args,
-        "cuda_visible_devices": loaded.cuda_visible_devices,
-        "warning": loaded.cuda_warning,
-        "launch_command": info.command,
-        "proxy_model": loaded.proxy_model_ref,
-        "external_server_protocol": loaded.external_server_protocol.as_str(),
-        "client_endpoint": loaded.client_endpoint,
-        "openai_compatible": loaded.external_server_protocol.is_openai_compatible(),
-        "backend_log": info.log_path.display().to_string(),
-    })
-}
-
-fn model_log_file_name(base: &str, model_key: &str) -> String {
-    let sanitized = model_key
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    match base.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
-            format!("{stem}-{sanitized}.{ext}")
+    fn reserve_runtime_resources(
+        &mut self,
+        request_id: &str,
+        budget: &ResourceBudget,
+        cuda_visible_devices: Option<&str>,
+    ) -> Result<ReservationId> {
+        let observed = detect_available_resources(cuda_visible_devices)?;
+        let current_usage = self
+            .resource_ledger
+            .as_ref()
+            .map(|ledger| ledger.snapshot())
+            .map(|snapshot| {
+                merge_domain_totals(&snapshot.reserved, &snapshot.committed)
+                    .map(|usage| (snapshot, usage))
+            })
+            .transpose()?;
+        let mut capacities = current_usage
+            .as_ref()
+            .map(|(snapshot, _)| snapshot.capacities.clone())
+            .unwrap_or_default();
+        for (domain, available) in observed {
+            let used = current_usage
+                .as_ref()
+                .and_then(|(_, usage)| usage.get(&domain))
+                .copied()
+                .unwrap_or(0);
+            capacities.insert(
+                domain,
+                available
+                    .checked_add(used)
+                    .ok_or_else(|| anyhow::anyhow!("resource capacity overflow"))?,
+            );
         }
-        _ => format!("{base}-{sanitized}.log"),
+        let snapshot_id = self.next_capacity_snapshot;
+        self.next_capacity_snapshot = self
+            .next_capacity_snapshot
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("resource capacity snapshot overflow"))?;
+        let capacity = ResourceCapacity::new(snapshot_id, capacities)?;
+        match self.resource_ledger.as_mut() {
+            Some(ledger) => ledger.update_capacity(capacity)?,
+            None => self.resource_ledger = Some(ResourceLedger::new(capacity)),
+        }
+        Ok(self
+            .resource_ledger
+            .as_mut()
+            .expect("resource ledger was initialized")
+            .reserve(request_id, budget.clone())?)
     }
-}
 
-fn json_required_str<'a>(payload: &'a Value, key: &'static str) -> Result<&'a str> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("field '{key}' is required"))
-}
+    fn reap_exited_runtimes(&mut self) {
+        let exited = self
+            .loaded
+            .iter_mut()
+            .filter_map(|(key, loaded)| match loaded.process.has_exited() {
+                Ok(true) => Some(key.clone()),
+                Ok(false) => None,
+                Err(_) => {
+                    loaded.route_state = RuntimeRouteState::Failed;
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for key in exited {
+            self.remove_runtime_and_release(&key);
+        }
+        self.select_fallback_default();
+    }
 
-fn resolve_model_for_backend(
-    model: &str,
-    backend: &backend_registry::BackendSpec,
-) -> Result<omniinfer_core::model_artifacts::ResolvedModelArtifacts> {
-    if backend.model_artifact == "reference" {
-        return Ok(omniinfer_core::model_artifacts::ResolvedModelArtifacts {
-            model_path: model.to_string(),
-            mmproj_path: None,
+    fn remove_runtime_and_release(&mut self, key: &str) {
+        if let Some(loaded) = self.loaded.remove(key)
+            && let Some(ledger) = self.resource_ledger.as_mut()
+        {
+            ledger.release(loaded.allocation_id);
+        }
+    }
+
+    fn select_fallback_default(&mut self) {
+        if self.default_model_key.as_ref().is_some_and(|key| {
+            self.loaded
+                .get(key)
+                .is_some_and(|loaded| loaded.route_state == RuntimeRouteState::Ready)
+        }) {
+            return;
+        }
+        self.default_model_key = self.loaded.iter().rev().find_map(|(key, loaded)| {
+            (loaded.route_state == RuntimeRouteState::Ready).then(|| key.clone())
         });
     }
-    let path = resolve_path_for_backend(model, backend, "model")?;
-    if backend.model_artifact == "vla-artifact" {
-        let path = PathBuf::from(&path);
-        if path.is_dir() {
-            anyhow::bail!(
-                "vla.cpp model must be a checkpoint file, not a directory: {}",
-                path.display()
-            );
-        }
-        if !is_vla_checkpoint_path(&path) {
-            anyhow::bail!(
-                "vla.cpp model must be a .gguf or .safetensors checkpoint: {}",
-                path.display()
-            );
-        }
-    }
-    if backend.model_artifact == "file" && PathBuf::from(&path).is_dir() {
-        return Ok(discover_llama_cpp_model_artifacts(&PathBuf::from(path))?);
-    }
-    Ok(omniinfer_core::model_artifacts::ResolvedModelArtifacts {
-        model_path: path,
-        mmproj_path: None,
-    })
-}
 
-fn is_vla_checkpoint_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("gguf") || extension.eq_ignore_ascii_case("safetensors")
-        })
-}
-
-fn resolve_path_for_backend(
-    text: &str,
-    backend: &backend_registry::BackendSpec,
-    label: &str,
-) -> Result<String> {
-    let mut path = expand_home(PathBuf::from(text.trim()));
-    if !path.is_absolute() {
-        let Some(models_dir) = backend.models_dir.as_deref() else {
-            anyhow::bail!("relative {label} path requires a configured models_dir");
+    fn resource_ledger_payload(&self) -> Value {
+        let Some(ledger) = self.resource_ledger.as_ref() else {
+            return Value::Null;
         };
-        path = PathBuf::from(models_dir).join(path);
+        let snapshot = ledger.snapshot();
+        let available = snapshot.available().unwrap_or_default();
+        json!({
+            "capacity_snapshot_id": snapshot.capacity_snapshot_id,
+            "capacity_bytes": domain_bytes_payload(&snapshot.capacities),
+            "reserved_bytes": domain_bytes_payload(&snapshot.reserved),
+            "committed_bytes": domain_bytes_payload(&snapshot.committed),
+            "available_bytes": domain_bytes_payload(&available),
+        })
     }
-    if label == "model" && backend.model_artifact == "directory" {
-        if !path.is_dir() {
-            anyhow::bail!("model directory not found: {}", path.display());
-        }
-    } else if !path.exists() {
-        anyhow::bail!("{label} not found: {}", path.display());
-    }
-    Ok(path.display().to_string())
 }
 
-fn expand_home(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    if let Some(rest) = text.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    path
-}
+mod lifecycle;
 
-fn launch_args_have_ctx_size(family: &str, args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        let flag = arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg);
-        match family {
-            "vllm" => flag == "--max-model-len",
-            "llama.cpp" | "turboquant" => matches!(flag, "-c" | "--ctx-size"),
-            _ => matches!(flag, "-c" | "--ctx-size" | "--max-model-len"),
-        }
-    })
-}
+use lifecycle::*;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
 
-fn merged_launch_args(
-    backend_id: &str,
-    family: &str,
-    defaults: &[String],
-    requested: Option<&[String]>,
-) -> Vec<String> {
-    let Some(requested) = requested else {
-        return defaults.to_vec();
-    };
-    if family != "llama.cpp" || !backend_id.starts_with("llama.cpp-") {
-        return requested.to_vec();
-    }
-    defaults.iter().chain(requested).cloned().collect()
-}
+mod resources;
 
+use resources::*;
+mod model_config;
+
+use model_config::*;
 pub(super) fn pick_runtime_port(host: &str) -> Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
     Ok(listener.local_addr()?.port())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_llama_context_args() {
-        assert!(launch_args_have_ctx_size(
-            "llama.cpp",
-            &["-c".to_string(), "8192".to_string()]
-        ));
-        assert!(launch_args_have_ctx_size(
-            "llama.cpp",
-            &["--ctx-size=4096".to_string()]
-        ));
-        assert!(!launch_args_have_ctx_size(
-            "llama.cpp",
-            &["-ngl".to_string(), "999".to_string()]
-        ));
-    }
-
-    #[test]
-    fn detects_vllm_context_args() {
-        assert!(launch_args_have_ctx_size(
-            "vllm",
-            &["--max-model-len=65536".to_string()]
-        ));
-        assert!(!launch_args_have_ctx_size(
-            "vllm",
-            &["--gpu-memory-utilization".to_string(), "0.9".to_string()]
-        ));
-    }
-
-    #[test]
-    fn recognizes_only_supported_vla_checkpoint_extensions() {
-        assert!(is_vla_checkpoint_path(
-            PathBuf::from("model.gguf").as_path()
-        ));
-        assert!(is_vla_checkpoint_path(
-            PathBuf::from("model.SAFETENSORS").as_path()
-        ));
-        assert!(!is_vla_checkpoint_path(
-            PathBuf::from("model.bin").as_path()
-        ));
-        assert!(!is_vla_checkpoint_path(PathBuf::from("model").as_path()));
-    }
-
-    #[test]
-    fn official_llama_launch_args_extend_defaults_with_user_overrides_last() {
-        let defaults = vec![
-            "--slot-prompt-similarity".to_string(),
-            "0".to_string(),
-            "--cache-idle-slots".to_string(),
-            "--cache-ram".to_string(),
-            "8192".to_string(),
-        ];
-        let requested = vec![
-            "-np".to_string(),
-            "5".to_string(),
-            "--cache-ram".to_string(),
-            "32768".to_string(),
-        ];
-
-        assert_eq!(
-            merged_launch_args(
-                "llama.cpp-linux-cuda",
-                "llama.cpp",
-                &defaults,
-                Some(&requested)
-            ),
-            vec![
-                "--slot-prompt-similarity",
-                "0",
-                "--cache-idle-slots",
-                "--cache-ram",
-                "8192",
-                "-np",
-                "5",
-                "--cache-ram",
-                "32768"
-            ]
-        );
-        assert_eq!(
-            merged_launch_args("llama.cpp-linux-cuda", "llama.cpp", &defaults, None),
-            defaults
-        );
-    }
-
-    #[test]
-    fn non_official_llama_launch_args_keep_replacement_semantics() {
-        let defaults = vec!["--jinja".to_string(), "-ngl".to_string(), "999".to_string()];
-        let requested = vec!["-ngl".to_string(), "12".to_string()];
-
-        assert_eq!(
-            merged_launch_args(
-                "ik_llama.cpp-linux-cuda",
-                "llama.cpp",
-                &defaults,
-                Some(&requested)
-            ),
-            requested
-        );
-    }
-
-    #[test]
-    fn wsl_rocm_cold_start_retry_requires_a_safe_total_budget() {
-        assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(420)),
-            Some(Duration::from_secs(120))
-        );
-        assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-rocm", Duration::from_secs(359)),
-            None
-        );
-        assert_eq!(
-            wsl_rocm_cold_start_retry_timeout("vllm-wsl2-cuda", Duration::from_secs(420)),
-            None
-        );
-    }
-
-    #[test]
-    fn ready_timeout_retries_once_with_the_remaining_budget() {
-        let total_timeout = Duration::from_secs(300);
-        let mut attempts = Vec::new();
-        let result = retry_after_ready_timeout(
-            total_timeout,
-            Duration::from_secs(120),
-            Duration::ZERO,
-            |timeout| {
-                attempts.push(timeout);
-                if attempts.len() == 1 {
-                    Err(RuntimeProcessError::ReadyTimeout)
-                } else {
-                    Ok("ready")
-                }
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result, "ready");
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0], Duration::from_secs(120));
-        assert!(attempts[1] <= total_timeout);
-        assert!(attempts[1] >= Duration::from_secs(299));
-    }
-
-    #[test]
-    fn cold_start_retry_does_not_mask_early_exit() {
-        let mut attempts = 0;
-        let error = retry_after_ready_timeout(
-            Duration::from_secs(300),
-            Duration::from_secs(120),
-            Duration::ZERO,
-            |_| {
-                attempts += 1;
-                Err::<(), _>(RuntimeProcessError::EarlyExit)
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, RuntimeProcessError::EarlyExit));
-        assert_eq!(attempts, 1);
-    }
-
-    #[test]
-    fn ready_timeout_does_not_retry_without_post_cooldown_budget() {
-        let mut attempts = 0;
-        let error = retry_after_ready_timeout(
-            Duration::from_millis(1),
-            Duration::ZERO,
-            Duration::from_millis(1),
-            |_| {
-                attempts += 1;
-                Err::<(), _>(RuntimeProcessError::ReadyTimeout)
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, RuntimeProcessError::ReadyTimeout));
-        assert_eq!(attempts, 1);
-    }
-}
+mod tests;

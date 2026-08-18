@@ -10,6 +10,20 @@ use std::time::{Duration, Instant};
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
     record_invocation(&args);
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--query-gpu=index,uuid,memory.free")
+    {
+        println!("0, GPU-fake, 65536");
+        return;
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--query-gpu=index")
+    {
+        println!("0");
+        return;
+    }
     if args.first().is_some_and(|arg| arg.starts_with("--query-gpu")) {
         println!("581.57");
         return;

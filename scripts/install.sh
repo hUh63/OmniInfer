@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Lightweight OmniInfer CLI installer for Linux.
+# Lightweight OmniInfer CLI installer for Linux and macOS.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash -s -- --version v0.3.5
+#   curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash -s -- --version v0.3.24
 set -euo pipefail
 
 REPO="omnimind-ai/OmniInfer"
@@ -35,7 +35,7 @@ Usage:
   bash scripts/install.sh [OPTIONS]
 
 Options:
-  --version VERSION     Release tag to install, for example v0.3.5.
+  --version VERSION     Release tag to install, for example v0.3.24.
                         Default: latest GitHub Release.
   --install-dir DIR     Directory for the omniinfer executable.
                         Default: ~/.local/bin
@@ -43,7 +43,7 @@ Options:
   --base-url URL        Release download base URL.
                         Default: https://github.com/<repo>/releases/download
   --api-url URL         GitHub API base URL. Default: https://api.github.com
-  --target TARGET       Override target triplet for testing. Supported: linux-x64
+  --target TARGET       Override target for testing. Supported: linux-x64, macos-arm64
   --dry-run             Print the resolved install plan without downloading.
   -h, --help            Show this help.
 
@@ -122,11 +122,9 @@ normalize_version() {
         resolve_latest_version
         return
     fi
-    if [[ "${value}" == v* ]]; then
-        printf '%s\n' "${value}"
-    else
-        printf 'v%s\n' "${value}"
-    fi
+    [[ "${value}" =~ ^v?[0-9][0-9A-Za-z._-]*$ ]] \
+        || fatal "invalid release version: ${value}"
+    [[ "${value}" == v* ]] && printf '%s\n' "${value}" || printf 'v%s\n' "${value}"
 }
 
 detect_target() {
@@ -140,8 +138,11 @@ detect_target() {
         Linux:aarch64|Linux:arm64)
             fatal "Linux arm64 release assets are not available yet"
             ;;
-        Darwin:*)
-            fatal "macOS installer support is not implemented in scripts/install.sh yet; use the GitHub Release archive for now"
+        Darwin:arm64|Darwin:aarch64)
+            printf 'macos-arm64\n'
+            ;;
+        Darwin:x86_64|Darwin:amd64)
+            fatal "macOS Intel release assets are not available yet"
             ;;
         *)
             fatal "unsupported platform: ${system}/${machine}"
@@ -184,7 +185,10 @@ need_cmd uname
 if [[ -z "${TARGET}" ]]; then
     TARGET="$(detect_target)"
 fi
-[[ "${TARGET}" == "linux-x64" ]] || fatal "unsupported target: ${TARGET}"
+case "${TARGET}" in
+    linux-x64|macos-arm64) ;;
+    *) fatal "unsupported target: ${TARGET}" ;;
+esac
 
 VERSION="$(normalize_version "${VERSION}")"
 ASSET_NAME="omniinfer-${VERSION}-${TARGET}.tar.gz"
@@ -234,21 +238,12 @@ tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
 
 PACKAGE_DIR="${EXTRACT_DIR}/OmniInfer"
 BINARY_PATH="${PACKAGE_DIR}/omniinfer"
-RUNTIME_HELPER_PATH="${PACKAGE_DIR}/omniinfer-rs"
 [[ -f "${BINARY_PATH}" ]] || fatal "archive did not contain OmniInfer/omniinfer"
 
 mkdir -p "${INSTALL_DIR}"
 TMP_DEST="${INSTALL_DIR}/.omniinfer.tmp.$$"
 cp "${BINARY_PATH}" "${TMP_DEST}"
 chmod 0755 "${TMP_DEST}"
-
-if [[ -f "${RUNTIME_HELPER_PATH}" ]]; then
-    TMP_HELPER="${INSTALL_DIR}/.omniinfer-rs.tmp.$$"
-    cp "${RUNTIME_HELPER_PATH}" "${TMP_HELPER}"
-    chmod 0755 "${TMP_HELPER}"
-    mv "${TMP_HELPER}" "${INSTALL_DIR}/omniinfer-rs"
-    ok "Installed ${INSTALL_DIR}/omniinfer-rs"
-fi
 
 mv "${TMP_DEST}" "${DEST}"
 
