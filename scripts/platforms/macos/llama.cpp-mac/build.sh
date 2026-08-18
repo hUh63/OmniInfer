@@ -20,6 +20,7 @@ Options:
   --clean              Remove the previous build directory before configuring
   --no-bootstrap       Do not auto-initialize the llama.cpp git submodule
   --prebuilt           Download and install the configured upstream prebuilt archive
+  --from-source        Build from the checked-out source submodule (default)
   --smoke-test         Run `llama-server --version` after the build completes
   --dry-run            Print actions without executing them
   -h, --help           Show this help message
@@ -46,6 +47,10 @@ while (($# > 0)); do
       ;;
     --prebuilt)
       INSTALL_PREBUILT=1
+      shift
+      ;;
+    --from-source)
+      INSTALL_PREBUILT=0
       shift
       ;;
     --smoke-test)
@@ -136,10 +141,10 @@ ensure_llama_root() {
   require_command git
   echo "llama.cpp source tree is missing. Bootstrapping the submodule..."
   if [[ ${DRY_RUN} -eq 1 ]]; then
-    echo "  git -C ${REPO_ROOT} submodule update --init --recursive framework/llama.cpp"
+    echo "  git -C ${REPO_ROOT} submodule update --init --recursive --depth 1 framework/llama.cpp"
     return
   fi
-  git -C "${REPO_ROOT}" submodule update --init --recursive framework/llama.cpp
+  git -C "${REPO_ROOT}" submodule update --init --recursive --depth 1 framework/llama.cpp
 
   if [[ ! -f "${LLAMA_ROOT}/CMakeLists.txt" ]]; then
     echo "Failed to prepare llama.cpp at ${LLAMA_ROOT}" >&2
@@ -153,11 +158,11 @@ prepare_runtime_dirs() {
 
 reset_stale_cmake_cache() {
   local cache="${BUILD_ROOT}/CMakeCache.txt"
-  [[ -f "${cache}" ]] || return
+  [[ -f "${cache}" ]] || return 0
 
   local existing_generator
   existing_generator="$(awk -F= '/^CMAKE_GENERATOR:INTERNAL=/{print $2}' "${cache}" | tail -n 1)"
-  [[ -n "${existing_generator}" ]] || return
+  [[ -n "${existing_generator}" ]] || return 0
   if [[ "${existing_generator}" == "${REQUESTED_GENERATOR}" ]]; then
     return
   fi
