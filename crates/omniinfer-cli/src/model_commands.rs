@@ -33,6 +33,7 @@ pub(crate) fn load_model(args: &ModelLoadArgs) -> Result<()> {
         backend_port: None,
         config: args.config.clone(),
         backend_extra_args: args.backend_extra_args.clone(),
+        request_defaults: None,
     };
     let (response, plan) = load_model_with_request(&request, args.verbose)?;
     if plan.auto_selected {
@@ -108,7 +109,18 @@ pub(crate) fn load_model_with_request_for_config_and_autostart(
     let selected_ctx_size = json_u64(&response, "selected_ctx_size")
         .or_else(|| json_u64(&plan.payload, "ctx_size"))
         .and_then(|value| u32::try_from(value).ok());
-    local_state::save_selected_model(selected_model, selected_mmproj, selected_ctx_size)?;
+    let selected_request_defaults = response
+        .get("request_defaults")
+        .or_else(|| plan.payload.get("request_defaults"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    local_state::save_selected_model(
+        selected_model,
+        selected_mmproj,
+        selected_ctx_size,
+        &selected_request_defaults,
+    )?;
     Ok((response, plan))
 }
 

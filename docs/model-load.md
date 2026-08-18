@@ -38,6 +38,8 @@ This document defines the stable gateway contract for loading a model through
 `request_defaults` is not a model-load setting. It is a convenient way for a
 client to attach generation defaults to the loaded runtime. Changing only
 `request_defaults` can reuse the current runtime when the load settings match.
+The effective defaults are exposed through runtime state and retained with the
+selected model so an automatic restore reapplies the same request behavior.
 
 Common generation defaults include:
 
@@ -197,6 +199,10 @@ terminate the distribution.
 `POST /v1/chat/completions` does not load or switch models. It accepts
 OpenAI-compatible generation parameters for the current request and merges them
 over the runtime `request_defaults`.
+
+The precedence is runtime defaults, then the request's nested
+`request_defaults`, then explicit top-level request fields. A non-object
+`request_defaults` value is rejected with HTTP 400.
 
 The following fields may appear in a chat request for compatibility but do not
 start or switch a runtime there: `model`, `backend`, `mmproj`, `ctx_size`, and

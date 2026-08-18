@@ -1,0 +1,516 @@
+use std::collections::BTreeMap;
+use std::process::Command;
+
+use serde_json::{Map, Value, json};
+use thiserror::Error;
+
+use crate::backend_registry::{
+    BackendRegistry, BackendScope, HostInfo, HostSystem, backend_priority,
+};
+
+const LINUX_CATALOG: &str = include_str!("../../model_catalogs/linux.json");
+const MAC_CATALOG: &str = include_str!("../../model_catalogs/mac.json");
+const WINDOWS_CATALOG: &str = include_str!("../../model_catalogs/windows.json");
+
+#[derive(Debug, Error, PartialEq)]
+pub enum ModelCatalogError {
+    #[error("field 'system' must be one of: windows, mac, linux")]
+    InvalidSystem,
+    #[error("invalid bundled model catalog for system: {0}")]
+    InvalidCatalog(String),
+}
+
+pub fn list_supported_models(system_name: &str) -> Result<Value, ModelCatalogError> {
+    let system = parse_system_name(system_name)?;
+    let mut catalog = bundled_catalog(system)?;
+    let memory = MemoryContext::detect();
+    annotate_catalog_root(&mut catalog, system, &memory);
+    Ok(catalog)
+}
+
+pub fn list_supported_models_best(system_name: &str) -> Result<Value, ModelCatalogError> {
+    let system = parse_system_name(system_name)?;
+    let annotated = list_supported_models(system_name)?;
+    let installed_backends = BackendRegistry::build(system_host(system), "", &Value::Null)
+        .rows(BackendScope::Installed)
+        .into_iter()
+        .filter(|row| row.get("hardware_compatible").and_then(Value::as_bool) == Some(true))
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<Vec<_>>();
+    Ok(merge_best_supported_models(
+        system,
+        annotated,
+        &installed_backends,
+    ))
+}
+
+fn parse_system_name(system_name: &str) -> Result<HostSystem, ModelCatalogError> {
+    match system_name.trim().to_ascii_lowercase().as_str() {
+        "linux" => Ok(HostSystem::Linux),
+        "mac" | "macos" | "darwin" => Ok(HostSystem::Mac),
+        "windows" | "win" => Ok(HostSystem::Windows),
+        _ => Err(ModelCatalogError::InvalidSystem),
+    }
+}
+
+fn bundled_catalog(system: HostSystem) -> Result<Value, ModelCatalogError> {
+    let (name, raw) = match system {
+        HostSystem::Linux => ("linux", LINUX_CATALOG),
+        HostSystem::Mac => ("mac", MAC_CATALOG),
+        HostSystem::Windows => ("windows", WINDOWS_CATALOG),
+        _ => return Err(ModelCatalogError::InvalidSystem),
+    };
+    serde_json::from_str(raw).map_err(|_| ModelCatalogError::InvalidCatalog(name.to_string()))
+}
+
+fn annotate_catalog_root(value: &mut Value, system: HostSystem, memory: &MemoryContext) {
+    let Some(backends) = value.as_object_mut() else {
+        return;
+    };
+    for (catalog_backend, backend_payload) in backends {
+        annotate_catalog(backend_payload, system, catalog_backend, memory);
+    }
+}
+
+fn annotate_catalog(
+    value: &mut Value,
+    system: HostSystem,
+    catalog_backend: &str,
+    memory: &MemoryContext,
+) {
+    match value {
+        Value::Object(map) => {
+            if map.get("quantization").and_then(Value::as_object).is_some() {
+                annotate_model_quantizations(map, system, catalog_backend, memory);
+                return;
+            }
+            for child in map.values_mut() {
+                annotate_catalog(child, system, catalog_backend, memory);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                annotate_catalog(child, system, catalog_backend, memory);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn annotate_model_quantizations(
+    model: &mut Map<String, Value>,
+    system: HostSystem,
+    catalog_backend: &str,
+    memory: &MemoryContext,
+) {
+    let vision_size_gib = model
+        .get("vision")
+        .and_then(|vision| vision.get("size"))
+        .map(parse_size_gib)
+        .unwrap_or(0.0);
+    let Some(quantizations) = model.get_mut("quantization").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for quant_info in quantizations.values_mut() {
+        let Some(quant_map) = quant_info.as_object_mut() else {
+            continue;
+        };
+        let required =
+            round_gib(quant_map.get("size").map(parse_size_gib).unwrap_or(0.0) + vision_size_gib);
+        quant_map.insert("required_memory_gib".to_string(), json!(required));
+        let available = available_memory_for_catalog_backend(system, catalog_backend, memory);
+        let margin = safety_margin_gib(system, catalog_backend);
+        let memory_status = match available {
+            Some(value) if value >= round_gib(required + margin) => "sufficient",
+            Some(_) => "insufficient",
+            None => "unknown",
+        };
+        quant_map.insert("suitable".to_string(), json!(memory_status == "sufficient"));
+        quant_map.insert(
+            "available_memory_gib".to_string(),
+            available.map_or(Value::Null, |value| json!(value)),
+        );
+        quant_map.insert("memory_status".to_string(), json!(memory_status));
+    }
+}
+
+fn merge_best_supported_models(
+    system: HostSystem,
+    annotated_catalog: Value,
+    installed_backend_ids: &[String],
+) -> Value {
+    let installed = installed_backend_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let Some(backends) = annotated_catalog.as_object() else {
+        return json!({});
+    };
+    let mut merged = Map::new();
+    let mut quantization_candidates: BTreeMap<(String, String, String), Vec<QuantCandidate>> =
+        BTreeMap::new();
+
+    for (catalog_backend, backend_payload) in backends {
+        let runtime_backend = resolve_catalog_backend_id(system, catalog_backend);
+        if !installed.contains(runtime_backend.as_str()) {
+            continue;
+        }
+        let Some(families) = backend_payload.as_object() else {
+            continue;
+        };
+        for (family_name, family_models) in families {
+            let Some(models) = family_models.as_object() else {
+                continue;
+            };
+            let target_family = object_entry(&mut merged, family_name);
+            for (model_name, model_info) in models {
+                let Some(model_map) = model_info.as_object() else {
+                    continue;
+                };
+                let target_model = object_entry(target_family, model_name);
+                for (key, value) in model_map {
+                    if key != "quantization" && !target_model.contains_key(key) {
+                        target_model.insert(key.clone(), value.clone());
+                    }
+                }
+                let Some(quantizations) = model_map.get("quantization").and_then(Value::as_object)
+                else {
+                    continue;
+                };
+                let target_quantizations = object_entry(target_model, "quantization");
+                for (quant_name, quant_info) in quantizations {
+                    let Some(quant_map) = quant_info.as_object() else {
+                        continue;
+                    };
+                    target_quantizations
+                        .entry(quant_name.clone())
+                        .or_insert_with(|| Value::Object(quant_map.clone()));
+                    quantization_candidates
+                        .entry((family_name.clone(), model_name.clone(), quant_name.clone()))
+                        .or_default()
+                        .push(QuantCandidate {
+                            backend: runtime_backend.clone(),
+                            payload: Value::Object(quant_map.clone()),
+                            suitable: quant_map
+                                .get("suitable")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        });
+                }
+            }
+        }
+    }
+
+    for ((family_name, model_name, quant_name), candidates) in quantization_candidates {
+        let Some(best) = best_candidate(&candidates) else {
+            continue;
+        };
+        let Some(target_quant) = merged
+            .get_mut(&family_name)
+            .and_then(Value::as_object_mut)
+            .and_then(|family| family.get_mut(&model_name))
+            .and_then(Value::as_object_mut)
+            .and_then(|model| model.get_mut("quantization"))
+            .and_then(Value::as_object_mut)
+            .and_then(|quantizations| quantizations.get_mut(&quant_name))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let replacement = best.payload.as_object().cloned().unwrap_or_else(Map::new);
+        target_quant.clear();
+        target_quant.extend(replacement);
+        target_quant.insert("backend".to_string(), Value::String(best.backend.clone()));
+    }
+
+    Value::Object(merged)
+}
+
+#[derive(Debug, Clone)]
+struct QuantCandidate {
+    backend: String,
+    payload: Value,
+    suitable: bool,
+}
+
+fn best_candidate(candidates: &[QuantCandidate]) -> Option<&QuantCandidate> {
+    let suitable = candidates
+        .iter()
+        .filter(|candidate| candidate.suitable)
+        .collect::<Vec<_>>();
+    if !suitable.is_empty() {
+        return suitable
+            .into_iter()
+            .min_by_key(|candidate| backend_priority(&candidate.backend));
+    }
+    candidates
+        .iter()
+        .min_by_key(|candidate| backend_priority(&candidate.backend))
+}
+
+fn object_entry<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+    map.entry(key.to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .expect("object entry should be an object")
+}
+
+fn resolve_catalog_backend_id(system: HostSystem, backend_id: &str) -> String {
+    resolve_catalog_backend_id_for_machine(system, backend_id, std::env::consts::ARCH)
+}
+
+fn resolve_catalog_backend_id_for_machine(
+    system: HostSystem,
+    backend_id: &str,
+    machine: &str,
+) -> String {
+    match (system, backend_id) {
+        (HostSystem::Linux, "llama.cpp-cuda") => "llama.cpp-linux-cuda".to_string(),
+        (HostSystem::Linux, "llama.cpp-vulkan") => "llama.cpp-linux-vulkan".to_string(),
+        (HostSystem::Linux, "llama.cpp-openvino") => "llama.cpp-linux-openvino".to_string(),
+        (HostSystem::Linux, "llama.cpp-linux") if machine == "s390x" => {
+            "llama.cpp-linux-s390x".to_string()
+        }
+        (HostSystem::Mac, "llama.cpp-cpu") if matches!(machine, "x86_64" | "amd64") => {
+            "llama.cpp-mac-intel".to_string()
+        }
+        (HostSystem::Mac, "llama.cpp-cpu") => "llama.cpp-mac".to_string(),
+        (HostSystem::Windows, "llama.cpp-cpu") if matches!(machine, "aarch64" | "arm64") => {
+            "llama.cpp-windows-arm64".to_string()
+        }
+        _ => backend_id.to_string(),
+    }
+}
+
+fn system_host(system: HostSystem) -> HostInfo {
+    HostInfo {
+        system,
+        machine: std::env::consts::ARCH,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MemoryContext {
+    ram_available_gib: Option<f64>,
+    cuda_available_gib: Option<f64>,
+}
+
+impl MemoryContext {
+    fn detect() -> Self {
+        Self {
+            ram_available_gib: available_ram_gib(),
+            cuda_available_gib: available_cuda_gib(),
+        }
+    }
+}
+
+fn available_memory_for_catalog_backend(
+    system: HostSystem,
+    catalog_backend: &str,
+    memory: &MemoryContext,
+) -> Option<f64> {
+    let runtime_backend = resolve_catalog_backend_id(system, catalog_backend);
+    if is_gpu_backend(&runtime_backend) && runtime_backend.contains("cuda") {
+        return memory.cuda_available_gib;
+    }
+    memory.ram_available_gib
+}
+
+fn safety_margin_gib(system: HostSystem, catalog_backend: &str) -> f64 {
+    let runtime_backend = resolve_catalog_backend_id(system, catalog_backend);
+    if is_gpu_backend(&runtime_backend) {
+        0.5
+    } else {
+        1.0
+    }
+}
+
+fn is_gpu_backend(backend_id: &str) -> bool {
+    matches!(
+        backend_id,
+        "llama.cpp-linux-cuda"
+            | "llama.cpp-linux-rocm"
+            | "llama.cpp-linux-vulkan"
+            | "omniinfer-native-linux"
+            | "ik_llama.cpp-linux-cuda"
+            | "vllm-linux-cuda"
+            | "vllm-wsl2-cuda"
+            | "vllm-wsl2-rocm"
+            | "llama.cpp-cuda"
+            | "llama.cpp-vulkan"
+            | "llama.cpp-sycl"
+            | "llama.cpp-hip"
+            | "ik_llama.cpp-cuda"
+    )
+}
+
+fn available_ram_gib() -> Option<f64> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    let available = system.available_memory();
+    (available > 0).then(|| round_gib(available as f64 / 1024.0 / 1024.0 / 1024.0))
+}
+
+fn available_cuda_gib() -> Option<f64> {
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|line| line.trim().parse::<f64>().ok())
+        .map(|mib| round_gib(mib / 1024.0))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn parse_size_gib(value: &Value) -> f64 {
+    match value {
+        Value::Number(number) => number.as_f64().unwrap_or(0.0),
+        Value::String(text) => text.parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+fn round_gib(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_bundled_catalog_with_memory_annotations() {
+        let catalog = list_supported_models("linux").unwrap();
+        let quant = catalog
+            .get("llama.cpp-linux")
+            .and_then(|value| value.get("Qwen2.5"))
+            .and_then(|value| value.get("Qwen2.5-0.5B-Instruct"))
+            .and_then(|value| value.get("quantization"))
+            .and_then(|value| value.get("Q4_K_M"))
+            .unwrap();
+        assert_eq!(quant["required_memory_gib"], json!(0.49));
+        assert!(quant.get("suitable").and_then(Value::as_bool).is_some());
+        assert!(quant.get("memory_status").and_then(Value::as_str).is_some());
+    }
+
+    fn mac_qwen_quant(catalog: &Value) -> &Value {
+        catalog
+            .get("llama.cpp-mac")
+            .and_then(|value| value.get("Qwen3.5"))
+            .and_then(|value| value.get("Qwen3.5-0.8B"))
+            .and_then(|value| value.get("quantization"))
+            .and_then(|value| value.get("Q4_K_M"))
+            .unwrap()
+    }
+
+    #[test]
+    fn mac_catalog_uses_injected_available_memory() {
+        let mut catalog = bundled_catalog(HostSystem::Mac).unwrap();
+        let memory = MemoryContext {
+            ram_available_gib: Some(8.0),
+            cuda_available_gib: None,
+        };
+        annotate_catalog_root(&mut catalog, HostSystem::Mac, &memory);
+        let quant = mac_qwen_quant(&catalog);
+        assert_eq!(quant["available_memory_gib"], json!(8.0));
+        assert_eq!(quant["memory_status"], json!("sufficient"));
+        assert_eq!(quant["suitable"], json!(true));
+    }
+
+    #[test]
+    fn unknown_mac_memory_preserves_installed_backend() {
+        let mut catalog = bundled_catalog(HostSystem::Mac).unwrap();
+        let memory = MemoryContext {
+            ram_available_gib: None,
+            cuda_available_gib: None,
+        };
+        annotate_catalog_root(&mut catalog, HostSystem::Mac, &memory);
+        let quant = mac_qwen_quant(&catalog);
+        assert_eq!(quant["available_memory_gib"], Value::Null);
+        assert_eq!(quant["memory_status"], json!("unknown"));
+        assert_eq!(quant["suitable"], json!(false));
+
+        let merged =
+            merge_best_supported_models(HostSystem::Mac, catalog, &["llama.cpp-mac".to_string()]);
+        assert_eq!(
+            merged["Qwen3.5"]["Qwen3.5-0.8B"]["quantization"]["Q4_K_M"]["backend"],
+            json!("llama.cpp-mac")
+        );
+    }
+
+    #[test]
+    fn insufficient_mac_memory_preserves_installed_backend() {
+        let mut catalog = bundled_catalog(HostSystem::Mac).unwrap();
+        let memory = MemoryContext {
+            ram_available_gib: Some(1.0),
+            cuda_available_gib: None,
+        };
+        annotate_catalog_root(&mut catalog, HostSystem::Mac, &memory);
+        let quant = mac_qwen_quant(&catalog);
+        assert_eq!(quant["memory_status"], json!("insufficient"));
+        assert_eq!(quant["suitable"], json!(false));
+
+        let merged =
+            merge_best_supported_models(HostSystem::Mac, catalog, &["llama.cpp-mac".to_string()]);
+        assert_eq!(
+            merged["Qwen3.5"]["Qwen3.5-0.8B"]["quantization"]["Q4_K_M"]["backend"],
+            json!("llama.cpp-mac")
+        );
+    }
+
+    #[test]
+    fn resolves_mac_backend_for_each_architecture() {
+        assert_eq!(
+            resolve_catalog_backend_id_for_machine(HostSystem::Mac, "llama.cpp-cpu", "arm64"),
+            "llama.cpp-mac"
+        );
+        assert_eq!(
+            resolve_catalog_backend_id_for_machine(HostSystem::Mac, "llama.cpp-cpu", "aarch64"),
+            "llama.cpp-mac"
+        );
+        assert_eq!(
+            resolve_catalog_backend_id_for_machine(HostSystem::Mac, "llama.cpp-cpu", "x86_64"),
+            "llama.cpp-mac-intel"
+        );
+    }
+
+    #[test]
+    fn gemma_4_12b_catalog_includes_vision_projector() {
+        let catalog = list_supported_models("linux").unwrap();
+        let model = catalog
+            .get("llama.cpp-linux-cuda")
+            .and_then(|value| value.get("Gemma4"))
+            .and_then(|value| value.get("gemma-4-12B-it"))
+            .unwrap();
+        assert_eq!(
+            model["quantization"]["Q4_K_M"]["download"],
+            json!(
+                "https://modelscope.cn/models/unsloth/gemma-4-12B-it-GGUF/resolve/master/gemma-4-12b-it-Q4_K_M.gguf"
+            )
+        );
+        assert_eq!(
+            model["vision"]["download"],
+            json!(
+                "https://modelscope.cn/models/unsloth/gemma-4-12B-it-GGUF/resolve/master/mmproj-F16.gguf"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_system() {
+        assert!(matches!(
+            list_supported_models("android").unwrap_err(),
+            ModelCatalogError::InvalidSystem
+        ));
+    }
+
+    #[test]
+    fn merges_best_catalog_for_installed_backends() {
+        let best = list_supported_models_best("linux").unwrap();
+        assert!(best.is_object());
+    }
+}
