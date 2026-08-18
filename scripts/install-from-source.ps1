@@ -495,9 +495,10 @@ Write-Info "Step 3/6: Detecting platform and hardware ..."
 
 $omniinferScript = Join-Path $InstallDir "omniinfer.ps1"
 
-# Helper: invoke the Rust control-plane launcher.
+# Helper: invoke the Rust control-plane launcher. Service settings, including
+# the selected port, are read from the repository config.
 function Invoke-OmniInfer {
-    & $omniinferScript --port $OmniPort @args
+    & $omniinferScript @args
 }
 
 # Cleanup: shut down any gateway service started by the CLI on script exit

@@ -97,10 +97,10 @@ need_cmd() {
     ok "$1"
 }
 
-# Run omniinfer CLI with the correct port
-# OMNI_PORT must be set before calling this function
+# Run the repository-local OmniInfer CLI. Service settings, including the
+# selected port, are read from the repository config.
 omniinfer_cmd() {
-    "${INSTALL_DIR}/omniinfer" --port "${OMNI_PORT}" "$@"
+    "${INSTALL_DIR}/omniinfer" "$@"
 }
 
 # Resolve the TTY file descriptor for interactive input.
@@ -435,6 +435,27 @@ OMNI_PORT="${_OMNI_PORT}"
 
 if [[ "${_OMNI_PORT_FOUND}" == "free" ]] && [[ "${OMNI_PORT}" != "9000" ]]; then
     warn "Default port 9000 is occupied, will use alternative port ${OMNI_PORT}"
+    CONFIG_PATH="${INSTALL_DIR}/config/omniinfer.json"
+    mkdir -p "$(dirname "${CONFIG_PATH}")"
+    CONFIG_PATH="${CONFIG_PATH}" OMNI_PORT="${OMNI_PORT}" run_python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["CONFIG_PATH"])
+try:
+    config = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+except (OSError, json.JSONDecodeError):
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+config["host"] = "127.0.0.1"
+config["port"] = int(os.environ["OMNI_PORT"])
+temporary = path.with_name(f".{path.name}.tmp")
+temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+    ok "Config written: ${CONFIG_PATH} (port ${OMNI_PORT})"
     info "To start the service on port ${OMNI_PORT}, use: ./omniinfer serve --port ${OMNI_PORT}"
     info "To list all running services, use: ./omniinfer ps"
 fi
