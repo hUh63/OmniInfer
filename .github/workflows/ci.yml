@@ -46,6 +46,7 @@ jobs:
       - name: Test Unix installer contracts
         run: |
           bash tests/test_release_installer.sh
+          bash tests/test_source_installer.sh
           bash tests/test_install_deps.sh
           ./omniinfer --version
 
@@ -70,4 +71,5 @@ jobs:
         shell: powershell
         run: |
           .\tests\test_release_installer.ps1
+          .\tests\test_source_installer.ps1
           .\omniinfer.ps1 --version

@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: |
           bash tests/test_release_installer.sh
+          bash tests/test_source_installer.sh
           ./omniinfer --version
 
       - name: Test Linux source installer helpers
@@ -59,4 +60,5 @@ jobs:
         shell: powershell
         run: |
           .\tests\test_release_installer.ps1
+          .\tests\test_source_installer.ps1
           .\omniinfer.ps1 --version
