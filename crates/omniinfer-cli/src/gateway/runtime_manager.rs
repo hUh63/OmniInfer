@@ -672,7 +672,7 @@ impl RustRuntimeManager {
                 "proxy_model": null,
                 "external_server_protocol": null,
                 "client_endpoint": null,
-                "openai_compatible": false,
+                "openai_compatible": true,
                 "backend_log": null,
                 "effective_parameters": {},
                 "runtime": null,
