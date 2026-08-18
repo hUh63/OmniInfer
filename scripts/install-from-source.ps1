@@ -422,6 +422,7 @@ if (-not $env:OMNIINFER_INSTALL_HANDOFF -and (Test-Path $repoScript)) {
     if ($Model)   { $handoffArgs += @("-m", $Model) }
     if ($NoModel) { $handoffArgs += "-NoModel" }
     if ($Backend) { $handoffArgs += @("-Backend", $Backend) }
+    if ($Prebuilt)       { $handoffArgs += "-Prebuilt" }
     if ($SkipBuild)      { $handoffArgs += "-SkipBuild" }
     if ($NonInteractive) { $handoffArgs += "-NonInteractive" }
     & powershell.exe @handoffArgs
@@ -645,8 +646,8 @@ if ($SkipBuild) {
     Write-Info "Skipping build (-SkipBuild)"
     $script:BuildStatus = "skipped"
 } else {
-    $runtimeCheck = Invoke-OmniInfer backend list 2>$null
-    $isBuilt = ($runtimeCheck -join "`n") -match "$([regex]::Escape($SelectedBackend))[\s\S]*?Runtime available: yes"
+    $runtimeCheck = Invoke-OmniInfer backend list --scope installed 2>$null
+    $isBuilt = ($runtimeCheck -join "`n") -match "(?m)^\s*$([regex]::Escape($SelectedBackend))\s+"
     if ($isBuilt) {
         Write-Ok "Backend $SelectedBackend already installed, skipping"
         $script:BuildStatus = if ($Prebuilt) { "prebuilt" } else { "already-built" }
@@ -832,7 +833,7 @@ Write-Host ""
 # ── Finish message (reused by both paths) ──────────────────
 function Print-Finish {
     Write-Host ""
-    Invoke-OmniInfer shutdown 2>$null
+    if (-not $SkipBuild) { Invoke-OmniInfer shutdown 2>$null }
     Write-InstallSummary
 
     Write-Host ""

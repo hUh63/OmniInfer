@@ -1021,7 +1021,9 @@ FINISH
 
 else
     # ── No model configured — print next steps ──────────
-    omniinfer_cmd shutdown 2>/dev/null || true
+    if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+        omniinfer_cmd shutdown 2>/dev/null || true
+    fi
     write_install_summary
     cat <<EOF
 
