@@ -544,6 +544,12 @@ mod tests {
     }
 
     #[test]
+    fn proxy_eof_is_transient_public_smoke_error() {
+        let error = anyhow::anyhow!("HTTPS request failed: io: unexpected end of file");
+        assert!(is_transient_public_smoke_error(&error));
+    }
+
+    #[test]
     fn auth_failures_are_not_transient_public_smoke_errors() {
         let error = anyhow::anyhow!("HTTPS request failed: http status: 401");
         assert!(!is_transient_public_smoke_error(&error));
