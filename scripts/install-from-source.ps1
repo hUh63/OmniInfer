@@ -52,6 +52,29 @@ function Stop-Fatal  {
     exit 1
 }
 
+function Invoke-LoggedPowerShellBuild {
+    param(
+        [string[]]$Arguments,
+        [string]$LogPath
+    )
+
+    # Windows PowerShell 5.1 promotes a native child's stderr records when the
+    # caller uses Stop. CMake writes normal configure output to stderr, so keep
+    # that stream in the build log and decide success from the process exit code.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & powershell.exe @Arguments 2>&1 |
+            Tee-Object -FilePath $LogPath |
+            Out-Host
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return $exitCode
+}
+
 function Test-Command {
     param([string]$Name, [string]$Hint)
     if (Get-Command $Name -ErrorAction SilentlyContinue) {
@@ -674,8 +697,9 @@ if ($SkipBuild) {
         if ($Prebuilt) {
             $scriptArgs += "-Prebuilt"
         }
-        powershell @scriptArgs 2>&1 | Tee-Object -FilePath $script:BuildLogPath
-        $buildExitCode = $LASTEXITCODE
+        $buildExitCode = Invoke-LoggedPowerShellBuild `
+            -Arguments $scriptArgs `
+            -LogPath $script:BuildLogPath
         if ($buildExitCode -ne 0) {
             $script:BuildStatus = "failed"
             Write-Host ""
