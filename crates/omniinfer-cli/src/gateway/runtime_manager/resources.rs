@@ -244,7 +244,7 @@ pub(super) fn detect_cuda_device_ids() -> Result<Vec<String>> {
 
 #[cfg(not(test))]
 pub(super) fn detect_cuda_device_ids() -> Result<Vec<String>> {
-    let output = std::process::Command::new("nvidia-smi")
+    let output = std::process::Command::new(nvidia_smi_executable())
         .args(["--query-gpu=index", "--format=csv,noheader,nounits"])
         .output()?;
     if !output.status.success() {
@@ -276,7 +276,7 @@ pub(super) fn cuda_available_bytes(visible_devices: &str) -> Result<BTreeMap<Mem
     if requested.is_empty() {
         anyhow::bail!("CUDA device selection is empty");
     }
-    let output = std::process::Command::new("nvidia-smi")
+    let output = std::process::Command::new(nvidia_smi_executable())
         .args([
             "--query-gpu=index,uuid,memory.free",
             "--format=csv,noheader,nounits",
@@ -307,6 +307,11 @@ pub(super) fn cuda_available_bytes(visible_devices: &str) -> Result<BTreeMap<Mem
         );
     }
     Ok(available)
+}
+
+#[cfg(not(test))]
+fn nvidia_smi_executable() -> std::ffi::OsString {
+    std::env::var_os("OMNIINFER_VLLM_NVIDIA_SMI").unwrap_or_else(|| "nvidia-smi".into())
 }
 
 pub(super) fn merge_domain_totals(
