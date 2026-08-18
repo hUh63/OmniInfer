@@ -14,6 +14,14 @@ if ($errors.Count -gt 0) {
     throw "Source installer has PowerShell parse errors: $($errors -join '; ')"
 }
 
+$installerText = [IO.File]::ReadAllText((Resolve-Path $Installer))
+if (-not $installerText.Contains('Write-Host "    .\omniinfer.ps1 serve --detach"')) {
+    throw "Source installer completion guidance must start the gateway before model loading"
+}
+if ($installerText.Contains("The CLI auto-starts the service if needed.")) {
+    throw "Source installer must not claim that model commands auto-start the gateway"
+}
+
 $waitFunction = $ast.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

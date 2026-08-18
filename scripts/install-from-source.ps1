@@ -885,6 +885,7 @@ function Print-Finish {
         Write-Host "  Your backend selection is saved. Next time just run:"
         Write-Host ""
         Write-Host "    cd $InstallDir"
+        Write-Host "    .\omniinfer.ps1 serve --detach"
         Write-Host "    .\omniinfer.ps1 model load -m $ModelPath"
         Write-Host "    .\omniinfer.ps1 chat --message `"Hello`""
     } else {
@@ -892,12 +893,12 @@ function Print-Finish {
         Write-Host "  To start chatting, load a model first:"
         Write-Host ""
         Write-Host "    cd $InstallDir"
+        Write-Host "    .\omniinfer.ps1 serve --detach"
         Write-Host "    .\omniinfer.ps1 model load -m C:\path\to\model.gguf"
         Write-Host "    .\omniinfer.ps1 chat --message `"Hello`""
     }
     Write-Host ""
     Write-Host "  The model needs to be loaded each time after a restart."
-    Write-Host "  The CLI auto-starts the service if needed."
     Write-Host ""
     Write-Host "  Other useful commands:"
     Write-Host "    .\omniinfer.ps1 backend list          # list available backends"
@@ -923,6 +924,7 @@ if ($ModelConfigured -and $ModelPath) {
         Write-Host ""
         Write-Host "  Try building the backend first, then re-run:"
         Write-Host "    cd $InstallDir"
+        Write-Host "    .\omniinfer.ps1 serve --detach"
         Write-Host "    .\omniinfer.ps1 model load -m $ModelPath"
         Write-Host ""
         exit 1

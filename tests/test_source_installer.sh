@@ -102,10 +102,15 @@ bash "${REPO_ROOT}/scripts/install-from-source.sh" \
     --from-source \
     --no-model \
     --non-interactive \
-    --no-install-system-deps >/dev/null
+    --no-install-system-deps >"${TEST_ROOT}/installer-output.txt"
 
 [[ "$(cat "${TEST_ROOT}/build-args.txt")" == "--from-source" ]] ||
     fail "source installer did not preserve the backend source-build contract"
+grep -qF './omniinfer serve --detach' "${TEST_ROOT}/installer-output.txt" ||
+    fail "source installer completion guidance does not start the gateway"
+if grep -qF 'The CLI auto-starts the service if needed.' "${REPO_ROOT}/scripts/install-from-source.sh"; then
+    fail "source installer claims that model commands auto-start the gateway"
+fi
 python3 - "${install_dir}/.local/install-summary.json" "${backend_id}" <<'PY'
 import json
 import sys

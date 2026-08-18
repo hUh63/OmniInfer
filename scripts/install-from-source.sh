@@ -951,6 +951,7 @@ if [[ "${MODEL_CONFIGURED}" -eq 1 ]] && [[ -n "${MODEL_PATH}" ]]; then
         echo ""
         echo "  Try building the backend first, then re-run:"
         echo "    cd ${INSTALL_DIR}"
+        echo "    ./omniinfer serve --detach"
         echo "    ./omniinfer model load -m ${MODEL_PATH}"
         echo ""
         exit 1
@@ -977,11 +978,11 @@ if [[ "${MODEL_CONFIGURED}" -eq 1 ]] && [[ -n "${MODEL_PATH}" ]]; then
   Your backend selection is saved. Next time just run:
 
     cd ${INSTALL_DIR}
+    ./omniinfer serve --detach
     ./omniinfer model load -m ${MODEL_PATH}
     ./omniinfer chat --message "Hello"
 
   The model needs to be loaded each time after a restart.
-  The CLI auto-starts the service if needed.
 
   Other useful commands:
     ./omniinfer backend list              # list available backends
@@ -1037,6 +1038,7 @@ else
   To start chatting, load a model first:
 
     cd ${INSTALL_DIR}
+    ./omniinfer serve --detach
     ./omniinfer model load -m /path/to/model.gguf
     ./omniinfer chat --message "Hello"
 
