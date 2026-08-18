@@ -507,48 +507,19 @@ Register-EngineEvent PowerShell.Exiting -Action {
 
 $BackendIds   = @()
 $BackendDescs = @()
-# Query compatible backends via CLI --json flag (avoids gateway HTTP and proxy issues)
-$_backendsJson = $null
-try {
-    $prevEAP3 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $rawJson = Invoke-OmniInfer backend list --scope compatible --json 2>$null
-    $ErrorActionPreference = $prevEAP3
-    if ($rawJson) { $_backendsJson = $rawJson | ConvertFrom-Json }
-} catch {}
-
-if ($_backendsJson -and $_backendsJson.data) {
-    foreach ($b in $_backendsJson.data) {
-        $BackendIds   += $b.id
-        $desc = $b.description
-        $label = if ($desc) { "$($b.id)  -  $desc" } else { $b.id }
-        if ($b.binary_exists) { $label += "  (installed)" }
-        $BackendDescs += $label
+# The stable text table keeps backend IDs in its first column. Querying the
+# local CLI does not require starting or replacing a gateway.
+$rawOutput = (Invoke-OmniInfer backend list --scope compatible 2>$null) -join "`n"
+foreach ($line in $rawOutput -split "`n") {
+    $columns = $line.Trim() -split '\s+'
+    if ($columns.Count -eq 0) { continue }
+    $backendId = $columns[0]
+    if ($backendId -in @("", "Compatible", "Backend", "Install") -or $backendId -match '^-+$') {
+        continue
     }
-    if ($_backendsJson.recommended) {
-        # Move recommended backend to the top of the list
-        $recIdx = [Array]::IndexOf($BackendIds, $_backendsJson.recommended)
-        if ($recIdx -gt 0) {
-            $recId   = $BackendIds[$recIdx];   $recDesc = $BackendDescs[$recIdx]
-            $BackendIds   = @($recId)   + ($BackendIds   | Where-Object { $_ -ne $recId })
-            $BackendDescs = @("$recDesc  (recommended)") + ($BackendDescs | Where-Object { $_ -ne $recDesc })
-        } elseif ($recIdx -eq 0) {
-            $BackendDescs[0] = "$($BackendDescs[0])  (recommended)"
-        }
-    }
-} else {
-    # Fallback: parse CLI text output
-    $rawOutput = Invoke-OmniInfer backend list --scope compatible 2>$null
-    $currentId = ""
-    foreach ($line in $rawOutput -split "`n") {
-        $line = $line.Trim()
-        if ($line -match '^[*\s]*([a-zA-Z0-9._-]+)$') {
-            $currentId = $Matches[1]
-            $BackendIds += $currentId
-            $BackendDescs += $currentId
-        }
-        if ($line -match '^Description:\s*(.+)$' -and $currentId) {
-            $BackendDescs[$BackendDescs.Count - 1] = "$currentId  -  $($Matches[1])"
-        }
+    if ($backendId -match '^[a-zA-Z0-9._-]+$') {
+        $BackendIds += $backendId
+        $BackendDescs += $backendId
     }
 }
 
