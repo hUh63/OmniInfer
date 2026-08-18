@@ -21,6 +21,9 @@ if (-not $installerText.Contains('Write-Host "    .\omniinfer.ps1 serve --detach
 if ($installerText.Contains("The CLI auto-starts the service if needed.")) {
     throw "Source installer must not claim that model commands auto-start the gateway"
 }
+if (-not $installerText.Contains('Invoke-OmniInfer serve --detach --port $OmniPort --no-restore-model')) {
+    throw "Source installer backend activation must not restore a previous model"
+}
 
 $waitFunction = $ast.Find({
     param($node)

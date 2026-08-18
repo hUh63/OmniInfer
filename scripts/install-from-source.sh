@@ -783,7 +783,7 @@ fi
 
 if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     info "Starting the local gateway to activate ${SELECTED_BACKEND} ..."
-    omniinfer_cmd serve --detach --port "${OMNI_PORT}"
+    omniinfer_cmd serve --detach --port "${OMNI_PORT}" --no-restore-model
     omniinfer_cmd backend select "${SELECTED_BACKEND}"
 fi
 echo ""

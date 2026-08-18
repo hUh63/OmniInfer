@@ -64,6 +64,9 @@ cp "${REPO_ROOT}/scripts/lib/source-install-deps.sh" "${install_dir}/scripts/lib
 
 cat >"${install_dir}/omniinfer" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${FIXTURE_COMMANDS_FILE:-}" ]]; then
+    printf '%s\n' "$*" >>"${FIXTURE_COMMANDS_FILE}"
+fi
 case "$*" in
     --version) echo "omniinfer fixture" ;;
     "backend list --scope compatible") echo "${FIXTURE_BACKEND_ID:?} fixture" ;;
@@ -94,6 +97,7 @@ EOF
 chmod +x "${install_dir}/scripts/platforms/${platform_dir}/${backend_id}/build.sh"
 
 BUILD_ARGS_FILE="${TEST_ROOT}/build-args.txt" \
+FIXTURE_COMMANDS_FILE="${TEST_ROOT}/commands.txt" \
 FIXTURE_BACKEND_ID="${backend_id}" \
 PATH="${fake_bin}:${PATH}" \
 bash "${REPO_ROOT}/scripts/install-from-source.sh" \
@@ -108,6 +112,8 @@ bash "${REPO_ROOT}/scripts/install-from-source.sh" \
     fail "source installer did not preserve the backend source-build contract"
 grep -qF './omniinfer serve --detach' "${TEST_ROOT}/installer-output.txt" ||
     fail "source installer completion guidance does not start the gateway"
+grep -Eq '^serve --detach --port [0-9]+ --no-restore-model$' "${TEST_ROOT}/commands.txt" ||
+    fail "source installer backend activation can restore a previous model"
 if grep -qF 'The CLI auto-starts the service if needed.' "${REPO_ROOT}/scripts/install-from-source.sh"; then
     fail "source installer claims that model commands auto-start the gateway"
 fi

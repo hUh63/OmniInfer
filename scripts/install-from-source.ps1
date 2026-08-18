@@ -722,7 +722,7 @@ if ($SkipBuild) {
 
 if (-not $SkipBuild) {
     Write-Info "Starting the local gateway to activate $SelectedBackend ..."
-    Invoke-OmniInfer serve --detach --port $OmniPort
+    Invoke-OmniInfer serve --detach --port $OmniPort --no-restore-model
     if ($LASTEXITCODE -ne 0) { Stop-Fatal "Failed to start the local OmniInfer gateway." }
     Invoke-OmniInfer backend select $SelectedBackend
     if ($LASTEXITCODE -ne 0) { Stop-Fatal "Failed to activate backend $SelectedBackend." }
