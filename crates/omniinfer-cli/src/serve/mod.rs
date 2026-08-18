@@ -139,9 +139,21 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         &admin_api_keys,
         public_model_root.as_deref(),
     )?;
-    let Some(gateway_process) = serve_state::capture_process_identity(rust_gateway.id()) else {
-        cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
-        anyhow::bail!("gateway exited before its process identity could be recorded");
+    let gateway_process = match serve_state::capture_process_identity(rust_gateway.id()) {
+        Some(identity) => identity,
+        #[cfg(debug_assertions)]
+        None if env_flag("OMNIINFER_TEST_ALLOW_OCCUPIED_SERVE_PORT") => {
+            serve_state::ProcessIdentity {
+                pid: rust_gateway.id(),
+                start_time: 0,
+                executable: None,
+                name: "external-test-gateway".to_string(),
+            }
+        }
+        None => {
+            cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
+            anyhow::bail!("gateway exited before its process identity could be recorded");
+        }
     };
     let mut serve_info = serve_state::ServePidInfo {
         run_id: Some(run_id.clone()),

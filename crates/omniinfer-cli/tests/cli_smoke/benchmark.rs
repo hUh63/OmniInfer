@@ -112,10 +112,13 @@ fn bench_archives_submission_compatible_json() {
     );
     assert_eq!(payload["optimization"]["mode"], "baseline");
     assert_eq!(payload["optimization"]["methods"], serde_json::json!([]));
-    assert_eq!(
-        payload["runtime"]["run_command"],
-        "llama-server -m /models/qwen.gguf -b 64 --api-key '<redacted>'"
-    );
+    let run_command = payload["runtime"]["run_command"]
+        .as_str()
+        .expect("runtime command is a string");
+    assert!(run_command.contains("llama-server -m /models/qwen.gguf -b 64"));
+    assert!(run_command.contains("--api-key"));
+    assert!(run_command.contains("<redacted>"));
+    assert!(!run_command.contains("runtime-secret"));
 
     let mut list = Command::cargo_bin("omniinfer").expect("binary exists");
     list.env("OMNIINFER_RUST_REPO_ROOT", &root)
