@@ -43,6 +43,12 @@ jobs:
       - name: Run Linux VLA example contract tests
         run: python3 -m unittest tests/test_vla_libero.py
 
+      - name: Test Unix installer contracts
+        run: |
+          bash tests/test_release_installer.sh
+          bash tests/test_install_deps.sh
+          ./omniinfer --version
+
   windows-desktop-contract:
     name: Windows Desktop Contract
     runs-on: windows-latest
@@ -59,3 +65,9 @@ jobs:
         run: |
           cargo test -p omniinfer-cli --test cli_smoke serve_explicit_roots_reach_gateway_model_load_lifecycle
           cargo test -p omniinfer-cli --test cli_smoke successful_smoke_test_stops_gateway_backend_and_releases_ports
+
+      - name: Test Windows installer contracts
+        shell: powershell
+        run: |
+          .\tests\test_release_installer.ps1
+          .\omniinfer.ps1 --version

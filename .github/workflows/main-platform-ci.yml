@@ -41,3 +41,22 @@ jobs:
 
       - name: Run platform unit tests
         run: cargo test --locked --workspace --lib --bins
+
+      - name: Test Unix installer contracts
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash tests/test_release_installer.sh
+          ./omniinfer --version
+
+      - name: Test Linux source installer helpers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tests/test_install_deps.sh
+
+      - name: Test Windows installer contracts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          .\tests\test_release_installer.ps1
+          .\omniinfer.ps1 --version
