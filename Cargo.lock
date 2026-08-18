@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "omniinfer-cli"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "omniinfer-core"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "libc",
  "rand",
