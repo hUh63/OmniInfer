@@ -1,9 +1,9 @@
-# ──────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------
 #  OmniInfer source installer for Windows (PowerShell)
 #
 #  Usage:
 #    irm "https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install-from-source.ps1?$(Get-Random)" | iex
-# ──────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------
 
 param(
     [string]$InstallDir = "$(Join-Path ([Environment]::GetFolderPath('UserProfile')) 'OmniInfer')",
@@ -28,7 +28,7 @@ if ($NoModel -and $Model) {
     throw "Cannot use -Model and -NoModel together."
 }
 
-# ── Helpers ─────────────────────────────────────────────────
+# Helpers
 
 function Write-Info  { param([string]$Msg) Write-Host "[INFO] $Msg" -ForegroundColor Cyan }
 function Write-Ok    { param([string]$Msg) Write-Host "[ OK ] $Msg" -ForegroundColor Green }
@@ -277,7 +277,7 @@ function Select-Menu {
     return $cur
 }
 
-# ── Banner ──────────────────────────────────────────────────
+# Banner
 
 Write-Host ""
 Write-Host "============================================================"
@@ -286,7 +286,7 @@ Write-Host "     Local LLM/VLM inference on every device"
 Write-Host "============================================================"
 Write-Host ""
 
-# ── Step 1: Check prerequisites ─────────────────────────────
+# Step 1: Check prerequisites
 
 Write-Info "Step 1/6: Checking prerequisites ..."
 Sync-ProcessPathFromRegistry
@@ -302,7 +302,7 @@ foreach ($candidate in @("python", "python3")) {
     }
 }
 if (-not $script:PythonCmd -and (Get-Command "uv" -ErrorAction SilentlyContinue)) {
-    # uv is available — use "uv run python" as the python command
+    # uv is available; use "uv run python" as the python command
     try {
         $uvCheck = & uv run python --version 2>$null
         if ($LASTEXITCODE -eq 0) { $script:PythonCmd = "__uv__" }
@@ -364,7 +364,7 @@ if (-not $hasMsvc -and -not $hasMsys2Gcc) {
         $ucrtPath = Join-Path $envVal "ucrt64\bin\gcc.exe"
         if (Test-Path $ucrtPath) {
             Write-Host "    gcc.exe found at $ucrtPath" -ForegroundColor Green
-            Write-Host "    But it was not detected — this is a bug, please report it." -ForegroundColor Red
+            Write-Host "    But it was not detected; this is a bug, please report it." -ForegroundColor Red
         } else {
             Write-Host "    $ucrtPath does NOT exist" -ForegroundColor Red
             Write-Host "    -> MSYS2 ucrt64 toolchain is not installed."
@@ -374,7 +374,7 @@ if (-not $hasMsvc -and -not $hasMsys2Gcc) {
         $ucrtPath = Join-Path $regVal "ucrt64\bin\gcc.exe"
         if (Test-Path $ucrtPath) {
             Write-Host "    gcc.exe found at $ucrtPath" -ForegroundColor Green
-            Write-Host "    But it was not detected — this is a bug, please report it." -ForegroundColor Red
+            Write-Host "    But it was not detected; this is a bug, please report it." -ForegroundColor Red
         } else {
             Write-Host "    $ucrtPath does NOT exist" -ForegroundColor Red
             Write-Host "    -> MSYS2 ucrt64 toolchain is not installed."
@@ -413,7 +413,7 @@ if (-not $hasMsvc -and -not $hasMsys2Gcc) {
 }
 Write-Host ""
 
-# ── Step 2: Clone or update repo ────────────────────────────
+# Step 2: Clone or update repo
 
 Write-Info "Step 2/6: Preparing repository ..."
 if (Test-Path "$InstallDir\.git") {
@@ -440,7 +440,7 @@ if (Test-Path "$InstallDir\.git") {
     }
 }
 if (-not (Test-Path (Join-Path $InstallDir "omniinfer.ps1"))) {
-    Stop-Fatal "Repository clone appears incomplete — omniinfer.ps1 not found in $InstallDir"
+    Stop-Fatal "Repository clone appears incomplete; omniinfer.ps1 not found in $InstallDir"
 }
 Write-Ok "Repository ready at $InstallDir"
 
@@ -480,7 +480,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "OmniInfer CLI is ready"
 
-# ── Ensure a usable port ────────────────────────────────────
+# Ensure a usable port
 
 $OmniPort = 9000
 
@@ -515,12 +515,13 @@ if (-not (Test-PortFree $OmniPort)) {
     $configDir = Join-Path $InstallDir "config"
     if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
     $configFile = Join-Path $configDir "omniinfer.json"
-    & python -c "import json; json.dump({'host':'127.0.0.1','port':$OmniPort}, open(r'$configFile','w',encoding='utf-8'), indent=2)"
+    $configPayload = [ordered]@{ host = "127.0.0.1"; port = $OmniPort } | ConvertTo-Json
+    [IO.File]::WriteAllText($configFile, $configPayload, (New-Object Text.UTF8Encoding($false)))
     Write-Ok "Config written: $configFile (port $OmniPort)"
 }
 Write-Host ""
 
-# ── Step 3: Detect platform & choose backend ────────────────
+# Step 3: Detect platform and choose backend
 # Get available backends from CLI
 
 Write-Info "Step 3/6: Detecting platform and hardware ..."
@@ -634,7 +635,7 @@ if ($Prebuilt) {
 }
 Write-Host ""
 
-# ── Step 4: Build backend ───────────────────────────────────
+# Step 4: Build backend
 
 if ($Prebuilt) {
     Write-Info "Step 4/6: Installing prebuilt backend ..."
@@ -729,7 +730,7 @@ if (-not $SkipBuild) {
 }
 Write-Host ""
 
-# ── Step 5: Model configuration ─────────────────────────────
+# Step 5: Model configuration
 
 Write-Info "Step 5/6: Model configuration"
 Write-Host ""
@@ -857,12 +858,12 @@ if ($Model) {
 
 Write-Host ""
 
-# ── Step 6: Load model & finish ──────────────────────────────
+# Step 6: Load model and finish
 
 Write-Info "Step 6/6: Finishing up ..."
 Write-Host ""
 
-# ── Finish message (reused by both paths) ──────────────────
+# Finish message (reused by both paths)
 function Print-Finish {
     Write-Host ""
     if (-not $SkipBuild) { Invoke-OmniInfer shutdown 2>$null }
@@ -932,7 +933,7 @@ if ($ModelConfigured -and $ModelPath) {
     Write-Ok "Model loaded"
     Write-Host ""
 
-    # ── Interactive chat loop ──────────────────────────────
+    # Interactive chat loop
     Write-Ok "Setup complete! Try chatting with the model (type 'exit' to quit, Ctrl+C to stop)."
     Write-Host ""
 
