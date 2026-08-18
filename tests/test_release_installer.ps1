@@ -33,9 +33,24 @@ function New-FixtureRelease {
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 try {
     $releaseRoot = Join-Path $testRoot "releases\download"
-    $fixtureCommand = Get-Command git.exe -ErrorAction SilentlyContinue
-    if (-not $fixtureCommand) { $fixtureCommand = Get-Command git -ErrorAction Stop }
-    $fixtureExecutable = $fixtureCommand.Source
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $fixtureExecutable = Join-Path $testRoot "fixture.exe"
+        Add-Type -TypeDefinition @'
+using System;
+
+public static class InstallerFixture
+{
+    public static int Main(string[] args)
+    {
+        Console.WriteLine("omniinfer fixture");
+        return 0;
+    }
+}
+'@ -Language CSharp -OutputAssembly $fixtureExecutable -OutputType ConsoleApplication
+    } else {
+        $fixtureCommand = Get-Command git -ErrorAction Stop
+        $fixtureExecutable = $fixtureCommand.Source
+    }
     New-FixtureRelease v1.2.3 $releaseRoot $fixtureExecutable
 
     $installDir = Join-Path $testRoot "installed"
