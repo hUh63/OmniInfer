@@ -5,7 +5,7 @@ $scriptDir = if ($PSScriptRoot) {
 } else {
     Split-Path -Parent $MyInvocation.MyCommand.Path
 }
-$rustCli = Join-Path $scriptDir "target\debug\omniinfer-rs.exe"
+$rustCli = Join-Path $scriptDir "target\debug\omniinfer.exe"
 
 if (Test-Path -LiteralPath $rustCli) {
     & $rustCli @args
