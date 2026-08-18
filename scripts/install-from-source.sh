@@ -560,9 +560,6 @@ while true; do
     fi
     echo ""
 
-    # Select backend via CLI.
-    omniinfer_cmd backend select "${SELECTED_BACKEND}"
-
     # ── Pre-build dependency check ──────────────────────────────
     # Verify required build tools BEFORE starting the build.
     # Skip dependency probing when the build step is disabled.
@@ -782,6 +779,12 @@ else
         [[ "${PREBUILT_MODE}" -eq 1 ]] && BUILD_STATUS="prebuilt"
         ok "Backend install complete"
     fi
+fi
+
+if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+    info "Starting the local gateway to activate ${SELECTED_BACKEND} ..."
+    omniinfer_cmd serve --detach --port "${OMNI_PORT}"
+    omniinfer_cmd backend select "${SELECTED_BACKEND}"
 fi
 echo ""
 
@@ -1018,6 +1021,7 @@ FINISH
 
 else
     # ── No model configured — print next steps ──────────
+    omniinfer_cmd shutdown 2>/dev/null || true
     write_install_summary
     cat <<EOF
 

@@ -602,9 +602,6 @@ if ($Prebuilt) {
 }
 Write-Host ""
 
-# Select backend via CLI
-Invoke-OmniInfer backend select $SelectedBackend 2>$null
-
 # ── Step 4: Build backend ───────────────────────────────────
 
 if ($Prebuilt) {
@@ -688,6 +685,14 @@ if ($SkipBuild) {
         $script:BuildStatus = if ($Prebuilt) { "prebuilt" } else { "built" }
         Write-Ok "Backend install complete"
     }
+}
+
+if (-not $SkipBuild) {
+    Write-Info "Starting the local gateway to activate $SelectedBackend ..."
+    Invoke-OmniInfer serve --detach --port $OmniPort
+    if ($LASTEXITCODE -ne 0) { Stop-Fatal "Failed to start the local OmniInfer gateway." }
+    Invoke-OmniInfer backend select $SelectedBackend
+    if ($LASTEXITCODE -ne 0) { Stop-Fatal "Failed to activate backend $SelectedBackend." }
 }
 Write-Host ""
 
