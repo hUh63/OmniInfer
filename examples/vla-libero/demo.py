@@ -317,6 +317,27 @@ def validate_profile_omniinfer_url(value: Any) -> str:
     return normalized
 
 
+def validate_loopback_omniinfer_url(value: Any) -> str:
+    """Require the dashboard's canonical local OmniInfer gateway origin."""
+    normalized = validate_omniinfer_url(value)
+    parsed = urllib.parse.urlsplit(normalized)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.port is None
+        or not 1 <= parsed.port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "OmniInfer URL must be a canonical loopback http://127.0.0.1:<port> URL"
+        )
+    return normalized.rstrip("/")
+
+
 def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
     """Load trusted server-side model choices without exposing paths to browsers."""
     config_path = Path(path).expanduser().resolve()
@@ -434,7 +455,7 @@ def public_profile_error(error: Exception, config: DemoConfig) -> str:
 
 class OmniInferAPI:
     def __init__(self, base_url: str, admin_api_key: str | None = None):
-        self.base_url = validate_omniinfer_url(base_url)
+        self.base_url = validate_loopback_omniinfer_url(base_url)
         self.admin_api_key = admin_api_key
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1278,6 +1299,8 @@ def parse_args() -> argparse.Namespace:
         )
     try:
         validate_libero_object_task_id(args.task_id)
+        if args.model_profiles is None:
+            args.omniinfer_url = validate_loopback_omniinfer_url(args.omniinfer_url)
         if args.model_profiles is None:
             args.stats_json = validate_arch_options(
                 args.arch, args.tokenizer, args.stats_json
