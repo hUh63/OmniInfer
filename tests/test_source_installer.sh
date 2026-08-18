@@ -12,6 +12,21 @@ fail() {
 }
 
 while IFS= read -r build_script; do
+    grep -q 'LLAMA_BUILD_UI=' "${build_script}" ||
+        fail "${build_script#"${REPO_ROOT}/"} does not define the llama.cpp UI policy"
+    grep -q 'LLAMA_USE_PREBUILT_UI=' "${build_script}" ||
+        fail "${build_script#"${REPO_ROOT}/"} does not define the prebuilt UI policy"
+    if grep -q 'LLAMA_BUILD_WEBUI=' "${build_script}"; then
+        fail "${build_script#"${REPO_ROOT}/"} uses the deprecated llama.cpp Web UI option"
+    fi
+done < <(find \
+    "${REPO_ROOT}/scripts/platforms/linux" \
+    "${REPO_ROOT}/scripts/platforms/macos" \
+    "${REPO_ROOT}/scripts/platforms/windows" \
+    -mindepth 2 -maxdepth 2 -type f \( -name build.sh -o -name build.ps1 \) \
+    -path '*/llama.cpp-*/*' | sort)
+
+while IFS= read -r build_script; do
     bash "${build_script}" --help | grep -q -- '--from-source' ||
         fail "${build_script#"${REPO_ROOT}/"} does not expose --from-source"
 done < <(find "${REPO_ROOT}/scripts/platforms/linux" "${REPO_ROOT}/scripts/platforms/macos" \
