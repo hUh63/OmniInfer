@@ -45,6 +45,14 @@ LIBERO_OBJECT_TASKS = (
 )
 SUPPORTED_DEMO_ARCHES = ("smolvla", "pi05")
 MODEL_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DEFAULT_RENDER_SIZE = 512
+MIN_RENDER_SIZE = 128
+MAX_RENDER_SIZE = 1024
+DEFAULT_FPS = 30
+DISPLAY_JPEG_QUALITY = 92
+DISPLAY_JPEG_SUBSAMPLING = 1
+DEFAULT_PI05_ACTION_STEPS = 10
+DEFAULT_WRIST_DISPLAY_CROP_RATIO = 1.0
 
 
 def default_output_dir() -> str:
@@ -61,8 +69,8 @@ def validate_csrf_token(expected: str, received: str | None) -> None:
         raise PermissionError("missing or invalid CSRF token")
 
 
-def validate_dashboard_host(value: str | None, port: int) -> str:
-    """Accept only an explicit loopback Host on the dashboard's bound port."""
+def validate_dashboard_host(value: str | None) -> tuple[str, int]:
+    """Accept only an explicit loopback Host and browser-visible port."""
     if not value:
         raise PermissionError("missing or invalid Host header")
     try:
@@ -78,10 +86,10 @@ def validate_dashboard_host(value: str | None, port: int) -> str:
         or parsed.query
         or parsed.fragment
         or host not in {"127.0.0.1", "localhost", "::1"}
-        or request_port != port
+        or request_port is None
     ):
         raise PermissionError("missing or invalid Host header")
-    return host
+    return host, request_port
 
 
 def validate_dashboard_origin(value: str | None, host: str, port: int) -> None:
@@ -131,6 +139,25 @@ def validate_libero_object_task_id(value: Any) -> int:
             f"task_id must be between 0 and {len(LIBERO_OBJECT_TASKS) - 1}"
         )
     return value
+
+
+def validate_render_size(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("render size must be an integer")
+    if not MIN_RENDER_SIZE <= value <= MAX_RENDER_SIZE:
+        raise ValueError(
+            f"render size must be between {MIN_RENDER_SIZE} and {MAX_RENDER_SIZE}"
+        )
+    return value
+
+
+def validate_wrist_display_crop_ratio(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("wrist display crop ratio must be a number")
+    ratio = float(value)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("wrist display crop ratio must be greater than 0 and at most 1")
+    return ratio
 
 
 def aggregate_result(successes: int, failures: int) -> str:
@@ -207,7 +234,9 @@ class DemoConfig:
     task_id: int = 0
     episodes: int = 1
     seed: int = 42
-    fps: int = 20
+    fps: int = DEFAULT_FPS
+    render_size: int = DEFAULT_RENDER_SIZE
+    wrist_display_crop_ratio: float = DEFAULT_WRIST_DISPLAY_CROP_RATIO
     output_dir: str = field(default_factory=default_output_dir)
     view_mode: str = "multi-view"
     n_action_steps: int = 1
@@ -262,6 +291,32 @@ def _profile_tokenizer(value: Any, config_dir: Path) -> str | None:
     return value
 
 
+def validate_omniinfer_url(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("OmniInfer URL must be a non-empty string")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Invalid OmniInfer URL: {value!r}")
+    return value.rstrip("/")
+
+
+def validate_profile_omniinfer_url(value: Any) -> str:
+    normalized = validate_omniinfer_url(value)
+    parsed = urllib.parse.urlsplit(normalized)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in LOOPBACK_HOSTS
+        or parsed.port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("OmniInfer URL must be a loopback http:// URL with an explicit port")
+    return normalized
+
+
 def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
     """Load trusted server-side model choices without exposing paths to browsers."""
     config_path = Path(path).expanduser().resolve()
@@ -281,7 +336,8 @@ def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
 
     allowed = {
         "label", "arch", "model", "backend", "mmproj", "server_args",
-        "tokenizer", "stats_json", "n_action_steps",
+        "tokenizer", "stats_json", "n_action_steps", "omniinfer_url",
+        "use_loaded_runtime",
     }
     profiles: dict[str, ModelProfile] = {}
     for identifier, entry in models.items():
@@ -302,8 +358,23 @@ def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
             raise ValueError(
                 f"model profile {identifier!r} arch must be one of {SUPPORTED_DEMO_ARCHES}"
             )
-        model = _profile_path(entry.get("model"), "model", config_path.parent)
-        if not Path(model).is_file():
+        model_value = entry.get("model")
+        use_loaded_runtime = entry.get("use_loaded_runtime", False)
+        if not isinstance(use_loaded_runtime, bool):
+            raise ValueError(
+                f"model profile {identifier!r} use_loaded_runtime must be a boolean"
+            )
+        if (model_value is None) == (not use_loaded_runtime):
+            raise ValueError(
+                f"model profile {identifier!r} must specify exactly one of "
+                "'model' or use_loaded_runtime=true"
+            )
+        model = (
+            _profile_path(model_value, "model", config_path.parent)
+            if model_value is not None
+            else None
+        )
+        if model is not None and not Path(model).is_file():
             raise ValueError(f"model profile {identifier!r} model does not exist: {model}")
         mmproj = entry.get("mmproj")
         if mmproj is not None:
@@ -320,7 +391,9 @@ def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
         if stats_json is not None:
             stats_json = _profile_path(stats_json, "stats_json", config_path.parent)
         stats_json = validate_arch_options(arch, tokenizer, stats_json)
-        n_action_steps = entry.get("n_action_steps", 10 if arch == "pi05" else 1)
+        n_action_steps = entry.get(
+            "n_action_steps", DEFAULT_PI05_ACTION_STEPS if arch == "pi05" else 1
+        )
         if isinstance(n_action_steps, bool) or not isinstance(n_action_steps, int) or n_action_steps < 1:
             raise ValueError(
                 f"model profile {identifier!r} n_action_steps must be an integer >= 1"
@@ -328,11 +401,15 @@ def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
         backend = entry.get("backend", base.backend)
         if not isinstance(backend, str) or not backend.startswith("vla.cpp-"):
             raise ValueError(f"model profile {identifier!r} backend must be a vla.cpp backend")
+        omniinfer_url = validate_profile_omniinfer_url(
+            entry.get("omniinfer_url", base.omniinfer_url)
+        )
         profiles[identifier] = ModelProfile(
             identifier=identifier,
             label=label.strip(),
             config=replace(
                 base,
+                omniinfer_url=omniinfer_url,
                 backend=backend,
                 model=model,
                 mmproj=mmproj,
@@ -357,10 +434,7 @@ def public_profile_error(error: Exception, config: DemoConfig) -> str:
 
 class OmniInferAPI:
     def __init__(self, base_url: str, admin_api_key: str | None = None):
-        parsed = urllib.parse.urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError(f"Invalid OmniInfer URL: {base_url!r}")
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_omniinfer_url(base_url)
         self.admin_api_key = admin_api_key
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -431,6 +505,7 @@ class DemoState:
         selected = profiles[default_profile]
         self._lock = threading.Lock()
         self._frame = b""
+        self._frame_times: deque[float] = deque(maxlen=120)
         self._next_run_id = 0
         self._last_frame_at = 0.0
         self._policy_ms: deque[float] = deque(maxlen=500)
@@ -464,6 +539,8 @@ class DemoState:
             "action": [0.0] * len(ACTION_LABELS),
             "action_labels": ACTION_LABELS,
             "call_kind": None,
+            "action_chunk_step": 0,
+            "action_chunk_size": selected.config.n_action_steps,
             "run_id": 0,
             "frame_seq": 0,
             "started_at": None,
@@ -477,6 +554,7 @@ class DemoState:
         with self._lock:
             self._next_run_id += 1
             self._frame = b""
+            self._frame_times.clear()
             self._last_frame_at = 0.0
             self._policy_ms.clear()
             self._prediction_ms.clear()
@@ -502,6 +580,8 @@ class DemoState:
                 reward=0.0,
                 action=[0.0] * len(ACTION_LABELS),
                 call_kind=None,
+                action_chunk_step=0,
+                action_chunk_size=profile.config.n_action_steps,
                 run_id=self._next_run_id,
                 frame_seq=0,
                 started_at=time.time(),
@@ -526,6 +606,7 @@ class DemoState:
         observation: dict[str, Any],
         view_mode: str,
         *,
+        wrist_display_crop_ratio: float = DEFAULT_WRIST_DISPLAY_CROP_RATIO,
         min_interval_seconds: float = 0.0,
         force: bool = False,
     ) -> bool:
@@ -535,12 +616,13 @@ class DemoState:
             if not force and now - self._last_frame_at < min_interval_seconds:
                 return False
             run_id = int(self._data["run_id"])
-        frame = encode_frame(observation, view_mode)
+        frame = encode_frame(observation, view_mode, wrist_display_crop_ratio)
         with self._lock:
             if int(self._data["run_id"]) != run_id:
                 return False
             self._frame = frame
             self._last_frame_at = now
+            self._frame_times.append(now)
             self._data["frame_seq"] += 1
         return True
 
@@ -554,6 +636,7 @@ class DemoState:
         loop_ms: float,
         reward: float,
         step: int,
+        action_chunk_step: int = 0,
     ) -> None:
         with self._lock:
             self._policy_ms.append(policy_ms)
@@ -566,6 +649,7 @@ class DemoState:
                 call_kind="model_prediction" if prediction_sent else "action_queue_replay",
                 reward=round(float(reward), 5),
                 step=step,
+                action_chunk_step=action_chunk_step,
                 message="Running LIBERO rollout",
             )
 
@@ -573,6 +657,21 @@ class DemoState:
         with self._lock:
             payload = dict(self._data)
             payload["events"] = list(self._events)
+            frame_times = list(self._frame_times)
+            display_fps = None
+            frame_intervals = [
+                current - previous
+                for previous, current in zip(frame_times, frame_times[1:])
+                if current > previous
+            ]
+            if frame_intervals:
+                display_fps = round(1.0 / statistics.median(frame_intervals), 1)
+            payload["telemetry"] = {
+                "display_fps": display_fps,
+                "prediction_count": len(self._prediction_ms),
+                "action_chunk_step": payload["action_chunk_step"],
+                "action_chunk_size": payload["action_chunk_size"],
+            }
             payload["latency"] = {
                 "policy": metric_summary(list(self._policy_ms)),
                 "prediction": metric_summary(list(self._prediction_ms)),
@@ -591,7 +690,11 @@ class DemoState:
             )
 
 
-def encode_frame(observation: dict[str, Any], view_mode: str) -> bytes:
+def encode_frame(
+    observation: dict[str, Any],
+    view_mode: str,
+    wrist_display_crop_ratio: float = DEFAULT_WRIST_DISPLAY_CROP_RATIO,
+) -> bytes:
     import numpy as np
     from PIL import Image
 
@@ -599,16 +702,22 @@ def encode_frame(observation: dict[str, Any], view_mode: str) -> bytes:
     images = [front]
     if view_mode == "multi-view" and "image2" in observation["pixels"]:
         wrist = np.asarray(observation["pixels"]["image2"][::-1, ::-1], dtype=np.uint8)
-        if wrist.shape[0] != front.shape[0]:
-            wrist = np.asarray(
-                Image.fromarray(wrist).resize(
-                    (round(wrist.shape[1] * front.shape[0] / wrist.shape[0]), front.shape[0])
-                )
-            )
+        wrist = wrist[
+            : max(1, round(wrist.shape[0] * wrist_display_crop_ratio))
+        ]
+        wrist = np.asarray(
+            Image.fromarray(wrist).resize((front.shape[1], front.shape[0]))
+        )
         images.append(wrist)
     composed = np.concatenate(images, axis=1)
     output = io.BytesIO()
-    Image.fromarray(composed).save(output, format="JPEG", quality=84, optimize=False)
+    Image.fromarray(composed).save(
+        output,
+        format="JPEG",
+        quality=DISPLAY_JPEG_QUALITY,
+        subsampling=DISPLAY_JPEG_SUBSAMPLING,
+        optimize=False,
+    )
     return output.getvalue()
 
 
@@ -793,6 +902,8 @@ class DemoController:
                 video_fps=run_config.fps,
                 output_video_dir=run_dir,
                 video_view_mode=run_config.view_mode,
+                observation_width=run_config.render_size,
+                observation_height=run_config.render_size,
             )
             self.state.update(phase="running", message="Running LIBERO rollout")
 
@@ -805,7 +916,10 @@ class DemoController:
                 observation, _ = environment.reset()
                 frame_interval_seconds = 1.0 / run_config.fps
                 self.state.publish_frame(
-                    observation, run_config.view_mode, force=True
+                    observation,
+                    run_config.view_mode,
+                    wrist_display_crop_ratio=run_config.wrist_display_crop_ratio,
+                    force=True,
                 )
                 self.state.update(
                     phase="running",
@@ -834,6 +948,7 @@ class DemoController:
                         actions_until_prediction = run_config.n_action_steps - 1
                     else:
                         actions_until_prediction -= 1
+                    action_chunk_step = run_config.n_action_steps - actions_until_prediction
 
                     env_start = time.perf_counter()
                     try:
@@ -857,6 +972,7 @@ class DemoController:
                     self.state.publish_frame(
                         observation,
                         run_config.view_mode,
+                        wrist_display_crop_ratio=run_config.wrist_display_crop_ratio,
                         min_interval_seconds=frame_interval_seconds,
                         force=terminated or truncated,
                     )
@@ -868,6 +984,7 @@ class DemoController:
                         loop_ms=loop_ms,
                         reward=reward,
                         step=step,
+                        action_chunk_step=action_chunk_step,
                     )
 
                     if terminated or truncated:
@@ -985,7 +1102,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
         try:
-            validate_dashboard_host(self.headers.get("Host"), self.server.server_port)
+            validate_dashboard_host(self.headers.get("Host"))
         except PermissionError as error:
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.FORBIDDEN)
             return
@@ -1042,14 +1159,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
         path = urllib.parse.urlsplit(self.path).path
         try:
-            host = validate_dashboard_host(
-                self.headers.get("Host"), self.server.server_port
-            )
+            host, browser_port = validate_dashboard_host(self.headers.get("Host"))
             validate_csrf_token(
                 self.csrf_token, self.headers.get("X-OmniInfer-CSRF-Token")
             )
             validate_dashboard_origin(
-                self.headers.get("Origin"), host, self.server.server_port
+                self.headers.get("Origin"), host, browser_port
             )
         except PermissionError as error:
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.FORBIDDEN)
@@ -1122,10 +1237,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-id", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--fps", type=int, default=DEFAULT_FPS)
+    parser.add_argument(
+        "--render-size",
+        type=int,
+        default=DEFAULT_RENDER_SIZE,
+        help=(
+            "LIBERO camera width and height in pixels "
+            f"(default: {DEFAULT_RENDER_SIZE}; range: {MIN_RENDER_SIZE}-{MAX_RENDER_SIZE})"
+        ),
+    )
+    parser.add_argument(
+        "--wrist-display-crop-ratio",
+        type=float,
+        default=DEFAULT_WRIST_DISPLAY_CROP_RATIO,
+        help="fraction of the wrist image height retained for dashboard display",
+    )
     parser.add_argument("--output-dir", default=default_output_dir())
     parser.add_argument("--view-mode", choices=["single-view", "multi-view"], default="multi-view")
-    parser.add_argument("--n-action-steps", type=int, default=1)
+    parser.add_argument("--n-action-steps", type=int)
     parser.add_argument("--recv-timeout-ms", type=int, default=120_000)
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument(
@@ -1158,6 +1288,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--episodes must be >= 1")
     if args.fps < 1:
         parser.error("--fps must be >= 1")
+    try:
+        args.render_size = validate_render_size(args.render_size)
+        args.wrist_display_crop_ratio = validate_wrist_display_crop_ratio(
+            args.wrist_display_crop_ratio
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    if args.n_action_steps is None:
+        args.n_action_steps = DEFAULT_PI05_ACTION_STEPS if args.arch == "pi05" else 1
     if args.n_action_steps < 1:
         parser.error("--n-action-steps must be >= 1")
     if not (0 <= args.listen_port <= 65535):
@@ -1186,6 +1325,8 @@ def main() -> int:
         episodes=args.episodes,
         seed=args.seed,
         fps=args.fps,
+        render_size=args.render_size,
+        wrist_display_crop_ratio=args.wrist_display_crop_ratio,
         output_dir=args.output_dir,
         view_mode=args.view_mode,
         n_action_steps=args.n_action_steps,
