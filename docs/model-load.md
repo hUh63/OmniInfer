@@ -35,6 +35,12 @@ This document defines the stable gateway contract for loading a model through
 | `request_defaults` | object | generation defaults | no | Stored with the loaded runtime and merged into later inference requests. |
 | `strict_capabilities` | boolean | validation | no | Optional. When true, unsupported load options fail instead of being ignored with warnings. |
 
+The CLI exposes the same admission field as
+`model load --resource-budget-bytes <bytes>` and
+`serve --resource-budget-bytes <bytes>`. Supply it when a backend receives a
+remote model reference, such as a Hugging Face repository ID, and OmniInfer
+cannot inspect the artifact size locally.
+
 `request_defaults` is not a model-load setting. It is a convenient way for a
 client to attach generation defaults to the loaded runtime. Changing only
 `request_defaults` can reuse the current runtime when the load settings match.

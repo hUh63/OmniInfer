@@ -31,6 +31,7 @@ pub(crate) fn load_model(args: &ModelLoadArgs) -> Result<()> {
         mmproj: args.mmproj.clone(),
         ctx_size: args.ctx_size,
         backend_port: None,
+        resource_budget_bytes: args.resource_budget_bytes,
         config: args.config.clone(),
         backend_extra_args: args.backend_extra_args.clone(),
         request_defaults: None,

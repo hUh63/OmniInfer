@@ -243,6 +243,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 mmproj: args.mmproj.clone(),
                 ctx_size: args.ctx_size,
                 backend_port: args.backend_port,
+                resource_budget_bytes: args.resource_budget_bytes,
                 request_defaults: None,
                 restored: false,
             })
@@ -256,6 +257,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 mmproj: model.mmproj,
                 ctx_size: model.ctx_size,
                 backend_port: model.backend_port,
+                resource_budget_bytes: model.resource_budget_bytes,
                 config: None,
                 backend_extra_args: Vec::new(),
                 request_defaults: model.request_defaults,
