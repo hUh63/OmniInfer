@@ -34,12 +34,21 @@ function Write-Info  { param([string]$Msg) Write-Host "[INFO] $Msg" -ForegroundC
 function Write-Ok    { param([string]$Msg) Write-Host "[ OK ] $Msg" -ForegroundColor Green }
 function Write-Warn  { param([string]$Msg) Write-Host "[WARN] $Msg" -ForegroundColor Yellow }
 function Write-Err   { param([string]$Msg) Write-Host "[ERR ] $Msg" -ForegroundColor Red }
+function Wait-ForExitKey {
+    if ($NonInteractive) { return }
+    try {
+        if ([Console]::IsInputRedirected) { return }
+    } catch {
+        return
+    }
+    Write-Host "Press any key to exit ..." -ForegroundColor DarkGray
+    try { [void][Console]::ReadKey($true) } catch {}
+}
 function Stop-Fatal  {
     param([string]$Msg)
     Write-Err $Msg
     Write-Host ""
-    Write-Host "Press any key to exit ..." -ForegroundColor DarkGray
-    try { [void][Console]::ReadKey($true) } catch { Start-Sleep -Seconds 10 }
+    Wait-ForExitKey
     exit 1
 }
 
@@ -372,8 +381,7 @@ if (-not $hasMsvc -and -not $hasMsys2Gcc) {
     Write-Host "      2. Install the 'Desktop development with C++' workload."
     Write-Host "      3. Open 'Developer PowerShell for VS' and re-run this script."
     Write-Host ""
-    Write-Host "Press any key to exit ..." -ForegroundColor DarkGray
-    try { [void][Console]::ReadKey($true) } catch { Start-Sleep -Seconds 10 }
+    Wait-ForExitKey
     exit 1
 } elseif ($hasMsvc) {
     Write-Ok "C++ toolchain: MSVC (cl.exe)"
