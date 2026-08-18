@@ -31,19 +31,19 @@ OmniInfer includes a terminal UI for selecting backends, loading models, and cha
 
 ### Quick Install
 
-Linux x64 CLI:
+Linux x64 and macOS arm64:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash
 ```
 
-Install a specific release:
+Windows x64 PowerShell:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash -s -- --version v0.3.5
+```powershell
+irm https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.ps1 | iex
 ```
 
-The lightweight installer downloads the CLI-only GitHub Release archive, verifies `checksums.txt`, and installs `omniinfer` into `~/.local/bin` by default. It does not clone this repository, install backend runtimes, download models, or use sudo.
+The lightweight installers download the CLI-only GitHub Release archive, verify `checksums.txt`, and use a per-user install directory without sudo or administrator privileges. They do not clone this repository, install backend runtimes, or download models. See [Installation](docs/installation.md) for version pinning, custom paths, manual installation, and source setup.
 
 Install a prebuilt runtime after the CLI is available:
 
@@ -58,7 +58,7 @@ On Windows, official vLLM is available through the managed `vllm-wsl2-cuda` and 
 
 You can also run `omniinfer` with no arguments to open the TUI; when a compatible backend is missing, the TUI can install the prebuilt runtime before model loading.
 
-macOS arm64 and Windows x64 CLI-only archives are available from [GitHub Releases](https://github.com/omnimind-ai/OmniInfer/releases). Homebrew, Scoop, npm, and platform-native one-line installers are planned.
+Linux x64, macOS arm64, and Windows x64 CLI-only archives are also available from [GitHub Releases](https://github.com/omnimind-ai/OmniInfer/releases). Homebrew, Scoop, and npm distribution are planned.
 
 `omniinfer serve --cloudflare` automatically downloads and verifies a pinned
 `cloudflared` helper when neither a managed copy nor a system installation is
@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/
 Windows PowerShell:
 
 ```powershell
-irm "https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.ps1?$(Get-Random)" | iex
+irm "https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install-from-source.ps1?$(Get-Random)" | iex
 ```
 
 The source installer detects your platform and hardware, recommends a backend, and walks you through model setup interactively.
@@ -143,6 +143,7 @@ OmniInfer runs everywhere:
 
 Recommended docs:
 
+- [Installation](docs/installation.md): Release installers, source setup, version pinning, and removal
 - [CLI Guide](docs/CLI.md): end-to-end CLI usage for Linux, macOS, Windows, and Android
 - [Benchmark Results](docs/benchmark.md): generate and archive submission-compatible benchmark JSON
 - [Android App Integration](docs/android/integration.md): embed OmniInfer in a third-party Android app

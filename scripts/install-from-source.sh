@@ -11,7 +11,7 @@ set -euo pipefail
 
 # ── Defaults ────────────────────────────────────────────────
 
-INSTALL_DIR="$(pwd)/OmniInfer"
+INSTALL_DIR="${HOME}/OmniInfer"
 MODEL_PATH=""
 NO_MODEL=0
 SKIP_BUILD=0
@@ -63,7 +63,7 @@ CUDA backends:
   Runtime-only/private libraries, including Ollama's bundled cuBLAS libraries, are not
   enough. You can install the recommended system package or set CUDAToolkit_ROOT/CUDA_HOME
   to a complete CUDA toolkit.
-  Without sudo, try: bash scripts/install-cuda-cublas-local.sh
+  Without sudo, try: bash scripts/platforms/linux/setup-cuda-cublas-local.sh
 HELP
             exit 0
             ;;
@@ -97,10 +97,10 @@ need_cmd() {
     ok "$1"
 }
 
-# Run omniinfer CLI with the correct port
-# OMNI_PORT must be set before calling this function
+# Run the repository-local OmniInfer CLI. Service settings, including the
+# selected port, are read from the repository config.
 omniinfer_cmd() {
-    "${INSTALL_DIR}/omniinfer" --port "${OMNI_PORT}" "$@"
+    "${INSTALL_DIR}/omniinfer" "$@"
 }
 
 # Resolve the TTY file descriptor for interactive input.
@@ -306,7 +306,7 @@ fi
 
 info "Step 1/6: Checking prerequisites ..."
 need_cmd git    "Install from https://git-scm.com/"
-need_cmd cmake  "macOS: brew install cmake  |  Linux: apt install cmake"
+need_cmd cargo  "Install Rust from https://rustup.rs/"
 PYTHON_CMD=""
 if command -v python3 >/dev/null 2>&1; then
     PYTHON_CMD="python3"
@@ -376,13 +376,23 @@ if [[ ! -f "${INSTALL_DIR}/omniinfer" ]]; then
 fi
 ok "Repository ready at ${INSTALL_DIR}"
 
-INSTALL_DEPS_HELPER="${INSTALL_DIR}/scripts/install-deps.sh"
+INSTALL_DEPS_HELPER="${INSTALL_DIR}/scripts/lib/source-install-deps.sh"
 if [[ -f "${INSTALL_DEPS_HELPER}" ]]; then
-    # shellcheck source=scripts/install-deps.sh
+    # shellcheck source=scripts/lib/source-install-deps.sh
     source "${INSTALL_DEPS_HELPER}"
 else
     fatal "Installer dependency helper not found: ${INSTALL_DEPS_HELPER}"
 fi
+
+info "Building OmniInfer CLI ..."
+if ! (cd "${INSTALL_DIR}" && cargo build --locked -p omniinfer-cli); then
+    fatal "Failed to build the OmniInfer CLI. Check the Cargo output above."
+fi
+if [[ ! -x "${INSTALL_DIR}/target/debug/omniinfer" ]]; then
+    fatal "Cargo did not produce ${INSTALL_DIR}/target/debug/omniinfer"
+fi
+"${INSTALL_DIR}/omniinfer" --version
+ok "OmniInfer CLI is ready"
 
 # ── Ensure a usable port ────────────────────────────────────
 # If default port 9000 is occupied, find a free one and write config.
@@ -401,8 +411,8 @@ port_in_use() {
 }
 
 # ── Find an available port ────────────────────────────────────
-# Try default port 9000 first, check if it's an OmniInfer gateway
-# If not or occupied by others, try alternative ports
+# Try the default port first, then choose a free alternative without touching
+# an existing service owned by another process.
 
 _ATTEMPT_PORTS=(9000 9001 9002 9003 9004 9005 9010 9020 9050 9100 8900 8800 19000)
 _OMNI_PORT_FOUND=""
@@ -414,33 +424,7 @@ for _TRY_PORT in "${_ATTEMPT_PORTS[@]}"; do
         break
     fi
 
-    # Port is occupied, check if it's an OmniInfer gateway we can shut down
-    info "Port ${_TRY_PORT} is occupied, checking if it's an OmniInfer gateway..."
-    _quick_check=$(curl -sS -w "%{http_code}" --connect-timeout 1 --max-time 1 "http://127.0.0.1:${_TRY_PORT}/health" 2>/dev/null || true)
-    _is_http=$?
-
-    if [[ ${_is_http} -eq 0 ]]; then
-        # Port responds to HTTP, try OmniInfer shutdown API
-        _shutdown_response=$(curl -sS -w "\n%{http_code}" --connect-timeout 3 --max-time 10 -X POST "http://127.0.0.1:${_TRY_PORT}/omni/shutdown" 2>/dev/null || true)
-        _http_code=$(echo "$_shutdown_response" | tail -1)
-        if [[ "$_http_code" == "200" ]] || [[ "$_http_code" == "204" ]]; then
-            ok "OmniInfer gateway found on port ${_TRY_PORT}, shutdown requested"
-            # Wait for port to be released, max 10 seconds
-            _wait_count=0
-            while port_in_use "${_TRY_PORT}" && [[ ${_wait_count} -lt 20 ]]; do
-                sleep 0.5
-                _wait_count=$((_wait_count + 1))
-            done
-            if ! port_in_use "${_TRY_PORT}"; then
-                ok "Port ${_TRY_PORT} is now available"
-                _OMNI_PORT="${_TRY_PORT}"
-                _OMNI_PORT_FOUND="released"
-                break
-            fi
-        fi
-    fi
-
-    warn "Port ${_TRY_PORT} is occupied by another service, trying next port..."
+    warn "Port ${_TRY_PORT} is occupied; leaving the existing service untouched and trying the next port"
 done
 
 if [[ -z "${_OMNI_PORT}" ]]; then
@@ -451,6 +435,27 @@ OMNI_PORT="${_OMNI_PORT}"
 
 if [[ "${_OMNI_PORT_FOUND}" == "free" ]] && [[ "${OMNI_PORT}" != "9000" ]]; then
     warn "Default port 9000 is occupied, will use alternative port ${OMNI_PORT}"
+    CONFIG_PATH="${INSTALL_DIR}/config/omniinfer.json"
+    mkdir -p "$(dirname "${CONFIG_PATH}")"
+    CONFIG_PATH="${CONFIG_PATH}" OMNI_PORT="${OMNI_PORT}" run_python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["CONFIG_PATH"])
+try:
+    config = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+except (OSError, json.JSONDecodeError):
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+config["host"] = "127.0.0.1"
+config["port"] = int(os.environ["OMNI_PORT"])
+temporary = path.with_name(f".{path.name}.tmp")
+temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+    ok "Config written: ${CONFIG_PATH} (port ${OMNI_PORT})"
     info "To start the service on port ${OMNI_PORT}, use: ./omniinfer serve --port ${OMNI_PORT}"
     info "To list all running services, use: ./omniinfer ps"
 fi
@@ -475,69 +480,19 @@ echo ""
 declare -a BACKEND_IDS=()
 declare -a BACKEND_DESCS=()
 
-# Query gateway API for compatible backends (hardware-matched).
-# First ensure the service is running, then wait for it to be ready.
-omniinfer_cmd status >/dev/null 2>&1 || true
-for _i in $(seq 1 30); do
-    _health=$(curl -s -m 2 "http://127.0.0.1:${OMNI_PORT}/health" 2>/dev/null) || _health=""
-    if echo "${_health}" | grep -q '"status"'; then break; fi
-    sleep 1
-done
-
-_backends_json=$(curl -sS --connect-timeout 3 --max-time 5 "http://127.0.0.1:${OMNI_PORT}/omni/backends?scope=compatible" 2>/dev/null) || _backends_json=""
-_recommended=$(echo "${_backends_json}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('recommended',''))" 2>/dev/null) || _recommended=""
-
-# Parse API response (use process substitution to avoid subshell variable loss).
-_parsed=$(echo "${_backends_json}" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-for b in d.get('data', []):
-    print(b['id'] + '|' + b.get('description', ''))
-" 2>/dev/null) || _parsed=""
-
-if [[ -n "${_parsed}" ]]; then
-    while IFS='|' read -r bid bdesc; do
-        [[ -z "${bid}" ]] && continue
-        BACKEND_IDS+=("${bid}")
-        if [[ -n "${bdesc}" ]]; then
-            BACKEND_DESCS+=("${bid}  —  ${bdesc}")
-        else
-            BACKEND_DESCS+=("${bid}")
-        fi
-    done <<< "${_parsed}"
-
-    # Move recommended backend to top.
-    if [[ -n "${_recommended}" ]] && [[ ${#BACKEND_IDS[@]} -gt 0 ]]; then
-        for i in "${!BACKEND_IDS[@]}"; do
-            if [[ "${BACKEND_IDS[$i]}" == "${_recommended}" ]] && [[ "$i" -gt 0 ]]; then
-                rec_id="${BACKEND_IDS[$i]}"; rec_desc="${BACKEND_DESCS[$i]}"
-                unset 'BACKEND_IDS[$i]'; unset 'BACKEND_DESCS[$i]'
-                BACKEND_IDS=("${rec_id}" "${BACKEND_IDS[@]}")
-                BACKEND_DESCS=("${rec_desc}  (recommended)" "${BACKEND_DESCS[@]}")
-                break
-            elif [[ "${BACKEND_IDS[$i]}" == "${_recommended}" ]] && [[ "$i" -eq 0 ]]; then
-                BACKEND_DESCS[0]="${BACKEND_DESCS[0]}  (recommended)"
-                break
-            fi
-        done
+# Query the local CLI catalog directly. Backend discovery must not start,
+# replace, or stop a gateway owned by another process. The stable text table
+# keeps backend IDs in its first column.
+while IFS= read -r line; do
+    id="$(printf '%s\n' "${line}" | awk '{print $1}')"
+    case "${id}" in
+        ""|Compatible|Backend|Install|---*) continue ;;
+    esac
+    if [[ "${id}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        BACKEND_IDS+=("${id}")
+        BACKEND_DESCS+=("${id}")
     fi
-fi
-
-# Fallback: parse CLI text output if API returned nothing.
-if [[ ${#BACKEND_IDS[@]} -eq 0 ]]; then
-    while IFS= read -r line; do
-        id=$(echo "${line}" | sed -n 's/^[* ]*\([a-zA-Z0-9._-]*\)$/\1/p')
-        if [[ -n "${id}" ]]; then
-            BACKEND_IDS+=("${id}")
-            BACKEND_DESCS+=("${id}")
-        fi
-        desc=$(echo "${line}" | sed -n 's/^    Description: *//p')
-        if [[ -n "${desc}" ]] && [[ ${#BACKEND_IDS[@]} -gt 0 ]]; then
-            last_idx=$(( ${#BACKEND_IDS[@]} - 1 ))
-            BACKEND_DESCS[$last_idx]="${BACKEND_IDS[$last_idx]}  —  ${desc}"
-        fi
-    done <<< "$(omniinfer_cmd backend list --scope compatible 2>/dev/null)"
-fi
+done <<< "$(omniinfer_cmd backend list --scope compatible 2>/dev/null)"
 
 if [[ ${#BACKEND_IDS[@]} -eq 0 ]]; then
     fatal "No backends found. Check your platform support."
@@ -604,9 +559,6 @@ while true; do
         info "Install mode: prebuilt"
     fi
     echo ""
-
-    # Select backend via CLI.
-    omniinfer_cmd backend select "${SELECTED_BACKEND}"
 
     # ── Pre-build dependency check ──────────────────────────────
     # Verify required build tools BEFORE starting the build.
@@ -828,6 +780,12 @@ else
         ok "Backend install complete"
     fi
 fi
+
+if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+    info "Starting the local gateway to activate ${SELECTED_BACKEND} ..."
+    omniinfer_cmd serve --detach --port "${OMNI_PORT}" --no-restore-model
+    omniinfer_cmd backend select "${SELECTED_BACKEND}"
+fi
 echo ""
 
 # ── Step 5: Model configuration ─────────────────────────────
@@ -993,6 +951,7 @@ if [[ "${MODEL_CONFIGURED}" -eq 1 ]] && [[ -n "${MODEL_PATH}" ]]; then
         echo ""
         echo "  Try building the backend first, then re-run:"
         echo "    cd ${INSTALL_DIR}"
+        echo "    ./omniinfer serve --detach"
         echo "    ./omniinfer model load -m ${MODEL_PATH}"
         echo ""
         exit 1
@@ -1019,11 +978,11 @@ if [[ "${MODEL_CONFIGURED}" -eq 1 ]] && [[ -n "${MODEL_PATH}" ]]; then
   Your backend selection is saved. Next time just run:
 
     cd ${INSTALL_DIR}
+    ./omniinfer serve --detach
     ./omniinfer model load -m ${MODEL_PATH}
     ./omniinfer chat --message "Hello"
 
   The model needs to be loaded each time after a restart.
-  The CLI auto-starts the service if needed.
 
   Other useful commands:
     ./omniinfer backend list              # list available backends
@@ -1063,6 +1022,9 @@ FINISH
 
 else
     # ── No model configured — print next steps ──────────
+    if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+        omniinfer_cmd shutdown 2>/dev/null || true
+    fi
     write_install_summary
     cat <<EOF
 
@@ -1076,6 +1038,7 @@ else
   To start chatting, load a model first:
 
     cd ${INSTALL_DIR}
+    ./omniinfer serve --detach
     ./omniinfer model load -m /path/to/model.gguf
     ./omniinfer chat --message "Hello"
 

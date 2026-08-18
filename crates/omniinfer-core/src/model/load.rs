@@ -14,6 +14,7 @@ pub struct ModelLoadRequest {
     pub mmproj: Option<String>,
     pub ctx_size: Option<u32>,
     pub backend_port: Option<u16>,
+    pub resource_budget_bytes: Option<u64>,
     pub config: Option<String>,
     pub backend_extra_args: Vec<String>,
     pub request_defaults: Option<Map<String, Value>>,
@@ -137,6 +138,12 @@ pub fn build_model_load_payload(
         payload.insert(
             "backend_port".to_string(),
             Value::Number(u64::from(backend_port).into()),
+        );
+    }
+    if let Some(resource_budget_bytes) = request.resource_budget_bytes {
+        payload.insert(
+            "resource_budget_bytes".to_string(),
+            Value::Number(resource_budget_bytes.into()),
         );
     }
     payload.insert("backend".to_string(), Value::String(backend_id.clone()));
@@ -634,6 +641,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let request = ModelLoadRequest {
             model: "Qwen/Qwen3".to_string(),
+            resource_budget_bytes: Some(7_516_192_768),
             ..ModelLoadRequest::default()
         };
         let plan = build_model_load_payload(
@@ -646,6 +654,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.payload["model"], "Qwen/Qwen3");
+        assert_eq!(plan.payload["resource_budget_bytes"], 7_516_192_768_u64);
         std::fs::remove_dir_all(cwd).ok();
     }
 

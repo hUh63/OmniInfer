@@ -139,9 +139,21 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         &admin_api_keys,
         public_model_root.as_deref(),
     )?;
-    let Some(gateway_process) = serve_state::capture_process_identity(rust_gateway.id()) else {
-        cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
-        anyhow::bail!("gateway exited before its process identity could be recorded");
+    let gateway_process = match serve_state::capture_process_identity(rust_gateway.id()) {
+        Some(identity) => identity,
+        #[cfg(debug_assertions)]
+        None if env_flag("OMNIINFER_TEST_ALLOW_OCCUPIED_SERVE_PORT") => {
+            serve_state::ProcessIdentity {
+                pid: rust_gateway.id(),
+                start_time: 0,
+                executable: None,
+                name: "external-test-gateway".to_string(),
+            }
+        }
+        None => {
+            cleanup_failed_serve(&mut rust_gateway, None, public_config.port, &run_id);
+            anyhow::bail!("gateway exited before its process identity could be recorded");
+        }
     };
     let mut serve_info = serve_state::ServePidInfo {
         run_id: Some(run_id.clone()),
@@ -231,6 +243,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 mmproj: args.mmproj.clone(),
                 ctx_size: args.ctx_size,
                 backend_port: args.backend_port,
+                resource_budget_bytes: args.resource_budget_bytes,
                 request_defaults: None,
                 restored: false,
             })
@@ -244,6 +257,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
                 mmproj: model.mmproj,
                 ctx_size: model.ctx_size,
                 backend_port: model.backend_port,
+                resource_budget_bytes: model.resource_budget_bytes,
                 config: None,
                 backend_extra_args: Vec::new(),
                 request_defaults: model.request_defaults,
@@ -540,6 +554,12 @@ mod tests {
     #[test]
     fn windows_dns_lookup_failure_is_transient_public_smoke_error() {
         let error = anyhow::anyhow!("HTTPS request failed: io: unknown host (os error 11001)");
+        assert!(is_transient_public_smoke_error(&error));
+    }
+
+    #[test]
+    fn proxy_eof_is_transient_public_smoke_error() {
+        let error = anyhow::anyhow!("HTTPS request failed: io: unexpected end of file");
         assert!(is_transient_public_smoke_error(&error));
     }
 

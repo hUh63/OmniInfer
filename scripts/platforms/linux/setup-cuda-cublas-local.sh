@@ -10,7 +10,7 @@ DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: install-cuda-cublas-local.sh [options]
+Usage: setup-cuda-cublas-local.sh [options]
 
 Downloads NVIDIA CUDA cuBLAS development packages without sudo, extracts them
 into a user-writable CUDA toolkit root, and prints the CUDAToolkit_ROOT export.

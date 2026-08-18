@@ -134,6 +134,9 @@ pub(crate) struct ModelLoadArgs {
     pub(crate) mmproj: Option<String>,
     #[arg(long)]
     pub(crate) ctx_size: Option<u32>,
+    /// Explicit runtime memory budget for remote model references whose size is unknown.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) resource_budget_bytes: Option<u64>,
     #[arg(long)]
     pub(crate) config: Option<String>,
     #[arg(long)]
@@ -374,6 +377,9 @@ pub(crate) struct ServeArgs {
     pub(crate) backend_host: Option<String>,
     #[arg(long)]
     pub(crate) backend_port: Option<u16>,
+    /// Explicit runtime memory budget for remote model references whose size is unknown.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) resource_budget_bytes: Option<u64>,
     #[arg(long)]
     pub(crate) default_backend: Option<String>,
     #[arg(long)]

@@ -200,6 +200,8 @@ pub(super) fn is_transient_public_smoke_error(error: &anyhow::Error) -> bool {
         || text.contains("temporary failure in name resolution")
         || text.contains("connection refused")
         || text.contains("connection reset")
+        || text.contains("unexpected end of file")
+        || text.contains("unexpected eof")
         || text.contains("timed out")
         || text.contains("operation timed out")
         || text.contains("http status: 520")

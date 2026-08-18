@@ -18,6 +18,7 @@ Usage: build-mlx-mac.sh [options]
 
 Options:
   --python <path>  Python 3.10+ interpreter used to create the venv
+  --from-source    Prepare the managed runtime from pinned Python packages (default)
   --dry-run        Print actions without executing them
   -h, --help       Show this help message
 EOF
@@ -49,6 +50,9 @@ while (($# > 0)); do
     --python)
       PYTHON_BIN="${2:?missing value for --python}"
       shift 2
+      ;;
+    --from-source)
+      shift
       ;;
     --dry-run)
       DRY_RUN=1

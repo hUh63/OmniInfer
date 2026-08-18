@@ -18,6 +18,7 @@ Options:
   --jobs <n>           Parallel build jobs, default: sysctl hw.ncpu
   --clean              Remove the previous build directory before configuring
   --no-bootstrap       Do not auto-initialize the TurboQuant git submodule
+  --from-source        Build from the checked-out source submodule (default)
   --smoke-test         Run `llama-server --version` after the build completes
   --dry-run            Print actions without executing them
   -h, --help           Show this help message
@@ -40,6 +41,9 @@ while (($# > 0)); do
       ;;
     --no-bootstrap)
       BOOTSTRAP_SUBMODULE=0
+      shift
+      ;;
+    --from-source)
       shift
       ;;
     --smoke-test)

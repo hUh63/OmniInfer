@@ -86,6 +86,8 @@ $configureArgs = @(
     "-DLLAMA_BUILD_TESTS=OFF",
     "-DLLAMA_BUILD_EXAMPLES=OFF",
     "-DLLAMA_BUILD_SERVER=ON",
+    "-DLLAMA_BUILD_UI=OFF",
+    "-DLLAMA_USE_PREBUILT_UI=OFF",
     "-DCMAKE_C_COMPILER=$($HipClang.Replace('\','/'))",
     "-DCMAKE_CXX_COMPILER=$($HipClangxx.Replace('\','/'))"
 )

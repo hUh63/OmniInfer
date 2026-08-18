@@ -1023,6 +1023,7 @@ fn windows_vllm_wsl2_install_and_smoke_cover_managed_lifecycle() {
             .env("OMNIINFER_RUST_STRICT", "1")
             .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
             .env("OMNIINFER_WSL_EXE", &fake_wsl)
+            .env("OMNIINFER_VLLM_NVIDIA_SMI", &fake_wsl)
             .env("OMNIINFER_FAKE_WSL_ROOT", &fake_root)
             .env("OMNIINFER_CUDA_VISIBLE_DEVICES", "0")
             .args([
@@ -1033,6 +1034,7 @@ fn windows_vllm_wsl2_install_and_smoke_cover_managed_lifecycle() {
                 "--model",
             ])
             .arg(model)
+            .args(["--resource-budget-bytes", "1073741824"])
             .arg("--backend-port")
             .arg(backend_port.to_string())
             .arg("--port")
@@ -1175,6 +1177,8 @@ fn windows_vllm_wsl2_rocm_smoke_stops_process_tree_and_releases_ports() {
             "vllm-wsl2-rocm",
             "--model",
             "Qwen/Qwen2.5-0.5B-Instruct",
+            "--resource-budget-bytes",
+            "1073741824",
             "--backend-port",
         ])
         .arg(backend_port.to_string())
