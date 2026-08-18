@@ -8,9 +8,9 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 pub(super) use std::process::{Command as StdCommand, Stdio};
 use std::sync::mpsc;
-use std::thread;
-pub(super) use std::time::Duration;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+pub(super) use std::thread;
+pub(super) use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) struct TestGateway {
     pub(super) port: u16,
@@ -718,4 +718,13 @@ pub(super) fn wait_for_process_exit(
             Ok(None) | Err(_) => return None,
         }
     }
+}
+
+#[cfg(unix)]
+pub(super) fn send_sigint(child: &std::process::Child) {
+    let status = StdCommand::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(status.success(), "SIGINT failed for pid {}", child.id());
 }

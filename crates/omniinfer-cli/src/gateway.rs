@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -73,6 +76,7 @@ struct GatewayState {
     request_history_dir: PathBuf,
     client: Client<HttpConnector, Full<HyperBytes>>,
     shutdown: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
+    startup_cancelled: Arc<AtomicBool>,
     runtime: Arc<tokio::sync::Mutex<RustRuntimeManager>>,
 }
 
@@ -96,6 +100,7 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
         request_history_dir: paths::local_dir().join("request_history"),
         client: Client::builder(TokioExecutor::new()).build_http(),
         shutdown: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
+        startup_cancelled: Arc::new(AtomicBool::new(false)),
         runtime: Arc::new(tokio::sync::Mutex::new(RustRuntimeManager::default())),
     };
     let app = axum::Router::new()
@@ -438,6 +443,7 @@ async fn try_handle_rust_endpoint(
             )))
         }
         (&Method::POST, "/omni/shutdown") => {
+            state.startup_cancelled.store(true, Ordering::SeqCst);
             let result = tokio::task::spawn_blocking({
                 let runtime = Arc::clone(&state.runtime);
                 move || {
@@ -505,6 +511,7 @@ async fn try_handle_rust_endpoint(
             let backend_host = state.backend_host.clone();
             let runtime_startup_timeout = state.runtime_startup_timeout;
             let runtime = Arc::clone(&state.runtime);
+            let startup_cancelled = Arc::clone(&state.startup_cancelled);
             let outcome = tokio::task::spawn_blocking(move || {
                 let handle = tokio::runtime::Handle::current();
                 handle.block_on(async move {
@@ -513,6 +520,7 @@ async fn try_handle_rust_endpoint(
                         backend_host,
                         runtime_startup_timeout,
                         auth.admin_id.clone(),
+                        &startup_cancelled,
                     )
                 })
             })

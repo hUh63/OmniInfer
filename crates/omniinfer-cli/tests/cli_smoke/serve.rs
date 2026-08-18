@@ -1,6 +1,185 @@
 use super::support::*;
 
 #[cfg(unix)]
+fn foreground_serve_command(
+    source_root: &std::path::Path,
+    state_root: &std::path::Path,
+    runtime_root: &std::path::Path,
+    port: u16,
+    backend_port: u16,
+    backend_id: &str,
+    model: &std::path::Path,
+) -> StdCommand {
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin("omniinfer"));
+    command
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", source_root)
+        .arg("serve")
+        .args(["--backend", backend_id, "--model"])
+        .arg(model)
+        .args(["--port", &port.to_string(), "--backend-port"])
+        .arg(backend_port.to_string())
+        .args(["--state-root"])
+        .arg(state_root)
+        .args(["--runtime-root"])
+        .arg(runtime_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(unix)]
+fn assert_interrupted_serve_cleaned(
+    child: &mut std::process::Child,
+    state_root: &std::path::Path,
+    port: u16,
+    backend_port: u16,
+) {
+    send_sigint(child);
+    let status = wait_for_process_exit(child, Duration::from_secs(15))
+        .expect("foreground serve exits after SIGINT");
+    assert!(!status.success());
+    assert!(
+        wait_for_port_closed(port),
+        "gateway port {port} remains open"
+    );
+    assert!(
+        wait_for_port_closed(backend_port),
+        "backend port {backend_port} remains open"
+    );
+    assert!(
+        !state_root
+            .join(".local")
+            .join("run")
+            .join(format!("serve-{port}.json"))
+            .exists(),
+        "serve state was not removed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_sigint_before_gateway_ready_cleans_up_gateway_and_state() {
+    let backend_id = test_external_backend_id();
+    let source_root = temp_repo_root("serve-sigint-pre-ready-source");
+    let state_root = temp_repo_root("serve-sigint-pre-ready-state");
+    let runtime_root = temp_repo_root("serve-sigint-pre-ready-runtime");
+    let port = free_port();
+    let backend_port = free_port();
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create config root");
+    install_fake_runtime_server_in_root(&runtime_root, backend_id);
+    let model = state_root.join("model.gguf");
+    fs::write(&model, "gguf").expect("write model");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{port},"startup_timeout":10}}"#),
+    )
+    .expect("write config");
+
+    let mut child = foreground_serve_command(
+        &source_root,
+        &state_root,
+        &runtime_root,
+        port,
+        backend_port,
+        backend_id,
+        &model,
+    )
+    .spawn()
+    .expect("start foreground serve");
+    let state_path = state_root
+        .join(".local")
+        .join("run")
+        .join(format!("serve-{port}.json"));
+    wait_for_file(state_path);
+    assert_interrupted_serve_cleaned(&mut child, &state_root, port, backend_port);
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_sigint_during_model_load_cleans_gateway_backend_and_state() {
+    let backend_id = test_external_backend_id();
+    let source_root = temp_repo_root("serve-sigint-load-source");
+    let state_root = temp_repo_root("serve-sigint-load-state");
+    let runtime_root = temp_repo_root("serve-sigint-load-runtime");
+    let port = free_port();
+    let backend_port = free_port();
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create config root");
+    install_fake_runtime_server_in_root(&runtime_root, backend_id);
+    let model = state_root.join("model.gguf");
+    let ready_file = state_root.join("backend-ready");
+    let release_file = state_root.join("backend-release");
+    fs::write(&model, "gguf").expect("write model");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{port},"startup_timeout":10}}"#),
+    )
+    .expect("write config");
+
+    let mut command = foreground_serve_command(
+        &source_root,
+        &state_root,
+        &runtime_root,
+        port,
+        backend_port,
+        backend_id,
+        &model,
+    );
+    command
+        .env("OMNIINFER_TEST_RUNTIME_READY_FILE", &ready_file)
+        .env("OMNIINFER_TEST_RUNTIME_DELAY_FILE", &release_file);
+    let mut child = command.spawn().expect("start foreground serve");
+    wait_for_file(ready_file);
+    assert_interrupted_serve_cleaned(&mut child, &state_root, port, backend_port);
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_sigint_after_ready_cleans_gateway_backend_and_state() {
+    let backend_id = test_external_backend_id();
+    let source_root = temp_repo_root("serve-sigint-ready-source");
+    let state_root = temp_repo_root("serve-sigint-ready-state");
+    let runtime_root = temp_repo_root("serve-sigint-ready-runtime");
+    let port = free_port();
+    let backend_port = free_port();
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create config root");
+    install_fake_runtime_server_in_root(&runtime_root, backend_id);
+    let model = state_root.join("model.gguf");
+    fs::write(&model, "gguf").expect("write model");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{port},"startup_timeout":10}}"#),
+    )
+    .expect("write config");
+
+    let mut child = foreground_serve_command(
+        &source_root,
+        &state_root,
+        &runtime_root,
+        port,
+        backend_port,
+        backend_id,
+        &model,
+    )
+    .spawn()
+    .expect("start foreground serve");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let health = wait_for_http_json(port, "/health?deep=true");
+        if health["omni"]["backend_port"] == backend_port {
+            break;
+        }
+        assert!(Instant::now() < deadline, "backend did not become ready");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_interrupted_serve_cleaned(&mut child, &state_root, port, backend_port);
+}
+
+#[cfg(unix)]
 #[test]
 fn serve_detach_starts_lan_gateway_with_api_key() {
     let port = free_port();

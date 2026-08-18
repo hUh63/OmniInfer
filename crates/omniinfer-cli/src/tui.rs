@@ -17,6 +17,7 @@ use serde_json::Value;
 mod models;
 mod render;
 
+use crate::serve::{ForegroundCtrlCHandler, install_foreground_ctrl_c_handler, stop_process};
 use crate::{
     BackendScope, ServeArgs, advisor, backend_installer, get_local_json_for_config, json_bool,
     json_str, json_u64, load_model_with_request_for_config, post_local_json_for_config,
@@ -82,6 +83,7 @@ struct TuiGatewayGuard {
     owned: bool,
     child: Option<Child>,
     stopped: Arc<AtomicBool>,
+    interrupt: Option<ForegroundCtrlCHandler>,
 }
 
 impl TuiGatewayGuard {
@@ -92,10 +94,12 @@ impl TuiGatewayGuard {
                 owned: false,
                 child: None,
                 stopped: Arc::new(AtomicBool::new(false)),
+                interrupt: None,
             });
         }
         print_section("Service", "Starting local OmniInfer gateway");
         print_kv("Port", &config.port.to_string());
+        let interrupt = install_foreground_ctrl_c_handler(config.port, true)?;
         let mut command = ProcessCommand::new(std::env::current_exe()?);
         paths::propagate_cli_roots(&mut command);
         command
@@ -114,39 +118,56 @@ impl TuiGatewayGuard {
             command.process_group(0);
         }
         let child = command.spawn()?;
-        let guard = Self {
+        if let Err(error) = serve_state::save_serve_pid_info(&serve_state::ServePidInfo {
+            pid: Some(child.id()),
+            port: Some(config.port),
+            ..Default::default()
+        }) {
+            stop_process(child.id());
+            return Err(error.into());
+        }
+        let mut guard = Self {
             port: config.port,
             owned: true,
             child: Some(child),
             stopped: Arc::new(AtomicBool::new(false)),
+            interrupt: Some(interrupt),
         };
+        if guard
+            .interrupt
+            .as_ref()
+            .is_some_and(ForegroundCtrlCHandler::interrupted)
+        {
+            guard.stop();
+            anyhow::bail!("startup interrupted");
+        }
+        guard
+            .interrupt
+            .as_ref()
+            .expect("owned gateway has an interrupt handler")
+            .arm();
+        if guard
+            .interrupt
+            .as_ref()
+            .is_some_and(ForegroundCtrlCHandler::interrupted)
+        {
+            guard.stop();
+            anyhow::bail!("startup interrupted");
+        }
         wait_for_gateway_ready(config)?;
-        guard.install_ctrl_c_handler();
         notice("Local gateway ready", NoticeKind::Success);
         println!();
         Ok(guard)
     }
 
-    fn install_ctrl_c_handler(&self) {
-        if !self.owned {
-            return;
+    fn stop(&mut self) {
+        stop_tui_owned_gateway(self.port, &self.stopped);
+        if let Some(child) = self.child.as_mut()
+            && child.try_wait().ok().flatten().is_none()
+        {
+            stop_process(child.id());
+            let _ = child.wait();
         }
-        let port = self.port;
-        let stopped = Arc::clone(&self.stopped);
-        std::thread::spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            runtime.block_on(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    stop_tui_owned_gateway(port, &stopped);
-                    std::process::exit(130);
-                }
-            });
-        });
     }
 }
 
@@ -155,10 +176,7 @@ impl Drop for TuiGatewayGuard {
         if !self.owned {
             return;
         }
-        stop_tui_owned_gateway(self.port, &self.stopped);
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.try_wait();
-        }
+        self.stop();
     }
 }
 

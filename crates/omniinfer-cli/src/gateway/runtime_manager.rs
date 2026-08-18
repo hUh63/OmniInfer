@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -177,7 +178,11 @@ impl RustRuntimeManager {
         backend_host: String,
         startup_timeout: Duration,
         owner_admin_id: Option<String>,
+        startup_cancelled: &AtomicBool,
     ) -> Result<LoadModelOutcome> {
+        if startup_cancelled.load(Ordering::SeqCst) {
+            anyhow::bail!("gateway is shutting down")
+        }
         self.reap_exited_runtimes();
         let model = json_required_str(&payload, "model")?.to_string();
         let public_model_id = payload
@@ -352,6 +357,7 @@ impl RustRuntimeManager {
                     startup_timeout,
                     health_host: backend_host.clone(),
                 },
+                startup_cancelled,
             )?;
             local_state::save_selected_backend(&backend.id)?;
             local_state::save_selected_model(
@@ -813,11 +819,12 @@ fn start_runtime_with_cold_start_policy(
     backend_id: &str,
     plan: &omniinfer_core::runtime_plan::ExternalRuntimePlan,
     options: RuntimeProcessOptions,
+    startup_cancelled: &AtomicBool,
 ) -> Result<RuntimeProcess, RuntimeProcessError> {
     let Some(initial_timeout) =
         wsl_rocm_cold_start_retry_timeout(backend_id, options.startup_timeout)
     else {
-        return RuntimeProcess::start(plan, options);
+        return RuntimeProcess::start_cancellable(plan, options, startup_cancelled);
     };
 
     let total_timeout = options.startup_timeout;
@@ -825,10 +832,11 @@ fn start_runtime_with_cold_start_policy(
         total_timeout,
         initial_timeout,
         WSL_ROCM_COLD_START_RETRY_COOLDOWN,
+        startup_cancelled,
         |attempt_timeout| {
             let mut attempt_options = options.clone();
             attempt_options.startup_timeout = attempt_timeout;
-            RuntimeProcess::start(plan, attempt_options)
+            RuntimeProcess::start_cancellable(plan, attempt_options, startup_cancelled)
         },
     )
 }
@@ -845,6 +853,7 @@ fn retry_after_ready_timeout<T>(
     total_timeout: Duration,
     initial_timeout: Duration,
     cooldown: Duration,
+    startup_cancelled: &AtomicBool,
     mut attempt: impl FnMut(Duration) -> Result<T, RuntimeProcessError>,
 ) -> Result<T, RuntimeProcessError> {
     let started = Instant::now();
@@ -859,7 +868,13 @@ fn retry_after_ready_timeout<T>(
                 initial_timeout.as_secs(),
                 cooldown.as_secs()
             );
-            std::thread::sleep(cooldown);
+            let cooldown_deadline = Instant::now() + cooldown;
+            while Instant::now() < cooldown_deadline {
+                if startup_cancelled.load(Ordering::SeqCst) {
+                    return Err(RuntimeProcessError::Interrupted);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
             let remaining = total_timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return Err(RuntimeProcessError::ReadyTimeout);
@@ -1728,10 +1743,12 @@ mod tests {
     fn ready_timeout_retries_once_with_the_remaining_budget() {
         let total_timeout = Duration::from_secs(300);
         let mut attempts = Vec::new();
+        let cancelled = AtomicBool::new(false);
         let result = retry_after_ready_timeout(
             total_timeout,
             Duration::from_secs(120),
             Duration::ZERO,
+            &cancelled,
             |timeout| {
                 attempts.push(timeout);
                 if attempts.len() == 1 {
@@ -1753,10 +1770,12 @@ mod tests {
     #[test]
     fn cold_start_retry_does_not_mask_early_exit() {
         let mut attempts = 0;
+        let cancelled = AtomicBool::new(false);
         let error = retry_after_ready_timeout(
             Duration::from_secs(300),
             Duration::from_secs(120),
             Duration::ZERO,
+            &cancelled,
             |_| {
                 attempts += 1;
                 Err::<(), _>(RuntimeProcessError::EarlyExit)
@@ -1771,10 +1790,12 @@ mod tests {
     #[test]
     fn ready_timeout_does_not_retry_without_post_cooldown_budget() {
         let mut attempts = 0;
+        let cancelled = AtomicBool::new(false);
         let error = retry_after_ready_timeout(
             Duration::from_millis(1),
             Duration::ZERO,
             Duration::from_millis(1),
+            &cancelled,
             |_| {
                 attempts += 1;
                 Err::<(), _>(RuntimeProcessError::ReadyTimeout)

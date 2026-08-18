@@ -6,6 +6,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -124,6 +125,7 @@ fn cleanup_failed_serve(
 
     let mut config = config::load_app_config().unwrap_or_default();
     config.port = port;
+    let info = serve_state::load_serve_pid_info(port).ok().flatten();
     let url = format!("{}/omni/shutdown", config.service_base_url());
     let shutdown_accepted =
         http_client::post_json(&url, &serde_json::json!({}), SHUTDOWN_REQUEST_TIMEOUT)
@@ -145,6 +147,9 @@ fn cleanup_failed_serve(
         },
     );
     if !shutdown_accepted || !gateway_exited || !gateway_closed {
+        if let Some(pid) = info.as_ref().and_then(|value| value.backend_pid) {
+            stop_process(pid);
+        }
         if !gateway_exited {
             stop_process(gateway.id());
         }
@@ -153,7 +158,13 @@ fn cleanup_failed_serve(
             gateway_closed || wait_for_local_port_closed(port, FORCED_SHUTDOWN_TIMEOUT);
     }
 
-    if gateway_exited && gateway_closed {
+    let backend_closed = info
+        .as_ref()
+        .and_then(|value| value.backend_port)
+        .is_none_or(|backend_port| {
+            wait_for_local_port_closed(backend_port, FORCED_SHUTDOWN_TIMEOUT)
+        });
+    if gateway_exited && gateway_closed && backend_closed {
         let _ = serve_state::remove_serve_pid_info(port);
     } else {
         eprintln!(
@@ -238,14 +249,18 @@ fn wait_for_child_exit(child: &mut std::process::Child, timeout: Duration) -> bo
     }
 }
 
-fn stop_process(pid: u32) {
+pub(crate) fn stop_process(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = ProcessCommand::new("kill")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        signal_process_group_or_pid(pid, "-TERM");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if !process_group_or_pid_exists(pid) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        signal_process_group_or_pid(pid, "-KILL");
     }
     #[cfg(windows)]
     {
@@ -257,6 +272,40 @@ fn stop_process(pid: u32) {
         hide_child_window(&mut command);
         let _ = command.status();
     }
+}
+
+#[cfg(unix)]
+fn signal_process_group_or_pid(pid: u32, signal: &str) {
+    let group_signalled = ProcessCommand::new("kill")
+        .args([signal, "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !group_signalled {
+        let _ = ProcessCommand::new("kill")
+            .args([signal, &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(unix)]
+fn process_group_or_pid_exists(pid: u32) -> bool {
+    let group_exists = ProcessCommand::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    group_exists
+        || ProcessCommand::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 pub(crate) fn can_serve_locally(args: &ServeArgs) -> bool {
@@ -345,6 +394,9 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
     } else {
         None
     };
+    let interrupt = (!args.detach)
+        .then(|| install_foreground_ctrl_c_handler(public_config.port, true))
+        .transpose()?;
     let log_path = paths::local_logs_dir().join(format!("serve-{}.log", public_config.port));
     println!("Starting OmniInfer service on port {}...", config.port);
     println!("Log: {}", log_path.display());
@@ -357,6 +409,29 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         &admin_api_keys,
         public_model_root.as_deref(),
     )?;
+    if let Err(error) = serve_state::save_serve_pid_info(&serve_state::ServePidInfo {
+        pid: Some(rust_gateway.id()),
+        port: Some(public_config.port),
+        log: Some(log_path.display().to_string()),
+        ..Default::default()
+    }) {
+        cleanup_failed_serve(&mut rust_gateway, None, public_config.port);
+        return Err(error.into());
+    }
+    if interrupt
+        .as_ref()
+        .is_some_and(ForegroundCtrlCHandler::interrupted)
+    {
+        cleanup_failed_serve(&mut rust_gateway, None, public_config.port);
+        return Err(anyhow::anyhow!("startup interrupted"));
+    }
+    if let Some(interrupt) = &interrupt {
+        interrupt.arm();
+        if interrupt.interrupted() {
+            cleanup_failed_serve(&mut rust_gateway, None, public_config.port);
+            return Err(anyhow::anyhow!("startup interrupted"));
+        }
+    }
     if let Err(error) = wait_for_gateway_ready(&public_config) {
         cleanup_failed_serve(&mut rust_gateway, None, public_config.port);
         return Err(error.into());
@@ -375,6 +450,17 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
             };
         cloudflared_child = Some(child);
         public_url = Some(url);
+    }
+    if interrupt
+        .as_ref()
+        .is_some_and(ForegroundCtrlCHandler::interrupted)
+    {
+        cleanup_failed_serve(
+            &mut rust_gateway,
+            cloudflared_child.as_mut(),
+            public_config.port,
+        );
+        return Err(anyhow::anyhow!("startup interrupted"));
     }
     let configure_result = (|| -> Result<()> {
         if let Some(backend) = args
@@ -537,11 +623,14 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
         return Ok(());
     }
     if !args.detach {
-        let ctrl_c_handler = install_foreground_ctrl_c_handler(public_config.port);
         println!("Press Ctrl+C to stop.");
-        let status =
-            wait_for_foreground_service(rust_gateway, cloudflared_child, public_config.port)?;
-        drop(ctrl_c_handler);
+        let status = wait_for_foreground_service(
+            rust_gateway,
+            cloudflared_child,
+            public_config.port,
+            backend_port,
+        )?;
+        drop(interrupt);
         if !status.success() {
             anyhow::bail!("OmniInfer service exited with status {status}");
         }
@@ -606,18 +695,23 @@ fn wait_for_foreground_service(
     mut rust_gateway: std::process::Child,
     cloudflared_child: Option<std::process::Child>,
     port: u16,
+    backend_port: Option<u16>,
 ) -> Result<std::process::ExitStatus> {
     let status = rust_gateway.wait()?;
     if let Some(mut tunnel) = cloudflared_child {
         let _ = tunnel.kill();
         let _ = tunnel.wait();
     }
-    let _ = serve_state::remove_serve_pid_info(port);
+    if backend_port.is_none_or(|value| wait_for_local_port_closed(value, Duration::ZERO)) {
+        let _ = serve_state::remove_serve_pid_info(port);
+    }
     Ok(status)
 }
 
-struct ForegroundCtrlCHandler {
+pub(crate) struct ForegroundCtrlCHandler {
     stopped: Arc<AtomicBool>,
+    armed: Arc<AtomicBool>,
+    interrupted: Arc<AtomicBool>,
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -625,6 +719,7 @@ struct ForegroundCtrlCHandler {
 impl Drop for ForegroundCtrlCHandler {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.armed.store(false, Ordering::SeqCst);
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
         }
@@ -634,32 +729,109 @@ impl Drop for ForegroundCtrlCHandler {
     }
 }
 
-fn install_foreground_ctrl_c_handler(port: u16) -> ForegroundCtrlCHandler {
+impl ForegroundCtrlCHandler {
+    pub(crate) fn interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn install_foreground_ctrl_c_handler(
+    port: u16,
+    exit_after_shutdown: bool,
+) -> Result<ForegroundCtrlCHandler> {
     let stopped = Arc::new(AtomicBool::new(false));
+    let armed = Arc::new(AtomicBool::new(false));
+    let interrupted = Arc::new(AtomicBool::new(false));
     let stopped_for_task = Arc::clone(&stopped);
+    let armed_for_task = Arc::clone(&armed);
+    let interrupted_for_task = Arc::clone(&interrupted);
     let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let thread = thread::spawn(move || {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         else {
+            let _ = ready_tx.send(Err("failed to create Ctrl+C listener runtime"));
             return;
         };
+        #[cfg(unix)]
         runtime.block_on(async move {
+            let mut signal =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+                    Ok(signal) => signal,
+                    Err(_) => {
+                        let _ = ready_tx.send(Err("failed to register Ctrl+C listener"));
+                        return;
+                    }
+                };
+            let _ = ready_tx.send(Ok(()));
+            tokio::select! {
+                _ = signal.recv() => shutdown_after_interrupt(
+                    &stopped_for_task,
+                    &armed_for_task,
+                    &interrupted_for_task,
+                    port,
+                    exit_after_shutdown,
+                ),
+                _ = cancel_rx => {}
+            }
+        });
+        #[cfg(not(unix))]
+        runtime.block_on(async move {
+            let _ = ready_tx.send(Ok(()));
             tokio::select! {
                 result = tokio::signal::ctrl_c() => {
-                    if result.is_ok() && !stopped_for_task.swap(true, Ordering::SeqCst) {
-                        let _ = stop_serve(port);
+                    if result.is_ok() {
+                        shutdown_after_interrupt(
+                            &stopped_for_task,
+                            &armed_for_task,
+                            &interrupted_for_task,
+                            port,
+                            exit_after_shutdown,
+                        );
                     }
                 }
                 _ = cancel_rx => {}
             }
         });
     });
-    ForegroundCtrlCHandler {
-        stopped,
-        cancel: Some(cancel),
-        thread: Some(thread),
+    match ready_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(())) => Ok(ForegroundCtrlCHandler {
+            stopped,
+            armed,
+            interrupted,
+            cancel: Some(cancel),
+            thread: Some(thread),
+        }),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            anyhow::bail!("{error}")
+        }
+        Err(_) => {
+            let _ = thread.join();
+            anyhow::bail!("timed out registering Ctrl+C listener")
+        }
+    }
+}
+
+fn shutdown_after_interrupt(
+    stopped: &AtomicBool,
+    armed: &AtomicBool,
+    interrupted: &AtomicBool,
+    port: u16,
+    exit_after_shutdown: bool,
+) {
+    if stopped.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    interrupted.store(true, Ordering::SeqCst);
+    if armed.load(Ordering::SeqCst) && stop_serve(port).is_ok() && exit_after_shutdown {
+        std::process::exit(130);
     }
 }
 
