@@ -640,11 +640,13 @@ fn shutdown_after_interrupt(
         return;
     }
     interrupted.store(true, Ordering::SeqCst);
-    if armed.load(Ordering::SeqCst)
-        && stop_serve_during_startup(port).is_ok()
-        && exit_after_shutdown
-    {
-        std::process::exit(130);
+    if armed.load(Ordering::SeqCst) {
+        if let Err(error) = stop_serve_during_startup(port) {
+            eprintln!("OmniInfer: Ctrl+C cleanup failed: {error}");
+        }
+        if exit_after_shutdown {
+            std::process::exit(130);
+        }
     }
 }
 

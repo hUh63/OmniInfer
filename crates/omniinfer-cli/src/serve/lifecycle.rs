@@ -32,13 +32,18 @@ pub(super) fn stop_serve_locked(
         },
     );
     gateway_closed = gateway_closed
-        && recorded_process_exited(
+        && wait_for_recorded_process_exit(
             info.as_ref().and_then(|value| value.pid),
             info.as_ref()
                 .and_then(|value| value.gateway_process.as_ref()),
             LegacyProcessKind::Gateway,
             info.as_ref(),
             port,
+            if shutdown_accepted {
+                GRACEFUL_SHUTDOWN_TIMEOUT
+            } else {
+                Duration::ZERO
+            },
         );
     let mut backend_closed = info
         .as_ref()

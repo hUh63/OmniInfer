@@ -39,7 +39,7 @@ fn assert_interrupted_serve_cleaned(
     send_sigint(child);
     let status = wait_for_process_exit(child, Duration::from_secs(15))
         .expect("foreground serve exits after SIGINT");
-    assert!(!status.success());
+    assert_eq!(status.code(), Some(130));
     assert!(
         wait_for_port_closed(port),
         "gateway port {port} remains open"

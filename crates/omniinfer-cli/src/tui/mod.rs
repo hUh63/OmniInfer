@@ -2,10 +2,6 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -82,8 +78,7 @@ struct TuiGatewayGuard {
     port: u16,
     owned: bool,
     child: Option<Child>,
-    stopped: Arc<AtomicBool>,
-    interrupt: Option<ForegroundCtrlCHandler>,
+    _interrupt: Option<ForegroundCtrlCHandler>,
 }
 
 impl TuiGatewayGuard {
@@ -93,8 +88,7 @@ impl TuiGatewayGuard {
                 port: config.port,
                 owned: false,
                 child: None,
-                stopped: Arc::new(AtomicBool::new(false)),
-                interrupt: None,
+                _interrupt: None,
             });
         }
         print_section("Service", "Starting local OmniInfer gateway");
@@ -117,60 +111,55 @@ impl TuiGatewayGuard {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let child = command.spawn()?;
-        let Some(gateway_process) = serve_state::capture_process_identity(child.id()) else {
-            stop_process(child.id());
-            anyhow::bail!("gateway exited before its process identity could be recorded");
+        let guard = Self {
+            port: config.port,
+            owned: true,
+            child: Some(command.spawn()?),
+            _interrupt: Some(interrupt),
         };
+        let child_pid = guard
+            .child
+            .as_ref()
+            .expect("owned gateway has a child")
+            .id();
+        let gateway_process =
+            serve_state::capture_process_identity(child_pid).ok_or_else(|| {
+                anyhow::anyhow!("gateway exited before its process identity could be recorded")
+            })?;
         if let Err(error) = serve_state::save_serve_pid_info(&serve_state::ServePidInfo {
             phase: Some("starting".to_string()),
-            pid: Some(child.id()),
+            pid: Some(child_pid),
             gateway_process: Some(gateway_process),
             port: Some(config.port),
             ..Default::default()
         }) {
-            stop_process(child.id());
             return Err(error.into());
         }
-        let mut guard = Self {
-            port: config.port,
-            owned: true,
-            child: Some(child),
-            stopped: Arc::new(AtomicBool::new(false)),
-            interrupt: Some(interrupt),
-        };
-        if guard
-            .interrupt
-            .as_ref()
-            .is_some_and(ForegroundCtrlCHandler::interrupted)
-        {
-            guard.stop();
-            anyhow::bail!("startup interrupted");
-        }
         guard
-            .interrupt
+            ._interrupt
             .as_ref()
             .expect("owned gateway has an interrupt handler")
             .arm();
         if guard
-            .interrupt
+            ._interrupt
             .as_ref()
             .is_some_and(ForegroundCtrlCHandler::interrupted)
         {
-            guard.stop();
-            anyhow::bail!("startup interrupted");
+            return Err(anyhow::anyhow!("startup interrupted"));
         }
-        if let Err(error) = wait_for_gateway_ready(config) {
-            guard.stop();
-            return Err(error);
-        }
+        wait_for_gateway_ready(config)?;
         notice("Local gateway ready", NoticeKind::Success);
         println!();
         Ok(guard)
     }
+}
 
-    fn stop(&mut self) {
-        stop_tui_owned_gateway(self.port, &self.stopped);
+impl Drop for TuiGatewayGuard {
+    fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
+        let _ = stop_serve(self.port);
         if let Some(child) = self.child.as_mut()
             && child.try_wait().ok().flatten().is_none()
         {
@@ -180,22 +169,6 @@ impl TuiGatewayGuard {
     }
 }
 
-impl Drop for TuiGatewayGuard {
-    fn drop(&mut self) {
-        if !self.owned {
-            return;
-        }
-        self.stop();
-    }
-}
-
-fn stop_tui_owned_gateway(port: u16, stopped: &AtomicBool) {
-    if stopped.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let _ = stop_serve(port);
-}
-
 pub fn run_server(args: &ServeArgs) -> Result<()> {
     if !is_interactive() {
         return serve_orchestrated(args);
@@ -203,10 +176,9 @@ pub fn run_server(args: &ServeArgs) -> Result<()> {
     clear_screen();
     print_header("OmniInfer Server", "Interactive gateway launcher");
     let config = config::load_app_config().unwrap_or_default();
-    let backend =
-        choose_backend(&config)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
-    let model =
-        choose_model(&config, true)?.ok_or_else(|| anyhow::anyhow!("No model selected."))?;
+    let backend = choose_backend()?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
+    let model = choose_model(&config, true, Some(&backend))?
+        .ok_or_else(|| anyhow::anyhow!("No model selected."))?;
     let mut args = args.clone();
     args.backend = Some(backend);
     args.model = Some(model.display().to_string());
@@ -291,5 +263,40 @@ mod backend_model_tests {
             }),
             &model,
         ));
+    }
+
+    #[test]
+    fn model_picker_uses_explicit_backend_over_persisted_selection() {
+        let backends = serde_json::json!({
+            "data": [
+                {
+                    "id": "persisted-backend",
+                    "family": "llama.cpp",
+                    "model_artifact": "file",
+                    "selected": true
+                },
+                {
+                    "id": "chosen-backend",
+                    "family": "vla.cpp",
+                    "model_artifact": "vla-artifact",
+                    "selected": false
+                }
+            ]
+        });
+        let selected = selected_backend_info(&backends, Some("chosen-backend"))
+            .expect("chosen backend should be present");
+        assert_eq!(selected.family, "vla.cpp");
+        assert!(model_supported_by_backend(
+            Path::new("model.safetensors"),
+            Some(&selected)
+        ));
+        assert!(!model_supported_by_backend(
+            Path::new("model.bin"),
+            Some(&selected)
+        ));
+        assert_eq!(
+            selected_backend_line(&backends, Some("chosen-backend")),
+            "Backend: chosen-backend (not installed)"
+        );
     }
 }
