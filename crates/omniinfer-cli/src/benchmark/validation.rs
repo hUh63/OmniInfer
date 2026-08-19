@@ -34,8 +34,15 @@ pub(super) fn validate_metadata(args: &BenchRunArgs) -> Result<()> {
             validate_text(label, value, 256)?;
         }
     }
-    if let Some(value) = args.notes.as_deref() {
-        validate_text("--notes", value, 2048)?;
+    if let Some(notes) = args.notes.as_deref() {
+        validate_text("--notes", notes, 2048)?;
+    }
+    if let Some(value) = protocol_notes(args)
+        && value.chars().count() > 2048
+    {
+        anyhow::bail!(
+            "generated protocol notes exceed 2048 characters after the --ignore-eos marker is appended. Shorten --notes."
+        );
     }
     validated_command("--build-command", &args.build_command)?;
     if !valid_catalog_id(&args.catalog_model_id) {

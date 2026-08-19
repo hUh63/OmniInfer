@@ -411,6 +411,12 @@ Declare each optional method with `--optimization <slug>` instead of using
 available. See [Benchmark Results](benchmark.md) for the complete contract,
 security rules, and machine-readable output behavior.
 
+Add `--ignore-eos` with `--max-tokens <n>` for a fixed-length benchmark. It
+requests `ignore_eos: true`; the CLI then requires every measured response to
+report `completion_tokens` equal to `<n>` and aborts rather than archiving a
+short or mismatched result. This mode is recorded in the existing
+`protocol.notes` field and does not change the benchmark schema.
+
 ## Common Commands
 
 ```sh

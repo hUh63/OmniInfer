@@ -21,6 +21,15 @@ pub(super) fn read_prompt(args: &BenchRunArgs) -> Result<(String, String)> {
     }
 }
 
+pub(super) fn protocol_notes(args: &BenchRunArgs) -> Option<String> {
+    match (args.notes.as_deref(), args.ignore_eos) {
+        (Some(notes), true) => Some(format!("{notes}; {IGNORE_EOS_PROTOCOL_NOTE}")),
+        (None, true) => Some(IGNORE_EOS_PROTOCOL_NOTE.to_string()),
+        (Some(notes), false) => Some(notes.to_string()),
+        (None, false) => None,
+    }
+}
+
 pub(super) fn extract_measurement(response: &Value, elapsed: Duration) -> Result<Measurement> {
     let usage = response
         .get("usage")
@@ -147,7 +156,7 @@ pub(super) fn build_submission(input: BuildSubmission<'_>) -> Result<Value> {
         "timeout_seconds": input.args.timeout_seconds,
         "started_at": input.started_at.format(&Rfc3339)?,
     });
-    if let Some(notes) = input.args.notes.as_deref() {
+    if let Some(notes) = protocol_notes(input.args) {
         protocol["notes"] = json!(notes);
     }
     let mut provenance = json!({"submitter_name": input.args.submitter_name});

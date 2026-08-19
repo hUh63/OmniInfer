@@ -45,6 +45,20 @@ arguments contain a known DFlash or TurboQuant marker. This guard cannot prove
 that every third-party optimization is active or inactive; the submitter must
 check the runtime logs and declare every method that actually affected the run.
 
+For a fixed-length benchmark, add `--ignore-eos` with the requested token
+budget:
+
+```sh
+./omniinfer bench run <metadata-options> --max-tokens 256 --ignore-eos
+```
+
+This requests `ignore_eos: true` and establishes a fixed-length benchmark
+contract: every measured response must report `completion_tokens` equal to
+`--max-tokens`. The CLI validates each response and aborts instead of archiving
+the result when a response is short or otherwise mismatches; `--ignore-eos`
+does not make the exact length unconditional. The mode is recorded in the
+existing `protocol.notes` field, without a schema change.
+
 The command performs one unrecorded warmup by default, then three measured
 non-streaming requests at concurrency 1. Prompt and completion token counts come
 from each response, and all measured runs must report the same PP and TG. The
