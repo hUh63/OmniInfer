@@ -17,7 +17,7 @@ use crate::{
 };
 
 const BENCHMARK_SCHEMA_VERSION: &str = "1.2.0";
-const IGNORE_EOS· _PROTOCOL_NOTE: &str =
+const IGNORE_EOS_PROTOCOL_NOTE: &str =
     "fixed_length_generation=true; ignore_eos=true; completion_tokens=max_tokens";
 const DEFAULT_PROMPT: &str = "Write a detailed but concise explanation of why local language-model inference speed varies across hardware and runtimes.";
 const MODEL_FORMATS: &[&str] = &[
