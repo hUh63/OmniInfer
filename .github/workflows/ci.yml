@@ -43,6 +43,9 @@ jobs:
       - name: Run Linux VLA example contract tests
         run: python3 -m unittest tests/test_vla_libero.py
 
+      - name: Validate README product entry
+        run: python3 -m unittest tests/test_readme.py
+
       - name: Test Unix installer contracts
         run: |
           bash tests/test_release_installer.sh
