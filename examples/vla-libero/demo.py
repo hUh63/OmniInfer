@@ -54,6 +54,10 @@ DISPLAY_JPEG_QUALITY = 92
 DISPLAY_JPEG_SUBSAMPLING = 1
 DEFAULT_PI05_ACTION_STEPS = 10
 DEFAULT_WRIST_DISPLAY_CROP_RATIO = 1.0
+OMNIINFER_URL_REQUIREMENT = (
+    "OmniInfer URL must be an HTTP loopback IP with an explicit nonzero port "
+    "and no credentials, path, query, or fragment"
+)
 
 
 def default_output_dir() -> str:
@@ -115,15 +119,17 @@ def validate_dashboard_origin(value: str | None, host: str, port: int) -> None:
         raise PermissionError("missing or invalid Origin header")
 
 
-def validate_omniinfer_url(value: str) -> str:
+def validate_omniinfer_url(value: Any) -> str:
     """Return a canonical loopback gateway URL that cannot disclose admin keys."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("OmniInfer URL must be a non-empty string")
     try:
         parsed = urllib.parse.urlsplit(value)
         host = parsed.hostname
         port = parsed.port
         address = ipaddress.ip_address(host) if host is not None else None
     except ValueError as error:
-        raise ValueError(f"Invalid OmniInfer URL: {value!r}") from error
+        raise ValueError(OMNIINFER_URL_REQUIREMENT) from error
     if (
         parsed.scheme != "http"
         or address is None
@@ -136,10 +142,7 @@ def validate_omniinfer_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError(
-            "OmniInfer URL must be an HTTP loopback IP with an explicit port "
-            "and no credentials, path, query, or fragment"
-        )
+        raise ValueError(OMNIINFER_URL_REQUIREMENT)
     if getattr(address, "scope_id", None) is not None:
         raise ValueError("OmniInfer URL must not contain an IPv6 scope identifier")
     canonical_host = f"[{address.compressed}]" if address.version == 6 else address.compressed
@@ -323,53 +326,6 @@ def _profile_tokenizer(value: Any, config_dir: Path) -> str | None:
     return value
 
 
-def validate_omniinfer_url(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("OmniInfer URL must be a non-empty string")
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(f"Invalid OmniInfer URL: {value!r}")
-    return value.rstrip("/")
-
-
-def validate_profile_omniinfer_url(value: Any) -> str:
-    normalized = validate_omniinfer_url(value)
-    parsed = urllib.parse.urlsplit(normalized)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in LOOPBACK_HOSTS
-        or parsed.port is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("OmniInfer URL must be a loopback http:// URL with an explicit port")
-    return normalized
-
-
-def validate_loopback_omniinfer_url(value: Any) -> str:
-    """Require the dashboard's canonical local OmniInfer gateway origin."""
-    normalized = validate_omniinfer_url(value)
-    parsed = urllib.parse.urlsplit(normalized)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in {"127.0.0.1", "::1"}
-        or parsed.port is None
-        or not 1 <= parsed.port <= 65535
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError(
-            "OmniInfer URL must be a canonical loopback http://127.0.0.1:<port> URL"
-        )
-    return normalized.rstrip("/")
-
-
 def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
     """Load trusted server-side model choices without exposing paths to browsers."""
     config_path = Path(path).expanduser().resolve()
@@ -454,7 +410,7 @@ def load_model_profiles(path: str, base: DemoConfig) -> dict[str, ModelProfile]:
         backend = entry.get("backend", base.backend)
         if not isinstance(backend, str) or not backend.startswith("vla.cpp-"):
             raise ValueError(f"model profile {identifier!r} backend must be a vla.cpp backend")
-        omniinfer_url = validate_profile_omniinfer_url(
+        omniinfer_url = validate_omniinfer_url(
             entry.get("omniinfer_url", base.omniinfer_url)
         )
         profiles[identifier] = ModelProfile(
@@ -494,7 +450,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 class OmniInferAPI:
     def __init__(self, base_url: str, admin_api_key: str | None = None):
-        self.base_url = validate_loopback_omniinfer_url(base_url)
+        self.base_url = validate_omniinfer_url(base_url)
         self.admin_api_key = admin_api_key
         self._opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), _NoRedirectHandler()
@@ -1342,8 +1298,6 @@ def parse_args() -> argparse.Namespace:
     try:
         args.omniinfer_url = validate_omniinfer_url(args.omniinfer_url)
         validate_libero_object_task_id(args.task_id)
-        if args.model_profiles is None:
-            args.omniinfer_url = validate_loopback_omniinfer_url(args.omniinfer_url)
         if args.model_profiles is None:
             args.stats_json = validate_arch_options(
                 args.arch, args.tokenizer, args.stats_json

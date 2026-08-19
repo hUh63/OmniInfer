@@ -38,11 +38,35 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(DEMO.validate_render_size(256), 256)
         self.assertEqual(DEMO.validate_render_size(1024), 1024)
 
-    def test_general_omniinfer_url_keeps_remote_https_support(self):
-        self.assertEqual(
-            DEMO.validate_omniinfer_url("https://gateway.example:9443/api"),
+    def test_omniinfer_url_validator_canonicalizes_loopback_ips(self):
+        for value, expected in (
+            ("http://127.0.0.1:9000/", "http://127.0.0.1:9000"),
+            ("http://127.0.0.2:9000", "http://127.0.0.2:9000"),
+            ("http://[0:0:0:0:0:0:0:1]:9000", "http://[::1]:9000"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(DEMO.validate_omniinfer_url(value), expected)
+
+    def test_omniinfer_url_validator_rejects_noncanonical_origins(self):
+        for value in (
+            None,
+            "",
+            "https://127.0.0.1:9000",
             "https://gateway.example:9443/api",
-        )
+            "http://localhost:9000",
+            "http://192.0.2.10:9000",
+            "http://user:password@127.0.0.1:9000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:9000/omni",
+            "http://127.0.0.1:9000?target=remote",
+            "http://127.0.0.1:9000#fragment",
+            "http://[::1%25lo]:9000",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    DEMO.validate_omniinfer_url(value)
 
     def test_demo_rejects_unsafe_render_sizes(self):
         for render_size in (127, 1025, True, "512"):
@@ -173,7 +197,7 @@ class RuntimeContractTests(unittest.TestCase):
                             "pi": {
                                 "label": "PI0.5",
                                 "arch": "pi05",
-                                "omniinfer_url": "http://127.0.0.1:52997",
+                                "omniinfer_url": "http://[0:0:0:0:0:0:0:1]:52997",
                                 "use_loaded_runtime": True,
                             }
                         }
@@ -184,7 +208,7 @@ class RuntimeContractTests(unittest.TestCase):
                 str(manifest), DEMO.DemoConfig()
             )["pi"]
             self.assertIsNone(profile.config.model)
-            self.assertEqual(profile.config.omniinfer_url, "http://127.0.0.1:52997")
+            self.assertEqual(profile.config.omniinfer_url, "http://[::1]:52997")
 
     def test_model_profiles_reject_non_loopback_gateway_urls(self):
         with tempfile.TemporaryDirectory() as directory:
