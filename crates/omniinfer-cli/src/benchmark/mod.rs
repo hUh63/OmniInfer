@@ -102,13 +102,19 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
         })?;
     let (prompt, prompt_source) = read_prompt(args)?;
     let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
-    let request = json!({
+    let mut request = json!({
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": args.max_tokens,
         "stream": false,
         "think": false,
     });
+    if args.ignore_eos {
+        request
+            .as_object_mut()
+            .expect("benchmark request is a JSON object")
+            .insert("ignore_eos".to_string(), Value::Bool(true));
+    }
     let timeout = Duration::from_secs(u64::from(args.timeout_seconds));
 
     for index in 0..args.warmup_runs {

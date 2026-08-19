@@ -280,6 +280,9 @@ pub(crate) struct BenchRunArgs {
     /// Unrecorded warmup requests before measurement.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(0..=100))]
     pub(crate) warmup_runs: u16,
+    /// Request that the runtime ignore end-of-sequence tokens.
+    #[arg(long)]
+    pub(crate) ignore_eos: bool,
     /// Context size; inferred from loaded runtime state when omitted.
     #[arg(long)]
     pub(crate) context_size: Option<u32>,

@@ -87,6 +87,7 @@ fn bench_archives_submission_compatible_json() {
         assert_eq!(body["stream"], false);
         assert_eq!(body["temperature"], 0);
         assert_eq!(body["max_tokens"], 128);
+        assert!(body.get("ignore_eos").is_none());
     }
     gateway.join();
 
@@ -127,6 +128,85 @@ fn bench_archives_submission_compatible_json() {
         .success()
         .stdout(predicate::str::contains(benchmark_id))
         .stdout(predicate::str::contains("qwen3-5-2b"));
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn bench_includes_ignore_eos_when_requested() {
+    let state = r#"{
+        "backend_ready": true,
+        "model": "/models/qwen.gguf",
+        "backend": "llama.cpp-linux-cuda",
+        "ctx_size": 128,
+        "launch_command": ["llama-server", "-m", "/models/qwen.gguf", "-b", "64"]
+    }"#;
+    let measurement = r#"{
+        "usage": {"prompt_tokens": 64, "completion_tokens": 16},
+        "timings": {"prompt_ms": 400.0, "predicted_ms": 800.0}
+    }"#;
+    let gateway = TestGateway::start(vec![
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(state),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+    ]);
+    let root = temp_repo_root("bench-ignore-eos");
+    fs::create_dir_all(root.join("config")).expect("create config dir");
+    fs::write(
+        root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{}}}"#, gateway.port),
+    )
+    .expect("write config");
+
+    Command::cargo_bin("omniinfer")
+        .expect("binary exists")
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &root)
+        .args([
+            "bench",
+            "run",
+            "--catalog-model-id",
+            "qwen3-5-2b",
+            "--format",
+            "GGUF",
+            "--quantization",
+            "Q4_0",
+            "--model-url",
+            "https://example.com/qwen.gguf",
+            "--device-name",
+            "Test GPU",
+            "--soc",
+            "test-gpu",
+            "--backend-version",
+            "test-runtime-1",
+            "--build-command",
+            "bash build.sh",
+            "--baseline",
+            "--runs",
+            "3",
+            "--warmup-runs",
+            "0",
+            "--submitter-name",
+            "OmniInfer Test",
+            "--ignore-eos",
+        ])
+        .assert()
+        .success();
+
+    assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
+    assert!(gateway.request().starts_with("GET /omni/state HTTP/1.1"));
+    for _ in 0..3 {
+        assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
+        let request = gateway.request();
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        let body = request_body_json(&request);
+        assert_eq!(body["ignore_eos"], true);
+    }
+    gateway.join();
     fs::remove_dir_all(root).ok();
 }
 
