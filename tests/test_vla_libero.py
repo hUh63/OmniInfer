@@ -27,6 +27,60 @@ class RuntimeContractTests(unittest.TestCase):
     def test_demo_limits_architectures_to_validated_request_formats(self):
         self.assertEqual(DEMO.SUPPORTED_DEMO_ARCHES, ("smolvla", "pi05"))
 
+    def test_demo_defaults_to_high_resolution_libero_rendering(self):
+        self.assertEqual(DEMO.DemoConfig().render_size, 512)
+        self.assertEqual(DEMO.DemoConfig().fps, 30)
+        self.assertEqual(DEMO.DemoConfig().wrist_display_crop_ratio, 1.0)
+        self.assertEqual(DEMO.DISPLAY_JPEG_QUALITY, 92)
+        self.assertEqual(DEMO.DISPLAY_JPEG_SUBSAMPLING, 1)
+        self.assertEqual(DEMO.DEFAULT_WRIST_DISPLAY_CROP_RATIO, 1.0)
+        self.assertEqual(DEMO.DEFAULT_PI05_ACTION_STEPS, 10)
+        self.assertEqual(DEMO.validate_render_size(256), 256)
+        self.assertEqual(DEMO.validate_render_size(1024), 1024)
+
+    def test_omniinfer_url_validator_canonicalizes_loopback_ips(self):
+        for value, expected in (
+            ("http://127.0.0.1:9000/", "http://127.0.0.1:9000"),
+            ("http://127.0.0.2:9000", "http://127.0.0.2:9000"),
+            ("http://[0:0:0:0:0:0:0:1]:9000", "http://[::1]:9000"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(DEMO.validate_omniinfer_url(value), expected)
+
+    def test_omniinfer_url_validator_rejects_noncanonical_origins(self):
+        for value in (
+            None,
+            "",
+            "https://127.0.0.1:9000",
+            "https://gateway.example:9443/api",
+            "http://localhost:9000",
+            "http://192.0.2.10:9000",
+            "http://user:password@127.0.0.1:9000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:9000/omni",
+            "http://127.0.0.1:9000?target=remote",
+            "http://127.0.0.1:9000#fragment",
+            "http://[::1%25lo]:9000",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    DEMO.validate_omniinfer_url(value)
+
+    def test_demo_rejects_unsafe_render_sizes(self):
+        for render_size in (127, 1025, True, "512"):
+            with self.subTest(render_size=render_size):
+                with self.assertRaises(ValueError):
+                    DEMO.validate_render_size(render_size)
+
+    def test_demo_validates_optional_wrist_display_crop(self):
+        self.assertEqual(DEMO.validate_wrist_display_crop_ratio(0.84), 0.84)
+        for ratio in (0, 1.01, True, "0.84"):
+            with self.subTest(ratio=ratio):
+                with self.assertRaises(ValueError):
+                    DEMO.validate_wrist_display_crop_ratio(ratio)
+
     def test_pi05_accepts_official_defaults_or_explicit_local_stats(self):
         self.assertIsNone(DEMO.validate_arch_options("pi05", None, None))
         with tempfile.NamedTemporaryFile() as stats:
@@ -106,6 +160,7 @@ class RuntimeContractTests(unittest.TestCase):
                                 "label": "PI0.5 demo",
                                 "arch": "pi05",
                                 "model": pi05.name,
+                                "omniinfer_url": "http://127.0.0.1:52997",
                                 "tokenizer": str(tokenizer),
                                 "stats_json": stats.name,
                             },
@@ -117,6 +172,9 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(list(profiles), ["smol", "pi"])
             self.assertEqual(profiles["smol"].config.model, str(smolvla.resolve()))
             self.assertEqual(profiles["pi"].config.stats_json, str(stats.resolve()))
+            self.assertEqual(
+                profiles["pi"].config.omniinfer_url, "http://127.0.0.1:52997"
+            )
             self.assertEqual(profiles["pi"].config.tokenizer, str(tokenizer.resolve()))
             self.assertEqual(profiles["pi"].config.n_action_steps, 10)
             public = [profile.public() for profile in profiles.values()]
@@ -128,6 +186,60 @@ class RuntimeContractTests(unittest.TestCase):
                 ],
             )
             self.assertNotIn(str(root), json.dumps(public))
+
+    def test_model_profile_can_use_an_already_loaded_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "models.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "pi": {
+                                "label": "PI0.5",
+                                "arch": "pi05",
+                                "omniinfer_url": "http://[0:0:0:0:0:0:0:1]:52997",
+                                "use_loaded_runtime": True,
+                            }
+                        }
+                    }
+                )
+            )
+            profile = DEMO.load_model_profiles(
+                str(manifest), DEMO.DemoConfig()
+            )["pi"]
+            self.assertIsNone(profile.config.model)
+            self.assertEqual(profile.config.omniinfer_url, "http://[::1]:52997")
+
+    def test_model_profiles_reject_non_loopback_gateway_urls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "models.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "bad": {
+                                "label": "bad",
+                                "arch": "smolvla",
+                                "omniinfer_url": "http://example.com:9000",
+                                "use_loaded_runtime": True,
+                            }
+                        }
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "loopback"):
+                DEMO.load_model_profiles(str(manifest), DEMO.DemoConfig())
+
+    def test_model_profile_requires_model_or_explicit_loaded_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "models.json"
+            manifest.write_text(
+                json.dumps(
+                    {"models": {"bad": {"label": "bad", "arch": "smolvla"}}}
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                DEMO.load_model_profiles(str(manifest), DEMO.DemoConfig())
 
     def test_model_profiles_preserve_hugging_face_tokenizer_ids(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -208,6 +320,17 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn('default=False', source)
         self.assertIn('must be a loopback address', source)
 
+    def test_dashboard_accepts_a_different_ssh_forwarded_loopback_port(self):
+        host, browser_port = DEMO.validate_dashboard_host("127.0.0.1:17861")
+        self.assertEqual((host, browser_port), ("127.0.0.1", 17861))
+        DEMO.validate_dashboard_origin(
+            "http://127.0.0.1:17861", host, browser_port
+        )
+        with self.assertRaises(PermissionError):
+            DEMO.validate_dashboard_origin(
+                "http://127.0.0.1:7861", host, browser_port
+            )
+
     def test_readme_has_copyable_linux_quick_start(self):
         readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
         self.assertIn("git submodule update --init framework/vla.cpp", readme)
@@ -222,6 +345,12 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("LIBERO/MuJoCo resets", readme)
         self.assertIn("ZeroMQ/protobuf endpoint", readme)
         self.assertIn("success`, `failed`, `partial`, `stopped`, or `error`", readme)
+
+    def test_readme_documents_high_quality_rendering_and_benchmark_scope(self):
+        readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
+        self.assertIn("--render-size 512", readme)
+        self.assertIn("--render-size 256", readme)
+        self.assertIn("changes the pixels supplied to the policy", readme)
 
     def test_readme_explains_smolvla_hub_cache_and_offline_behavior(self):
         readme = (REPOSITORY_ROOT / "examples" / "vla-libero" / "README.md").read_text()
@@ -832,14 +961,16 @@ class MetricTests(unittest.TestCase):
                 )
             )
         self.assertEqual(encode.call_count, 2)
+        encode.assert_called_with(observation, "single-view", 1.0)
         self.assertEqual(state.frame(), (b"frame", 1, 2))
+        self.assertEqual(state.snapshot()["telemetry"]["display_fps"], 16.7)
 
     def test_frame_encoded_for_an_old_run_is_discarded(self):
         state = DEMO.DemoState(DEMO.DemoConfig())
         observation = {"pixels": {"image": [[[0, 0, 0]]]}}
         state.begin(0)
 
-        def begin_next_run(_observation, _view_mode):
+        def begin_next_run(_observation, _view_mode, _crop_ratio):
             state.begin(1)
             return b"stale-frame"
 
@@ -852,7 +983,15 @@ class MetricTests(unittest.TestCase):
         self.assertIn("function clearFrame()", page)
         self.assertIn("if (frameRequest || currentRunId == null) return", page)
         self.assertIn("X-OmniInfer-Run-Id", page)
-        self.assertIn("setInterval(refreshFrame, 50)", page)
+        self.assertIn("setInterval(refreshFrame, 33)", page)
+
+    def test_frontend_keeps_runtime_and_events_beside_the_viewer(self):
+        page = (REPOSITORY_ROOT / "examples" / "vla-libero" / "index.html").read_text()
+        aside = page.index("<aside>")
+        self.assertNotIn('class="camera-tags"', page)
+        self.assertLess(page.index("<h2>Managed runtime</h2>"), aside)
+        self.assertLess(page.index("<h2>Run events</h2>"), aside)
+        self.assertIn("max-height: min(58vh, 560px)", page)
 
     def test_readme_documents_disk_space_and_external_artifacts(self):
         readme = (
@@ -893,7 +1032,7 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(summary["p95_ms"], 38.5)
 
     def test_dashboard_separates_prediction_from_queue_replay(self):
-        state = DEMO.DemoState(DEMO.DemoConfig())
+        state = DEMO.DemoState(DEMO.DemoConfig(n_action_steps=10))
         state.begin(0)
         state.publish_step(
             action=[0.1] * 7,
@@ -903,6 +1042,7 @@ class MetricTests(unittest.TestCase):
             loop_ms=53.0,
             reward=0.0,
             step=1,
+            action_chunk_step=1,
         )
         state.publish_step(
             action=[0.2] * 7,
@@ -912,6 +1052,7 @@ class MetricTests(unittest.TestCase):
             loop_ms=3.3,
             reward=0.1,
             step=2,
+            action_chunk_step=2,
         )
         snapshot = state.snapshot()
         self.assertEqual(snapshot["latency"]["policy"]["samples"], 2)
@@ -919,6 +1060,26 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(snapshot["latency"]["prediction"]["last_ms"], 50.0)
         self.assertEqual(snapshot["call_kind"], "action_queue_replay")
         self.assertEqual(snapshot["action"], [0.2] * 7)
+        self.assertEqual(snapshot["telemetry"]["prediction_count"], 1)
+        self.assertEqual(snapshot["telemetry"]["action_chunk_step"], 2)
+        self.assertEqual(snapshot["telemetry"]["action_chunk_size"], 10)
+
+    def test_frontend_exposes_test_relevant_run_telemetry(self):
+        page = (REPOSITORY_ROOT / "examples" / "vla-libero" / "index.html").read_text()
+        for marker in (
+            'id="action-chunk"',
+            'id="display-fps"',
+            'id="prediction-count"',
+            "telemetry.action_chunk_size",
+            "telemetry.display_fps",
+            "Recent control-loop latency",
+            'height="128"',
+            "p95 cap",
+            "value > scaleMax ? '#ffc857'",
+            "Within p95",
+            "Spike above p95",
+        ):
+            self.assertIn(marker, page)
 
 
 if __name__ == "__main__":

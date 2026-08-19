@@ -74,9 +74,10 @@ MUJOCO_GL=egl examples/vla-libero/run.sh -- \
 The dashboard prints its selected URL at startup. By default it asks the OS for
 an unused loopback port, which avoids collisions on multi-user hosts. Choose a
 task at that URL and press **Start**. For a remote Linux host, forward the
-printed port with `ssh -L <port>:127.0.0.1:<port> <host>`. The dashboard never
-exposes a network listener by default. Pass `--listen-port <port>` only when a
-fixed port is required.
+printed server port with
+`ssh -L <local-port>:127.0.0.1:<server-port> <host>` and open the local port.
+The two ports may differ. The dashboard never exposes a network listener by
+default. Pass `--listen-port <port>` only when a fixed port is required.
 
 To create a Python environment with CUDA PyTorch instead of the CPU default:
 
@@ -130,6 +131,25 @@ browser display samples the latest observation at up to `--fps` and deliberately
 drops intermediate display frames when action chunks advance faster than the
 page can render. A new rollout clears the previous image immediately, and stale
 requests from an older rollout cannot replace the current frame.
+
+The dashboard defaults to 512x512 rendering for each LIBERO camera and serves
+the live view as quality-92 4:2:2 JPEG at up to 30 FPS. This keeps encoding and
+SSH bandwidth moderate while avoiding the visibly lower detail of LIBERO's
+360px default. In multi-view mode the resulting browser frame is 1024x512 before
+CSS scaling. Override the square camera size or display/video rate when needed:
+
+```sh
+examples/vla-libero/run.sh -- --render-size 512 --fps 30 [other demo options]
+```
+
+Higher rendering resolution also changes the pixels supplied to the policy,
+even though each model client still applies its architecture-specific resize.
+This is appropriate for the visual demo, but it is not an interchangeable
+benchmark setting. Use `--render-size 256` when reproducing the previous
+lower-resolution demo configuration, and record the selected value in any
+rollout comparison. Some wrist cameras include an uninformative lower border;
+`--wrist-display-crop-ratio 0.84` can crop it from the dashboard view without
+changing the observation sent to the policy.
 
 ## Prerequisites
 
@@ -345,17 +365,27 @@ request. Model and task selection are frozen while a rollout is active.
 
 Each profile supports:
 
-- required: `label`, `arch`, and `model`;
-- optional: `backend`, `mmproj`, `server_args`, `tokenizer`, `stats_json`, and
-  `n_action_steps`;
+- required: `label` and `arch`;
+- exactly one of `model` or `use_loaded_runtime: true`;
+- optional: `omniinfer_url`, `backend`, `mmproj`, `server_args`, `tokenizer`,
+  `stats_json`, and `n_action_steps`;
+- `omniinfer_url` may bind each profile to a different loopback gateway, so one
+  dashboard can switch between independently managed model runtimes;
+- profile gateway URLs must be explicit loopback `http://` endpoints;
+- use `use_loaded_runtime: true` only when that profile's gateway already has
+  the intended VLA runtime loaded;
 - relative `model`, `mmproj`, and `stats_json` paths resolved from the profile
   JSON directory;
 - tokenizer values accepted as Hugging Face IDs or local paths; prefix a local
   relative tokenizer with `./` to distinguish it from an ID such as `org/repo`;
-- default `n_action_steps`: 1 for SmolVLA and 10 for PI0.5.
+- default `n_action_steps`: 1 for SmolVLA and 10 for PI0.5. PI0.5 produces a
+  50-step chunk; executing 10 steps balances visible synchronous replanning
+  pauses while retaining more closed-loop correction than longer horizons.
 
-The configured model files are validated when the dashboard starts. Selecting
-a different profile asks OmniInfer to load that model before the rollout, so a
+Any configured model files are validated when the dashboard starts. A profile
+using an already loaded runtime skips file validation. Selecting a different
+profile asks its configured OmniInfer gateway to load that model before the
+rollout, so a
 model switch includes normal runtime startup and weight-loading latency. It is
 not an instantaneous in-process policy switch. OmniInfer keeps independently
 loaded model paths as separate managed runtimes; selecting another profile does

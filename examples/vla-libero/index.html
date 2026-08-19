@@ -80,6 +80,7 @@
     .viewer { overflow: hidden; }
     .viewer-head, .section { padding: 14px 16px; }
     .viewer-head { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .viewer-head-status { display: flex; align-items: center; gap: 14px; }
     .badge { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 4px rgba(143,161,185,.08); }
     .running .dot { background: var(--cyan); box-shadow: 0 0 12px var(--cyan); }
@@ -93,11 +94,13 @@
       display: grid;
       place-items: center;
     }
-    #frame { display: none; width: 100%; max-height: 69vh; object-fit: contain; image-rendering: auto; }
+    #frame { display: none; width: 100%; max-height: min(58vh, 560px); object-fit: contain; image-rendering: auto; }
     #placeholder { color: #66758b; text-align: center; }
-    .camera-tags { position: absolute; left: 12px; top: 12px; display: flex; gap: 8px; }
-    .camera-tags span { background: rgba(3,5,7,.78); border: 1px solid rgba(255,255,255,.16); padding: 5px 8px; border-radius: 5px; font-size: 10px; letter-spacing: .08em; }
     .task-strip { padding: 14px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+    .viewer-meta { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); border-top: 1px solid var(--line); background: rgba(5,9,14,.34); }
+    .meta-section { min-width: 0; padding: 12px 16px; }
+    .meta-section + .meta-section { border-left: 1px solid var(--line); }
+    .viewer-meta h2 { margin-bottom: 9px; }
     .eyebrow { color: var(--muted); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; margin-bottom: 5px; }
     #task-description { font-size: 16px; font-weight: 680; }
     .episode-counter { text-align: right; font-variant-numeric: tabular-nums; }
@@ -110,6 +113,10 @@
     .result-value.running { color: var(--cyan); }
     .score { display: flex; gap: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
     .score strong { color: var(--text); }
+    .run-stats { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .run-stat { min-width: 0; }
+    .run-stat-label { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .run-stat-value { margin-top: 2px; font-weight: 720; font-variant-numeric: tabular-nums; }
     h2 { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; margin: 0 0 13px; color: var(--muted); }
     .actions { display: grid; gap: 8px; }
     .action-row { display: grid; grid-template-columns: 58px 1fr 74px; align-items: center; gap: 9px; font-variant-numeric: tabular-nums; }
@@ -118,17 +125,24 @@
     .bar::after { content: ""; position: absolute; left: 50%; top: 0; width: 1px; height: 100%; background: rgba(255,255,255,.28); }
     .bar-fill { position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #5775ff, var(--cyan)); border-radius: 8px; }
     .action-value { text-align: right; }
-    .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-    .metric { padding: 11px; border-radius: 8px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.055); }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .metric { padding: 8px 9px; border-radius: 8px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.055); }
     .metric-name { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
-    .metric-value { margin-top: 4px; font-size: 20px; font-weight: 760; font-variant-numeric: tabular-nums; }
-    .metric-note { color: var(--muted); font-size: 10px; margin-top: 2px; }
-    canvas { width: 100%; height: 68px; margin-top: 12px; background: rgba(0,0,0,.18); border-radius: 7px; }
-    .runtime { display: grid; gap: 7px; font-size: 12px; }
-    .runtime-row { display: grid; grid-template-columns: 78px 1fr; gap: 8px; }
+    .metric-value { margin-top: 2px; font-size: 17px; font-weight: 760; font-variant-numeric: tabular-nums; }
+    .metric-note { color: var(--muted); font-size: 9px; line-height: 1.3; margin-top: 1px; }
+    .chart-head { margin-top: 12px; display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
+    .chart-label { letter-spacing: .08em; text-transform: uppercase; }
+    .chart-scale { font-variant-numeric: tabular-nums; }
+    .chart-legend { display: flex; align-items: center; gap: 10px; margin-top: 4px; color: var(--muted); font-size: 9px; }
+    .chart-key { display: inline-flex; align-items: center; gap: 4px; }
+    .chart-swatch { width: 7px; height: 7px; border-radius: 2px; background: var(--cyan); }
+    .chart-swatch.spike { background: var(--yellow); }
+    canvas { width: 100%; height: 64px; margin-top: 6px; background: rgba(0,0,0,.18); border-radius: 7px; }
+    .runtime { display: grid; gap: 4px; font-size: 11px; }
+    .runtime-row { display: grid; grid-template-columns: 68px 1fr; gap: 8px; }
     .runtime-row span:first-child { color: var(--muted); }
     .runtime-row code { overflow-wrap: anywhere; color: #c9d9ef; }
-    .events { max-height: 150px; overflow: auto; display: flex; flex-direction: column-reverse; gap: 5px; font-size: 11px; }
+    .events { min-height: 60px; max-height: 92px; overflow: auto; display: flex; flex-direction: column-reverse; gap: 4px; font-size: 11px; }
     .event { color: var(--muted); }
     .event.error { color: var(--red); }
     .event.success { color: var(--green); }
@@ -138,6 +152,8 @@
       main { grid-template-columns: 1fr; padding: 12px; }
       header { padding: 16px; }
       .frame-wrap { min-height: 280px; }
+      .viewer-meta { grid-template-columns: 1fr; }
+      .meta-section + .meta-section { border-left: 0; border-top: 1px solid var(--line); }
     }
   </style>
 </head>
@@ -162,16 +178,31 @@
     <section class="panel viewer">
       <div class="viewer-head">
         <div id="phase-badge" class="badge"><span class="dot"></span><span id="phase">Idle</span></div>
-        <div id="step" class="subtitle">Step 0</div>
+        <div class="viewer-head-status"><div id="step" class="subtitle">Step 0</div><div id="action-chunk" class="subtitle">Chunk -</div></div>
       </div>
       <div class="frame-wrap">
         <div id="placeholder">Waiting for the LIBERO simulator...</div>
         <img id="frame" alt="Live LIBERO simulation">
-        <div class="camera-tags"><span>AGENT VIEW</span><span>WRIST VIEW</span></div>
       </div>
       <div class="task-strip">
         <div><div class="eyebrow">Language instruction</div><div id="task-description">-</div></div>
         <div class="episode-counter"><div class="eyebrow">Episode</div><strong id="episode">0 / 0</strong></div>
+      </div>
+      <div class="viewer-meta">
+        <section class="meta-section">
+          <h2>Managed runtime</h2>
+          <div class="runtime">
+            <div class="runtime-row"><span>Backend</span><code id="backend">-</code></div>
+            <div class="runtime-row"><span>Model</span><code id="model">-</code></div>
+            <div class="runtime-row"><span>Protocol</span><code>vla.cpp-zmq-server</code></div>
+            <div class="runtime-row"><span>Endpoint</span><code id="endpoint">-</code></div>
+          </div>
+          <div id="error"></div>
+        </section>
+        <section class="meta-section">
+          <h2>Run events</h2>
+          <div id="events" class="events"></div>
+        </section>
       </div>
     </section>
 
@@ -179,6 +210,10 @@
       <section class="panel result-card">
         <div><div class="eyebrow">Current result</div><div id="result" class="result-value">Idle</div><div id="message" class="subtitle">Ready to start</div></div>
         <div class="score"><span>OK <strong id="successes">0</strong></span><span>FAIL <strong id="failures">0</strong></span></div>
+        <div class="run-stats">
+          <div class="run-stat"><div class="run-stat-label">Display FPS</div><div id="display-fps" class="run-stat-value">-</div></div>
+          <div class="run-stat"><div class="run-stat-label">Predictions</div><div id="prediction-count" class="run-stat-value">0</div></div>
+        </div>
       </section>
 
       <section class="panel section">
@@ -195,24 +230,14 @@
           <div class="metric"><div class="metric-name">Simulator step</div><div id="env-latency" class="metric-value">-</div><div id="env-note" class="metric-note">LIBERO environment</div></div>
           <div class="metric"><div class="metric-name">Control loop</div><div id="loop-latency" class="metric-value">-</div><div id="loop-note" class="metric-note">policy + simulator</div></div>
         </div>
-        <canvas id="latency-chart" width="600" height="136"></canvas>
-      </section>
-
-      <section class="panel section">
-        <h2>Managed runtime</h2>
-        <div class="runtime">
-          <div class="runtime-row"><span>Backend</span><code id="backend">-</code></div>
-          <div class="runtime-row"><span>Model</span><code id="model">-</code></div>
-          <div class="runtime-row"><span>Protocol</span><code>vla.cpp-zmq-server</code></div>
-          <div class="runtime-row"><span>Endpoint</span><code id="endpoint">-</code></div>
+        <div class="chart-head"><span class="chart-label">Recent control-loop latency</span><span id="chart-scale" class="chart-scale">-</span></div>
+        <div class="chart-legend" aria-label="Latency chart legend">
+          <span class="chart-key"><span class="chart-swatch"></span>Within p95</span>
+          <span class="chart-key"><span class="chart-swatch spike"></span>Spike above p95</span>
         </div>
-        <div id="error"></div>
+        <canvas id="latency-chart" width="600" height="128" aria-label="Recent control-loop latency"></canvas>
       </section>
 
-      <section class="panel section">
-        <h2>Run events</h2>
-        <div id="events" class="events"></div>
-      </section>
     </aside>
   </main>
   <script>
@@ -252,13 +277,18 @@
     function drawLatency(values = []) {
       const canvas = $('latency-chart'); const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (!values.length) return;
-      const max = Math.max(1, ...values); const width = canvas.width / values.length;
+      if (!values.length) { $('chart-scale').textContent = '-'; return; }
+      const ordered = [...values].sort((left, right) => left - right);
+      const p95 = ordered[Math.floor((ordered.length - 1) * .95)];
+      const scaleMax = Math.max(1, p95);
+      const width = canvas.width / values.length;
+      $('chart-scale').textContent = `0–${Math.round(scaleMax)} ms · p95 cap`;
       const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
       gradient.addColorStop(0, '#62e8ff'); gradient.addColorStop(1, '#3c62e8');
-      ctx.fillStyle = gradient;
       values.forEach((value, index) => {
-        const height = Math.max(2, (value / max) * (canvas.height - 8));
+        const clipped = Math.min(value, scaleMax);
+        const height = Math.max(2, (clipped / scaleMax) * (canvas.height - 8));
+        ctx.fillStyle = value > scaleMax ? '#ffc857' : gradient;
         ctx.fillRect(index * width, canvas.height - height, Math.max(1, width - 1), height);
       });
     }
@@ -368,6 +398,12 @@
       $('message').textContent = data.message || '';
       $('step').textContent = `Step ${data.step}`;
       $('episode').textContent = `${data.episode} / ${data.episodes}`;
+      const telemetry = data.telemetry || {};
+      const chunkSize = Number(telemetry.action_chunk_size || 0);
+      const chunkStep = Number(telemetry.action_chunk_step || 0);
+      $('action-chunk').textContent = chunkSize ? `Chunk ${chunkStep}/${chunkSize}` : 'Chunk -';
+      $('display-fps').textContent = telemetry.display_fps == null ? '-' : `${Number(telemetry.display_fps).toFixed(1)} fps`;
+      $('prediction-count').textContent = telemetry.prediction_count ?? 0;
       $('task-description').textContent = data.task_description || `${data.task} / task ${data.task_id}`;
       $('successes').textContent = data.successes;
       $('failures').textContent = data.failures;
@@ -413,7 +449,7 @@
     });
     $('stop').onclick = () => control('/api/stop');
     setInterval(refresh, 120);
-    setInterval(refreshFrame, 50);
+    setInterval(refreshFrame, 33);
     refresh();
   </script>
 </body>
