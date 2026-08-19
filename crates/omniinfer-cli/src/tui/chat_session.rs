@@ -19,9 +19,10 @@ pub(super) fn chat_loop(config: &config::AppConfig, backend: String) -> Result<(
         match message {
             "/exit" => return Ok(()),
             "/backend" => {
-                if let Some(backend) = choose_backend(config)? {
+                if let Some(backend) = choose_backend()? {
+                    activate_backend(config, &backend)?;
                     session.messages.clear();
-                    if let Some(model) = choose_model(config, true)? {
+                    if let Some(model) = choose_model(config, true, Some(&backend))? {
                         load_model_for_chat(
                             config,
                             &mut session,
@@ -34,7 +35,7 @@ pub(super) fn chat_loop(config: &config::AppConfig, backend: String) -> Result<(
                 }
             }
             "/model" => {
-                if let Some(model) = choose_model(config, true)? {
+                if let Some(model) = choose_model(config, true, None)? {
                     load_model_for_chat(config, &mut session, model.to_string_lossy().as_ref())?;
                 }
             }

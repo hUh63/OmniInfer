@@ -32,13 +32,18 @@ pub(super) fn stop_serve_locked(
         },
     );
     gateway_closed = gateway_closed
-        && recorded_process_exited(
+        && wait_for_recorded_process_exit(
             info.as_ref().and_then(|value| value.pid),
             info.as_ref()
                 .and_then(|value| value.gateway_process.as_ref()),
             LegacyProcessKind::Gateway,
             info.as_ref(),
             port,
+            if shutdown_accepted {
+                GRACEFUL_SHUTDOWN_TIMEOUT
+            } else {
+                Duration::ZERO
+            },
         );
     let mut backend_closed = info
         .as_ref()
@@ -353,6 +358,7 @@ pub(super) fn cleanup_failed_serve(
 
     let mut config = config::load_app_config().unwrap_or_default();
     config.port = port;
+    let info = serve_state::load_serve_pid_info(port).ok().flatten();
     let url = format!("{}/omni/shutdown", config.service_base_url());
     let shutdown_accepted =
         http_client::post_json(&url, &serde_json::json!({}), SHUTDOWN_REQUEST_TIMEOUT)
@@ -374,6 +380,9 @@ pub(super) fn cleanup_failed_serve(
         },
     );
     if !shutdown_accepted || !gateway_exited || !gateway_closed {
+        if let Some(pid) = info.as_ref().and_then(|value| value.backend_pid) {
+            stop_process(pid);
+        }
         if !gateway_exited {
             stop_process(gateway.id());
         }
@@ -382,7 +391,13 @@ pub(super) fn cleanup_failed_serve(
             gateway_closed || wait_for_local_port_closed(port, FORCED_SHUTDOWN_TIMEOUT);
     }
 
-    if gateway_exited && gateway_closed {
+    let backend_closed = info
+        .as_ref()
+        .and_then(|value| value.backend_port)
+        .is_none_or(|backend_port| {
+            wait_for_local_port_closed(backend_port, FORCED_SHUTDOWN_TIMEOUT)
+        });
+    if gateway_exited && gateway_closed && backend_closed {
         let _ = serve_state::remove_serve_pid_info_if_run_id(port, run_id);
     } else {
         eprintln!(
@@ -468,14 +483,18 @@ fn wait_for_child_exit(child: &mut std::process::Child, timeout: Duration) -> bo
     }
 }
 
-fn stop_process(pid: u32) {
+pub(crate) fn stop_process(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = ProcessCommand::new("kill")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        signal_process_group_or_pid(pid, "-TERM");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if !process_group_or_pid_exists(pid) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        signal_process_group_or_pid(pid, "-KILL");
     }
     #[cfg(windows)]
     {
@@ -487,4 +506,37 @@ fn stop_process(pid: u32) {
         hide_child_window(&mut command);
         let _ = command.status();
     }
+}
+
+#[cfg(unix)]
+fn signal_process_group_or_pid(pid: u32, signal: &str) {
+    let group_signalled = ProcessCommand::new("kill")
+        .args([signal, "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !group_signalled {
+        let _ = ProcessCommand::new("kill")
+            .args([signal, &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(unix)]
+fn process_group_or_pid_exists(pid: u32) -> bool {
+    ProcessCommand::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+        || ProcessCommand::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
 }

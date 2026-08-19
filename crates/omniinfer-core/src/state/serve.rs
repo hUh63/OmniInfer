@@ -126,6 +126,10 @@ pub fn try_lock_serve_port(port: u16) -> Result<ServePortLock, ServeStateError> 
 }
 
 pub fn capture_process_identity(pid: u32) -> Option<ProcessIdentity> {
+    process_snapshot(pid).map(|(identity, _)| identity)
+}
+
+fn process_snapshot(pid: u32) -> Option<(ProcessIdentity, sysinfo::ProcessStatus)> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     let pid_value = sysinfo::Pid::from_u32(pid);
@@ -139,20 +143,29 @@ pub fn capture_process_identity(pid: u32) -> Option<ProcessIdentity> {
             .without_tasks(),
     );
     let process = system.process(pid_value)?;
-    Some(ProcessIdentity {
-        pid,
-        start_time: process.start_time(),
-        executable: process
-            .exe()
-            .map(|value| value.to_string_lossy().into_owned()),
-        name: process.name().to_string_lossy().into_owned(),
-    })
+    Some((
+        ProcessIdentity {
+            pid,
+            start_time: process.start_time(),
+            executable: process
+                .exe()
+                .map(|value| value.to_string_lossy().into_owned()),
+            name: process.name().to_string_lossy().into_owned(),
+        },
+        process.status(),
+    ))
 }
 
 pub fn process_identity_status(identity: &ProcessIdentity) -> ProcessIdentityStatus {
-    let Some(current) = capture_process_identity(identity.pid) else {
+    let Some((current, status)) = process_snapshot(identity.pid) else {
         return ProcessIdentityStatus::Exited;
     };
+    if matches!(
+        status,
+        sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+    ) {
+        return ProcessIdentityStatus::Exited;
+    }
     let matches = if identity.start_time > 0 && current.start_time > 0 {
         current.start_time == identity.start_time
     } else if let Some(expected) = identity.executable.as_ref() {
@@ -341,6 +354,11 @@ pub fn list_serve_pid_infos() -> Result<Vec<ServePidInfo>, ServeStateError> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
     #[test]
     fn serializes_python_compatible_pid_info() {
         let info = ServePidInfo {
@@ -387,6 +405,29 @@ mod tests {
             process_identity_status(&identity),
             ProcessIdentityStatus::Mismatched
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_identity_treats_unreaped_zombie_as_exited() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn child");
+        let identity = capture_process_identity(child.id()).expect("capture child identity");
+        child.kill().expect("terminate child without reaping it");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_identity_status(&identity) == ProcessIdentityStatus::Running
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            process_identity_status(&identity),
+            ProcessIdentityStatus::Exited
+        );
+        let _ = child.wait();
     }
 
     #[test]

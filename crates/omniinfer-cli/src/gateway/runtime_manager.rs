@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -179,7 +180,11 @@ impl RustRuntimeManager {
         backend_host: String,
         startup_timeout: Duration,
         owner_admin_id: Option<String>,
+        startup_cancelled: &AtomicBool,
     ) -> Result<LoadModelOutcome> {
+        if startup_cancelled.load(Ordering::SeqCst) {
+            anyhow::bail!("gateway is shutting down")
+        }
         self.reap_exited_runtimes();
         let model = json_required_str(&payload, "model")?.to_string();
         let requested_request_defaults = request_defaults_from_payload(&payload)?;
@@ -358,6 +363,7 @@ impl RustRuntimeManager {
                     startup_timeout,
                     health_host: backend_host.clone(),
                 },
+                startup_cancelled,
             )?;
             local_state::save_selected_backend(&backend.id)?;
             local_state::save_selected_model(

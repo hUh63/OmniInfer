@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 fn main() {
     let mut port = None;
@@ -11,6 +12,14 @@ fn main() {
     }
     let port = port.expect("--port is required");
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).expect("bind fake runtime");
+    if let Ok(path) = std::env::var("OMNIINFER_TEST_RUNTIME_READY_FILE") {
+        std::fs::write(path, "ready").expect("write runtime ready marker");
+    }
+    if let Ok(path) = std::env::var("OMNIINFER_TEST_RUNTIME_DELAY_FILE") {
+        while !std::path::Path::new(&path).exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     for stream in listener.incoming().flatten() {
         handle(stream);
     }

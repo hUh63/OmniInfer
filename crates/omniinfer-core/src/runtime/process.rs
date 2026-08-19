@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,8 @@ pub enum RuntimeProcessError {
     EarlyExit,
     #[error("runtime did not become ready in time")]
     ReadyTimeout,
+    #[error("runtime startup was interrupted")]
+    Interrupted,
     #[error("runtime stop hook failed: {0}")]
     StopHook(String),
 }
@@ -71,6 +74,25 @@ impl RuntimeProcess {
         plan: &ExternalRuntimePlan,
         options: RuntimeProcessOptions,
     ) -> Result<Self, RuntimeProcessError> {
+        Self::start_with_cancellation(plan, options, None)
+    }
+
+    pub fn start_cancellable(
+        plan: &ExternalRuntimePlan,
+        options: RuntimeProcessOptions,
+        cancelled: &AtomicBool,
+    ) -> Result<Self, RuntimeProcessError> {
+        Self::start_with_cancellation(plan, options, Some(cancelled))
+    }
+
+    fn start_with_cancellation(
+        plan: &ExternalRuntimePlan,
+        options: RuntimeProcessOptions,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self, RuntimeProcessError> {
+        if is_cancelled(cancelled) {
+            return Err(RuntimeProcessError::Interrupted);
+        }
         let executable = plan
             .command
             .first()
@@ -114,6 +136,14 @@ impl RuntimeProcess {
         isolate_process_tree(&mut command);
         hide_child_window(&mut command);
         let mut child = command.spawn()?;
+        if is_cancelled(cancelled) {
+            let _ = terminate_runtime(
+                &mut child,
+                plan.stop_command.as_deref(),
+                Duration::from_secs(2),
+            );
+            return Err(RuntimeProcessError::Interrupted);
+        }
         let readiness = wait_runtime_ready(
             &options.health_host,
             plan.port,
@@ -122,6 +152,7 @@ impl RuntimeProcess {
             &mut child,
             &options.log_path,
             log_start_offset,
+            cancelled,
         );
         match readiness {
             Ok(true) => {}
@@ -192,12 +223,16 @@ fn wait_runtime_ready(
     child: &mut Child,
     log_path: &Path,
     log_start_offset: u64,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<bool, RuntimeProcessError> {
     let deadline = Instant::now() + timeout;
     let mut log_cursor = log_start_offset;
     let mut log_tail = Vec::new();
     let mut log_marker_seen = false;
     while Instant::now() < deadline {
+        if is_cancelled(cancelled) {
+            return Err(RuntimeProcessError::Interrupted);
+        }
         if child.try_wait()?.is_some() {
             return Err(RuntimeProcessError::EarlyExit);
         }
@@ -224,6 +259,10 @@ fn wait_runtime_ready(
         return Err(RuntimeProcessError::EarlyExit);
     }
     Ok(false)
+}
+
+fn is_cancelled(cancelled: Option<&AtomicBool>) -> bool {
+    cancelled.is_some_and(|value| value.load(Ordering::SeqCst))
 }
 
 fn appended_log_contains(path: &Path, cursor: &mut u64, tail: &mut Vec<u8>, marker: &[u8]) -> bool {

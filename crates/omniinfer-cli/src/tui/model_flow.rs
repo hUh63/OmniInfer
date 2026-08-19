@@ -1,10 +1,11 @@
 use super::*;
 
 pub(super) fn setup_model_flow(config: &config::AppConfig) -> Result<String> {
-    choose_backend(config)?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
+    let backend = choose_backend()?.ok_or_else(|| anyhow::anyhow!("No backend selected."))?;
+    activate_backend(config, &backend)?;
     loop {
-        let model =
-            choose_model(config, false)?.ok_or_else(|| anyhow::anyhow!("No model selected."))?;
+        let model = choose_model(config, false, Some(&backend))?
+            .ok_or_else(|| anyhow::anyhow!("No model selected."))?;
         match load_model_interactive(config, model.to_string_lossy().as_ref()) {
             Ok(loaded) => return Ok(loaded),
             Err(error) => {
@@ -124,13 +125,9 @@ pub(super) fn model_reference_matches(left: &str, right: &str) -> bool {
     left_path.exists() && right_path.exists() && same_path(left_path, right_path)
 }
 
-pub(super) fn choose_backend(config: &config::AppConfig) -> Result<Option<String>> {
+pub(super) fn choose_backend() -> Result<Option<String>> {
     loop {
-        let payload = get_local_json_for_config(
-            "/omni/backends?scope=compatible",
-            Duration::from_secs(10),
-            config,
-        )?;
+        let payload = rust_backend_payload(BackendScope::Compatible);
         let rows = payload
             .get("data")
             .and_then(Value::as_array)
@@ -199,11 +196,15 @@ pub(super) fn choose_backend(config: &config::AppConfig) -> Result<Option<String
             }
             continue;
         }
-        select_backend_for_config(&backend, config)?;
-        notice(&format!("Selected backend: {backend}"), NoticeKind::Success);
-        println!();
         return Ok(Some(backend));
     }
+}
+
+pub(super) fn activate_backend(config: &config::AppConfig, backend: &str) -> Result<()> {
+    select_backend_for_config(backend, config)?;
+    notice(&format!("Selected backend: {backend}"), NoticeKind::Success);
+    println!();
+    Ok(())
 }
 
 pub(super) fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
@@ -222,11 +223,12 @@ pub(super) fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
 pub(super) fn choose_model(
     config: &config::AppConfig,
     mark_last_selected: bool,
+    backend: Option<&str>,
 ) -> Result<Option<PathBuf>> {
     let backends_payload = rust_backend_payload(BackendScope::All);
-    let menu_context = model_menu_context(&backends_payload);
+    let menu_context = model_menu_context(&backends_payload, backend);
     let models = discover_local_models(config)?;
-    let selected_backend = selected_backend_info(&backends_payload);
+    let selected_backend = selected_backend_info(&backends_payload, backend);
     let recommendations = advisor_recommendation_map(config, &models);
     let remembered = if mark_last_selected {
         local_state::load_state()
@@ -263,7 +265,9 @@ pub(super) fn choose_model(
         });
         choices.push(Some(model.path.clone()));
     }
-    if let Some(path) = remembered_path.filter(|path| path.exists())
+    if let Some(path) = remembered_path
+        .filter(|path| path.exists())
+        .filter(|path| model_supported_by_backend(path, selected_backend.as_ref()))
         && !models.iter().any(|model| same_path(&model.path, &path))
     {
         default = items.len();
@@ -307,12 +311,19 @@ pub(super) struct SelectedBackendInfo {
     pub(super) model_artifact: String,
 }
 
-pub(super) fn selected_backend_info(backends_payload: &Value) -> Option<SelectedBackendInfo> {
+pub(super) fn selected_backend_info(
+    backends_payload: &Value,
+    backend: Option<&str>,
+) -> Option<SelectedBackendInfo> {
     let row = backends_payload
         .get("data")
         .and_then(Value::as_array)?
         .iter()
-        .find(|row| json_bool(row, "selected").unwrap_or(false))?;
+        .find(|row| {
+            backend
+                .map(|backend| json_str(row, "id") == Some(backend))
+                .unwrap_or_else(|| json_bool(row, "selected").unwrap_or(false))
+        })?;
     Some(SelectedBackendInfo {
         family: json_str(row, "family").unwrap_or("").to_string(),
         model_artifact: json_str(row, "model_artifact").unwrap_or("").to_string(),
@@ -347,7 +358,10 @@ pub(super) fn model_supported_by_backend(
     }
 }
 
-pub(super) fn model_menu_context(backends_payload: &Value) -> ModelMenuContext {
+pub(super) fn model_menu_context(
+    backends_payload: &Value,
+    backend: Option<&str>,
+) -> ModelMenuContext {
     let system = advisor::system_payload(backends_payload.clone());
     let host = system.get("host").unwrap_or(&Value::Null);
     let cuda = system.get("cuda").unwrap_or(&Value::Null);
@@ -368,17 +382,21 @@ pub(super) fn model_menu_context(backends_payload: &Value) -> ModelMenuContext {
 
     ModelMenuContext {
         hardware_lines,
-        backend_line: selected_backend_line(backends_payload),
+        backend_line: selected_backend_line(backends_payload, backend),
     }
 }
 
-pub(super) fn selected_backend_line(backends_payload: &Value) -> String {
+pub(super) fn selected_backend_line(backends_payload: &Value, backend: Option<&str>) -> String {
     let selected = backends_payload
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .find(|row| json_bool(row, "selected").unwrap_or(false));
+        .find(|row| {
+            backend
+                .map(|backend| json_str(row, "id") == Some(backend))
+                .unwrap_or_else(|| json_bool(row, "selected").unwrap_or(false))
+        });
     let Some(row) = selected else {
         return "Backend: none selected".to_string();
     };
