@@ -63,6 +63,8 @@ irm "https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/instal
 
 Source setup requires Git, Rust/Cargo, Python, a C/C++ toolchain, and any dependencies required by the selected source-built backend. Prebuilt backend installation does not require CMake unless the selected backend build path needs it.
 
+If the repository is already cloned, use the platform and backend commands in the [Build Guide](build.md) instead of running the complete source installer again.
+
 ## Manual Installation
 
 Official archives and `checksums.txt` are published on [GitHub Releases](https://github.com/omnimind-ai/OmniInfer/releases). Verify the archive against `checksums.txt`, extract it, and place its executable launchers in a directory on PATH.

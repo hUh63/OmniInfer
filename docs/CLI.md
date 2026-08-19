@@ -126,6 +126,8 @@ On unified-memory WSL2 ROCm systems, the managed launcher limits the default vLL
 
 Managed WSL2 vLLM launches forward only a documented allowlist of relevant Windows host variables through `WSLENV`: `HF_ENDPOINT`, `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HF_HUB_OFFLINE`, `HF_HUB_DISABLE_XET`, `HF_HUB_ENABLE_HF_TRANSFER`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`, and upper- or lowercase `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`. Set them before starting `omniinfer serve`. Arbitrary host variables and host cache-path variables are not forwarded.
 
+#### Desktop application integration
+
 Desktop applications can isolate OmniInfer from the package directory with the public global root options. Global options may appear before or after the subcommands:
 
 ```powershell
