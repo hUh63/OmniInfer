@@ -81,11 +81,11 @@ The optional [vla-libero example](examples/vla-libero/README.md) runs a SmolVLA 
 <table width="100%">
   <tr>
     <td width="100%">
-      <video src="https://github.com/user-attachments/assets/83eb563d-60fc-42f6-9032-a9c7b7eedb8c" controls="controls" style="max-width: 100%;" aria-label="SmolVLA LIBERO browser dashboard with camera views, actions, latency, and a successful rollout"></video>
+      <video src="https://github.com/user-attachments/assets/83eb563d-60fc-42f6-9032-a9c7b7eedb8c" controls="controls" style="max-width: 100%;"></video>
     </td>
   </tr>
 </table>
-<p align="center"><sub>Static preview: <a href="docs/assets/demo/vla-libero.webp">VLA dashboard screenshot</a></sub></p>
+<p align="center"><sub>Static preview: <a href="docs/assets/demo/vla-libero.webp">SmolVLA LIBERO dashboard screenshot</a></sub></p>
 
 ## News
 

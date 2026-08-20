@@ -118,7 +118,11 @@ class RootReadmeTests(unittest.TestCase):
                 self.assertIn(f'href="{poster}"', self.readme)
         self.assertIn(f'<video src="{VLA_DEMO_VIDEO}"', self.readme)
         self.assertIn('controls="controls"', self.readme)
-        self.assertIn('aria-label="SmolVLA LIBERO', self.readme)
+        self.assertIn(
+            'Static preview: <a href="docs/assets/demo/vla-libero.webp">'
+            "SmolVLA LIBERO dashboard screenshot</a>",
+            self.readme,
+        )
         self.assertEqual(self.readme.count('<img src="docs/assets/demo/'), 2)
         self.assertEqual(self.readme.count('width="720" alt="'), 2)
 
