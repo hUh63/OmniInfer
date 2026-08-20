@@ -87,6 +87,7 @@ fn bench_archives_submission_compatible_json() {
         assert_eq!(body["stream"], false);
         assert_eq!(body["temperature"], 0);
         assert_eq!(body["max_tokens"], 128);
+        assert!(body.get("ignore_eos").is_none());
     }
     gateway.join();
 
@@ -112,6 +113,7 @@ fn bench_archives_submission_compatible_json() {
     );
     assert_eq!(payload["optimization"]["mode"], "baseline");
     assert_eq!(payload["optimization"]["methods"], serde_json::json!([]));
+    assert!(payload["protocol"].get("notes").is_none());
     let run_command = payload["runtime"]["run_command"]
         .as_str()
         .expect("runtime command is a string");
@@ -127,6 +129,191 @@ fn bench_archives_submission_compatible_json() {
         .success()
         .stdout(predicate::str::contains(benchmark_id))
         .stdout(predicate::str::contains("qwen3-5-2b"));
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn bench_includes_ignore_eos_when_requested() {
+    let state = r#"{
+        "backend_ready": true,
+        "model": "/models/qwen.gguf",
+        "backend": "llama.cpp-linux-cuda",
+        "ctx_size": 128,
+        "launch_command": ["llama-server", "-m", "/models/qwen.gguf", "-b", "64"]
+    }"#;
+    let measurement = r#"{
+        "usage": {"prompt_tokens": 64, "completion_tokens": 16},
+        "timings": {"prompt_ms": 400.0, "predicted_ms": 800.0}
+    }"#;
+    let gateway = TestGateway::start(vec![
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(state),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+    ]);
+    let root = temp_repo_root("bench-ignore-eos");
+    fs::create_dir_all(root.join("config")).expect("create config dir");
+    fs::write(
+        root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{}}}"#, gateway.port),
+    )
+    .expect("write config");
+
+    Command::cargo_bin("omniinfer")
+        .expect("binary exists")
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &root)
+        .args([
+            "bench",
+            "run",
+            "--benchmark-id",
+            "fixed-length-generation",
+            "--catalog-model-id",
+            "qwen3-5-2b",
+            "--format",
+            "GGUF",
+            "--quantization",
+            "Q4_0",
+            "--model-url",
+            "https://example.com/qwen.gguf",
+            "--device-name",
+            "Test GPU",
+            "--soc",
+            "test-gpu",
+            "--backend-version",
+            "test-runtime-1",
+            "--build-command",
+            "bash build.sh",
+            "--baseline",
+            "--runs",
+            "3",
+            "--warmup-runs",
+            "0",
+            "--max-tokens",
+            "16",
+            "--submitter-name",
+            "OmniInfer Test",
+            "--notes",
+            "device note",
+            "--ignore-eos",
+        ])
+        .assert()
+        .success();
+
+    assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
+    assert!(gateway.request().starts_with("GET /omni/state HTTP/1.1"));
+    for _ in 0..3 {
+        assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
+        let request = gateway.request();
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        let body = request_body_json(&request);
+        assert_eq!(body["ignore_eos"], true);
+    }
+    gateway.join();
+
+    let result = root
+        .join(".local")
+        .join("benchmarks")
+        .join("results")
+        .join("fixed-length-generation.json");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&fs::read(&result).expect("read benchmark result"))
+            .expect("parse benchmark result");
+    assert_eq!(payload["workload"]["tg"], 16);
+    assert_eq!(
+        payload["protocol"]["notes"],
+        "device note; fixed_length_generation=true; ignore_eos=true; completion_tokens=max_tokens"
+    );
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn bench_ignore_eos_rejects_short_measured_response() {
+    let state = r#"{
+        "backend_ready": true,
+        "model": "/models/qwen.gguf",
+        "backend": "llama.cpp-linux-cuda",
+        "ctx_size": 128,
+        "launch_command": ["llama-server", "-m", "/models/qwen.gguf", "-b", "64"]
+    }"#;
+    let full_measurement = r#"{
+        "usage": {"prompt_tokens": 64, "completion_tokens": 16},
+        "timings": {"prompt_ms": 400.0, "predicted_ms": 800.0}
+    }"#;
+    let short_measurement = r#"{
+        "usage": {"prompt_tokens": 64, "completion_tokens": 7},
+        "timings": {"prompt_ms": 400.0, "predicted_ms": 350.0}
+    }"#;
+    let gateway = TestGateway::start(vec![
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(state),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(full_measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(short_measurement),
+    ]);
+    let root = temp_repo_root("bench-ignore-eos-failure");
+    fs::create_dir_all(root.join("config")).expect("create config dir");
+    fs::write(
+        root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{}}}"#, gateway.port),
+    )
+    .expect("write config");
+
+    let _assert = Command::cargo_bin("omniinfer")
+        .expect("binary exists")
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &root)
+        .args([
+            "bench",
+            "run",
+            "--benchmark-id",
+            "fixed-length-failure",
+            "--catalog-model-id",
+            "qwen3-5-2b",
+            "--format",
+            "GGUF",
+            "--quantization",
+            "Q4_0",
+            "--model-url",
+            "https://example.com/qwen.gguf",
+            "--device-name",
+            "Test GPU",
+            "--soc",
+            "test-gpu",
+            "--backend-version",
+            "test-runtime-1",
+            "--build-command",
+            "bash build.sh",
+            "--baseline",
+            "--runs",
+            "3",
+            "--warmup-runs",
+            "0",
+            "--max-tokens",
+            "16",
+            "--submitter-name",
+            "OmniInfer Test",
+            "--ignore-eos",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "measured run 2 with --ignore-eos returned completion_tokens=7; expected max_tokens=16",
+        ));
+    assert!(
+        !root
+            .join(".local")
+            .join("benchmarks")
+            .join("results")
+            .join("fixed-length-failure.json")
+            .exists()
+    );
+    gateway.join();
     fs::remove_dir_all(root).ok();
 }
 

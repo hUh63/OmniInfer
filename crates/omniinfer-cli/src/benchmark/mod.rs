@@ -17,6 +17,8 @@ use crate::{
 };
 
 const BENCHMARK_SCHEMA_VERSION: &str = "1.2.0";
+const IGNORE_EOS_PROTOCOL_NOTE: &str =
+    "fixed_length_generation=true; ignore_eos=true; completion_tokens=max_tokens";
 const DEFAULT_PROMPT: &str = "Write a detailed but concise explanation of why local language-model inference speed varies across hardware and runtimes.";
 const MODEL_FORMATS: &[&str] = &[
     "GGUF",
@@ -102,13 +104,19 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
         })?;
     let (prompt, prompt_source) = read_prompt(args)?;
     let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
-    let request = json!({
+    let mut request = json!({
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": args.max_tokens,
         "stream": false,
         "think": false,
     });
+    if args.ignore_eos {
+        request
+            .as_object_mut()
+            .expect("benchmark request is a JSON object")
+            .insert("ignore_eos".to_string(), Value::Bool(true));
+    }
     let timeout = Duration::from_secs(u64::from(args.timeout_seconds));
 
     for index in 0..args.warmup_runs {
@@ -125,6 +133,14 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
                 .with_context(|| format!("measured run {} failed", index + 1))?;
         let measurement = extract_measurement(&response, started.elapsed())
             .with_context(|| format!("measured run {} returned incomplete metrics", index + 1))?;
+        if args.ignore_eos && measurement.completion_tokens != u64::from(args.max_tokens) {
+            anyhow::bail!(
+                "measured run {} with --ignore-eos returned completion_tokens={}; expected max_tokens={} (fixed-length generation requires completion_tokens == --max-tokens)",
+                index + 1,
+                measurement.completion_tokens,
+                args.max_tokens,
+            );
+        }
         let progress = format!(
             "Run {}/{}: pp={} tg={} prefill={:.3} tok/s decode={:.3} tok/s",
             index + 1,
