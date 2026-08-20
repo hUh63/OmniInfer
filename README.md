@@ -78,9 +78,13 @@ Running `omniinfer` opens a terminal UI that recommends a compatible backend, lo
 
 The optional [vla-libero example](examples/vla-libero/README.md) runs a SmolVLA policy through a managed vla.cpp runtime in the LIBERO simulator, showing live camera views, the predicted action, and latency in a browser dashboard.
 
-<p align="center">
-  <img src="docs/assets/demo/vla-libero.gif" width="720" alt="SmolVLA LIBERO browser dashboard with camera views, actions, latency, and result">
-</p>
+<table width="100%">
+  <tr>
+    <td width="100%">
+      <video src="https://github.com/user-attachments/assets/83eb563d-60fc-42f6-9032-a9c7b7eedb8c" controls="controls" style="max-width: 100%;" aria-label="SmolVLA LIBERO browser dashboard with camera views, actions, latency, and a successful rollout"></video>
+    </td>
+  </tr>
+</table>
 <p align="center"><sub>Static preview: <a href="docs/assets/demo/vla-libero.webp">VLA dashboard screenshot</a></sub></p>
 
 ## News

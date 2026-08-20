@@ -12,6 +12,7 @@ DEMO_ANIMATION_MAX_BYTES = 1_100 * 1024
 DEMO_POSTER_TOTAL_MAX_BYTES = 2 * 1024 * 1024
 DEMO_ANIMATION_TOTAL_MAX_BYTES = 2 * 1024 * 1024
 RETIRED_DEMO_ATTACHMENT = "4ac5329e-8c54-4ea9-8a51-02306c0607e9"
+VLA_DEMO_VIDEO = "https://github.com/user-attachments/assets/83eb563d-60fc-42f6-9032-a9c7b7eedb8c"
 
 
 class RootReadmeTests(unittest.TestCase):
@@ -115,9 +116,11 @@ class RootReadmeTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertIn(title, self.readme)
                 self.assertIn(f'href="{poster}"', self.readme)
-        self.assertNotIn("<video", self.readme)
-        self.assertEqual(self.readme.count('<img src="docs/assets/demo/'), 3)
-        self.assertEqual(self.readme.count('width="720" alt="'), 3)
+        self.assertIn(f'<video src="{VLA_DEMO_VIDEO}"', self.readme)
+        self.assertIn('controls="controls"', self.readme)
+        self.assertIn('aria-label="SmolVLA LIBERO', self.readme)
+        self.assertEqual(self.readme.count('<img src="docs/assets/demo/'), 2)
+        self.assertEqual(self.readme.count('width="720" alt="'), 2)
 
     def test_demo_animations_are_placeholder_free_and_described(self):
         for placeholder in (
@@ -130,7 +133,6 @@ class RootReadmeTests(unittest.TestCase):
         animations = (
             ("docs/assets/demo/tui-chat.gif", "Terminal UI"),
             ("docs/assets/demo/local-api.gif", "OpenAI-compatible"),
-            ("docs/assets/demo/vla-libero.gif", "SmolVLA LIBERO"),
         )
         for path, label in animations:
             with self.subTest(path=path):
@@ -139,6 +141,7 @@ class RootReadmeTests(unittest.TestCase):
 
     def test_old_provisional_demo_media_is_retired(self):
         self.assertNotIn(RETIRED_DEMO_ATTACHMENT, self.readme)
+        self.assertNotIn("docs/assets/demo/vla-libero.gif", self.readme)
 
     def test_demo_posters_exist_within_size_budget(self):
         posters = ("tui-chat.webp", "local-api.webp", "vla-libero.webp")
@@ -153,7 +156,7 @@ class RootReadmeTests(unittest.TestCase):
         self.assertLessEqual(total, DEMO_POSTER_TOTAL_MAX_BYTES)
 
     def test_demo_animations_exist_within_size_budget(self):
-        animations = ("tui-chat.gif", "local-api.gif", "vla-libero.gif")
+        animations = ("tui-chat.gif", "local-api.gif")
         total = 0
         for name in animations:
             path = DEMO_ASSET_DIR / name
