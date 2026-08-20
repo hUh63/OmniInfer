@@ -7,17 +7,54 @@
 
 # OmniInfer
 
-Easy, fast, and private LLM & VLM inference for every device
+<p align="center">Easy, fast, and private LLM &amp; VLM inference for every device.</p>
 
-| [News](#news) | [Demo](#demo) | [Getting Started](#getting-started) | [About](#about) | [Documentation](#documentation) | [Architecture](#architecture) |
+<p align="center">
+  <a href="https://github.com/omnimind-ai/OmniInfer/actions/workflows/main-platform-ci.yml"><img alt="Main Platform CI" src="https://github.com/omnimind-ai/OmniInfer/actions/workflows/main-platform-ci.yml/badge.svg"></a>
+  <a href="https://github.com/omnimind-ai/OmniInfer/releases/latest"><img alt="Latest Release" src="https://img.shields.io/github/v/release/omnimind-ai/OmniInfer?display_name=tag&amp;sort=semver"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/omnimind-ai/OmniInfer"></a>
+</p>
 
-## News
+<p align="center">
+  <a href="#quick-start"><strong>Quick Start</strong></a> ·
+  <a href="#documentation"><strong>Documentation</strong></a> ·
+  <a href="https://github.com/omnimind-ai/OmniInfer/releases"><strong>Releases</strong></a>
+</p>
 
-- **2026-08-14** — 🚀 **Day-0 support for Qwen3.8-27B.** OmniInfer is ready for Qwen's latest 27B vision-language model from day one.
+## Quick Start
+
+### Install OmniInfer
+
+<table>
+  <thead>
+    <tr>
+      <th>Linux x64</th>
+      <th>macOS arm64</th>
+      <th>Windows x64 PowerShell</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash</code></td>
+      <td><code>curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash</code></td>
+      <td><code>irm https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.ps1 | iex</code></td>
+    </tr>
+  </tbody>
+</table>
+
+The installers download the latest CLI-only GitHub Release, verify its SHA-256 checksum, and install it for the current user. For fixed versions, custom paths, manual installation, source setup, and removal, see [Installation](docs/installation.md).
+
+### Start in three steps
+
+1. Run `omniinfer` in a terminal.
+2. Choose a compatible backend. The TUI can install an available prebuilt runtime for you.
+3. Select a local model and start chatting.
+
+To run the local OpenAI- and Anthropic-compatible service, start `omniinfer serve` and follow the [CLI Guide](docs/CLI.md) or [API Reference](docs/API.md). Source builds and mobile embedding are documented separately.
 
 ## Demo
 
-OmniInfer includes a terminal UI for selecting backends, loading models, and chatting with local models.
+The terminal UI guides backend selection, model loading, and local chat.
 
 <table width="100%">
   <tr>
@@ -27,92 +64,9 @@ OmniInfer includes a terminal UI for selecting backends, loading models, and cha
   </tr>
 </table>
 
-## Getting Started
+## News
 
-### Quick Install
-
-Linux x64 and macOS arm64:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.sh | bash
-```
-
-Windows x64 PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install.ps1 | iex
-```
-
-The lightweight installers download the CLI-only GitHub Release archive, verify `checksums.txt`, and use a per-user install directory without sudo or administrator privileges. They do not clone this repository, install backend runtimes, or download models. See [Installation](docs/installation.md) for version pinning, custom paths, manual installation, and source setup.
-
-Install a prebuilt runtime after the CLI is available:
-
-```bash
-omniinfer backend list
-omniinfer backend install llama.cpp-linux
-```
-
-Desktop integrations can add `--state-root <path>` and `--runtime-root <path>` to isolate managed files, and `backend install ... --json` emits streaming JSONL progress. See [CLI Usage](docs/CLI.md#2-install-a-backend-runtime) for the stable integration contract.
-
-On Windows, official vLLM is available through the managed `vllm-wsl2-cuda` and `vllm-wsl2-rocm` backends. They run pinned upstream Linux wheels inside a user WSL2 distribution for NVIDIA CUDA or supported AMD Ryzen AI GPUs; vLLM does not support native Windows. See the [Windows vLLM setup](docs/CLI.md#windows-vllm-through-wsl2).
-
-You can also run `omniinfer` with no arguments to open the TUI; when a compatible backend is missing, the TUI can install the prebuilt runtime before model loading.
-
-Linux x64, macOS arm64, and Windows x64 CLI-only archives are also available from [GitHub Releases](https://github.com/omnimind-ai/OmniInfer/releases). Homebrew, Scoop, and npm distribution are planned.
-
-`omniinfer serve --cloudflare` automatically downloads and verifies a pinned
-`cloudflared` helper when neither a managed copy nor a system installation is
-available. On macOS, the manual fallback is `brew install cloudflared`; retry
-the command afterward or pass `--cloudflared-path "$(command -v cloudflared)"`.
-
-### Source And Backend Setup
-
-Use the source installer when you want a repository checkout plus backend runtime setup, source builds, and optional model setup.
-
-Linux and macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install-from-source.sh | bash
-```
-
-Windows PowerShell:
-
-```powershell
-irm "https://raw.githubusercontent.com/omnimind-ai/OmniInfer/main/scripts/install-from-source.ps1?$(Get-Random)" | iex
-```
-
-The source installer detects your platform and hardware, recommends a backend, and walks you through model setup interactively.
-Use `--model /path/to/model.gguf` for explicit model setup or `--no-model` / `-NoModel` to skip model setup without prompting.
-Install summaries are written to `.local/install-summary.json`; source builds also save logs under `tmp/test_results/install/`.
-
-### Source Checkout
-
-If you already cloned this repository, build at least one local runtime backend first.
-
-- Windows: see [Build Guide: Windows](docs/build.md#windows)
-- Linux: see [Build Guide: Linux](docs/build.md#linux)
-- macOS: see [Build Guide: macOS](docs/build.md#macos)
-- Android: see [Build Guide: Android](docs/build.md#android)
-
-After the runtime is ready, start with the OmniInfer CLI from the repository root.
-
-Linux and macOS:
-
-```sh
-./omniinfer --help
-```
-
-Windows:
-
-```powershell
-.\omniinfer.ps1 --help
-```
-
-Android:
-
-```sh
-./omniinfer --help
-```
+- **2026-08-14** — 🚀 **Day-0 support for Qwen3.8-27B.** OmniInfer is ready for Qwen's latest 27B vision-language model from day one.
 
 ## About
 
@@ -139,28 +93,50 @@ OmniInfer runs everywhere:
 - Android and iOS — mobile and edge devices
 - One codebase across CLI, HTTP gateway, and mobile modules
 
+## Platform Support
+
+| Platform | Distribution | Representative runtimes |
+|---|---|---|
+| Linux x64 | Release CLI and source checkout | llama.cpp, ik_llama.cpp, vLLM, vla.cpp |
+| macOS arm64 | Release CLI and source checkout | llama.cpp, MLX, TurboQuant |
+| Windows x64 | Release CLI and source checkout | llama.cpp, vLLM through WSL2 |
+| Android | Gradle module | llama.cpp, MNN, LiteRT-LM, ExecuTorch QNN |
+| iOS | Swift package | Embedded native inference service |
+
+Runtime availability depends on the device and accelerator. Use `omniinfer backend list` for the current machine and see the [Build Guide](docs/build.md) for the full platform matrix.
+
 ## Documentation
 
-Recommended docs:
+### Start here
 
-- [Installation](docs/installation.md): Release installers, source setup, version pinning, and removal
-- [CLI Guide](docs/CLI.md): end-to-end CLI usage for Linux, macOS, Windows, and Android
-- [Benchmark Results](docs/benchmark.md): generate and archive submission-compatible benchmark JSON
-- [Android App Integration](docs/android/integration.md): embed OmniInfer in a third-party Android app
-- [Android Backend Reference](docs/android/backends.md): Android backend options for llama.cpp, MNN, LiteRT-LM, and ExecuTorch QNN
-- [Android Smoke Tests](docs/android/smoke-tests.md): adb/curl checks and source-build validation
-- [Android Troubleshooting](docs/android/troubleshooting.md): common build, runtime, and backend failures
-- [Build Guide](docs/build.md): build and platform packaging notes
-- [API Reference](docs/API.md): OpenAI-compatible local API usage
+- [Installation](docs/installation.md): Release installers, version pinning, source setup, manual installation, and removal
+- [CLI Guide](docs/CLI.md): Backend installation, model loading, chat, serving, and desktop integration
+- [API Reference](docs/API.md): Local OpenAI- and Anthropic-compatible HTTP APIs
+
+### Operate and integrate
+
+- [Model Loading](docs/model-load.md): Model discovery, parameters, and backend-specific behavior
+- [Remote Access](docs/remote-access.md): LAN access, Cloudflare Quick Tunnel, reverse proxies, and security
+- [Benchmark Results](docs/benchmark.md): Generate and archive submission-compatible benchmark JSON
+
+### Build and embed
+
+- [Build Guide](docs/build.md): Source checkout, backend builds, and platform packaging
+- [Android Integration](docs/android/integration.md): Embed OmniInfer in an Android application
+- [Android Backend Reference](docs/android/backends.md): Android runtime choices and requirements
+- [Android Smoke Tests](docs/android/smoke-tests.md) and [Troubleshooting](docs/android/troubleshooting.md)
 
 ## Architecture
 
-![omni_studio_architecture](./docs/assets/architecture.drawio.svg)
+![OmniInfer architecture](docs/assets/architecture.drawio.svg)
+
+## Contributing
+
+We welcome contributions and collaborations. See [Contributing to OmniInfer](CONTRIBUTING.md) to get involved.
 
 ## Citation
 
-If you use OmniInfer in research, please cite this repository.
-GitHub can automatically generate citation formats from [CITATION.cff](CITATION.cff).
+If you use OmniInfer in research, cite this repository. GitHub can generate additional formats from [CITATION.cff](CITATION.cff).
 
 ```bibtex
 @software{omniinfer,
@@ -170,10 +146,6 @@ GitHub can automatically generate citation formats from [CITATION.cff](CITATION.
 }
 ```
 
-## Contributing
-
-We welcome and value any contributions and collaborations. Please check out [Contributing to OmniInfer](CONTRIBUTING.md) for how to get involved.
-
 ## License
 
-This project is licensed under the Apache License 2.0 — see [LICENSE](LICENSE) for details.
+OmniInfer is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
