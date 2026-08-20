@@ -423,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._json({"status": "ok"})
         elif self.path.startswith("/props"):
-            self._json({"n_ctx": 512, "slots": 1})
+            self._json({"n_ctx": 512, "total_slots": 2})
         else:
             self._json({"ok": True})
     def do_POST(self):
@@ -436,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/detokenize"):
             self._json({"content": "hello", "echo": payload})
             return
-        if self.path.startswith("/slots/0"):
+        if self.path.startswith("/slots/"):
             self._json({"ok": True})
             return
         if self.path.startswith("/v1/chat/completions") and payload.get("stream") is True:
@@ -665,7 +665,7 @@ fn response_payload(request_line: &str, body: &str) -> (String, &'static str) {
         return (r#"{"status":"ok"}"#.to_string(), "application/json");
     }
     if request_line.starts_with("GET /props") {
-        return (r#"{"n_ctx":512,"slots":1}"#.to_string(), "application/json");
+        return (r#"{"n_ctx":512,"total_slots":2}"#.to_string(), "application/json");
     }
     if request_line.starts_with("POST /tokenize") {
         return (
@@ -679,7 +679,7 @@ fn response_payload(request_line: &str, body: &str) -> (String, &'static str) {
             "application/json",
         );
     }
-    if request_line.starts_with("POST /slots/0") {
+    if request_line.starts_with("POST /slots/") {
         return (r#"{"ok":true}"#.to_string(), "application/json");
     }
     if request_line.starts_with("POST /v1/chat/completions") && wants_stream(body) {

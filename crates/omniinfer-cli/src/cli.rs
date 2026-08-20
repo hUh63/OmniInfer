@@ -238,24 +238,24 @@ pub(crate) struct BenchRunArgs {
     /// Stable public HTTPS URL for the measured model artifact.
     #[arg(long)]
     pub(crate) model_url: String,
-    /// Human-readable tested device name.
+    /// Human-readable tested device name; auto-detected for known local hardware when omitted.
     #[arg(long)]
-    pub(crate) device_name: String,
-    /// SoC/device ID or exact name used by the destination catalog.
+    pub(crate) device_name: Option<String>,
+    /// Catalog SoC/device ID; inferred for known local hardware when omitted.
     #[arg(long)]
-    pub(crate) soc: String,
+    pub(crate) soc: Option<String>,
     /// Optional expected catalog backend ID; defaults to the loaded backend.
     #[arg(long)]
     pub(crate) backend_id: Option<String>,
     /// Optional human-readable backend name.
     #[arg(long)]
     pub(crate) backend_name: Option<String>,
-    /// Exact runtime/backend version under test.
+    /// Exact runtime/backend version; read from a managed prebuilt manifest when omitted.
     #[arg(long)]
-    pub(crate) backend_version: String,
-    /// Exact command used to build or install the measured runtime.
+    pub(crate) backend_version: Option<String>,
+    /// Exact build/install command; inferred for a managed prebuilt runtime when omitted.
     #[arg(long)]
-    pub(crate) build_command: String,
+    pub(crate) build_command: Option<String>,
     /// Override the runtime launch command captured from OmniInfer state.
     #[arg(long)]
     pub(crate) run_command: Option<String>,

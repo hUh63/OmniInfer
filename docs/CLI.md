@@ -393,15 +393,16 @@ default and writes submission-compatible JSON under
 `.local/benchmarks/results/`:
 
 ```sh
+mkdir -p .local/benchmarks/slots
+./omniinfer load -m /models/model.gguf --ctx-size 4096 -- \
+  --cache-ram 0 --no-cache-idle-slots --no-cache-prompt \
+  --slot-prompt-similarity 0 --slot-save-path .local/benchmarks/slots
+
 ./omniinfer bench run \
   --catalog-model-id <catalog-model-id> \
   --format GGUF \
   --quantization Q4_K_M \
-  --model-url https://example.com/model.gguf \
-  --device-name "Example workstation" \
-  --soc "Example accelerator" \
-  --backend-version <runtime-version> \
-  --build-command "cmake -B build && cmake --build build -j" \
+  --model-url https://huggingface.co/owner/model/resolve/<40-character-commit>/model.gguf \
   --baseline \
   --submitter-name <name>
 
@@ -410,8 +411,12 @@ default and writes submission-compatible JSON under
 
 Declare each optional method with `--optimization <slug>` instead of using
 `--baseline`. The runtime launch command is captured from OmniInfer state when
-available. See [Benchmark Results](benchmark.md) for the complete contract,
-security rules, and machine-readable output behavior.
+available. Known devices and managed runtime provenance are auto-detected;
+custom hardware and source builds still require the corresponding metadata
+options. Each measured run starts only after every runtime slot is erased, and
+results with Prefill or Decode CV above 5% are not archived. See
+[Benchmark Results](benchmark.md) for the complete contract, security rules,
+and machine-readable output behavior.
 
 Add `--ignore-eos` with `--max-tokens <n>` for a fixed-length benchmark. It
 requests `ignore_eos: true`; the CLI then requires every measured response to

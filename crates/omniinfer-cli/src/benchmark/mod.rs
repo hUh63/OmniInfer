@@ -16,7 +16,8 @@ use crate::{
     BenchRunArgs, get_local_json, json_bool, json_str, json_u64, post_local_json_for_config,
 };
 
-const BENCHMARK_SCHEMA_VERSION: &str = "1.2.0";
+const BENCHMARK_SCHEMA_VERSION: &str = "1.3.0";
+const MAX_MEASUREMENT_CV: f64 = 0.05;
 const IGNORE_EOS_PROTOCOL_NOTE: &str =
     "fixed_length_generation=true; ignore_eos=true; completion_tokens=max_tokens";
 const DEFAULT_PROMPT: &str = "Write a detailed but concise explanation of why local language-model inference speed varies across hardware and runtimes.";
@@ -70,6 +71,10 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
     }
 
     let launch_args = command_array(&state, "launch_command")?;
+    validate_cache_isolation(loaded_backend, &launch_args, &state)?;
+    let (device_name, soc) = resolve_device(args, loaded_backend, &state)?;
+    let (backend_version, build_command) =
+        resolve_runtime_provenance(args, loaded_backend, &state)?;
     let detected = detect_optimizations(loaded_backend, &launch_args);
     let (optimization_mode, optimizations) = resolve_optimization_declaration(args, &detected)?;
     let run_command = match args.run_command.as_deref() {
@@ -110,6 +115,7 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
         "max_tokens": args.max_tokens,
         "stream": false,
         "think": false,
+        "cache_prompt": false,
     });
     if args.ignore_eos {
         request
@@ -127,6 +133,15 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
     let started_at = OffsetDateTime::now_utc();
     let mut measurements = Vec::with_capacity(usize::from(args.runs));
     for index in 0..args.runs {
+        let reset =
+            post_local_json_for_config("/omni/cache/clear", &json!({}), timeout, &config)
+                .with_context(|| format!("cache reset before measured run {} failed", index + 1))?;
+        if !json_bool(&reset, "ok").unwrap_or(false) {
+            anyhow::bail!(
+                "cache reset before measured run {} did not provide a successful acknowledgement",
+                index + 1
+            );
+        }
         let started = Instant::now();
         let response =
             post_local_json_for_config("/v1/chat/completions", &request, timeout, &config)
@@ -160,6 +175,7 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
 
     let pp = consistent_token_count(&measurements, true)?;
     let tg = consistent_token_count(&measurements, false)?;
+    validate_measurement_stability(&measurements, MAX_MEASUREMENT_CV)?;
     if pp > 1_048_576 || tg > 1_048_576 {
         anyhow::bail!("Measured PP/TG exceeds the submission contract limit of 1,048,576 tokens.");
     }
@@ -183,11 +199,15 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
         args,
         benchmark_id: &benchmark_id,
         loaded_backend,
+        backend_version: &backend_version,
+        build_command: &build_command,
         run_command: &run_command,
         optimization_mode,
         optimizations: &optimizations,
         context_size,
         batch_size,
+        device_name: &device_name,
+        soc: &soc,
         prompt_source: &prompt_source,
         prompt_sha256: &prompt_sha256,
         started_at,
@@ -269,6 +289,10 @@ pub(crate) fn list(json_output: bool) -> Result<()> {
 mod validation;
 
 use validation::*;
+mod cache;
+use cache::*;
+mod environment;
+use environment::*;
 mod result;
 
 use result::*;
@@ -368,6 +392,76 @@ mod tests {
                 &["--batch-size"]
             ),
             Some(64)
+        );
+    }
+
+    #[test]
+    fn accepts_only_effective_cache_isolation_flags() {
+        let state = json!({"mmproj": null});
+        let isolated = [
+            "llama-server",
+            "--cache-ram",
+            "8192",
+            "--cache-ram=0",
+            "--cache-idle-slots",
+            "--no-cache-idle-slots",
+            "--cache-prompt",
+            "--no-cache-prompt",
+            "--slot-prompt-similarity",
+            "0",
+            "--slot-save-path",
+            "/tmp/benchmark-slots",
+        ]
+        .map(str::to_string);
+        assert!(validate_cache_isolation("llama.cpp-linux-cuda", &isolated, &state).is_ok());
+
+        let mut unsafe_args = isolated.to_vec();
+        unsafe_args.push("--cache-ram=8192".to_string());
+        assert!(validate_cache_isolation("llama.cpp-linux-cuda", &unsafe_args, &state).is_err());
+        assert!(validate_cache_isolation("vllm-linux-cuda", &isolated, &state).is_err());
+    }
+
+    #[test]
+    fn rejects_unstable_measurements() {
+        let measurement = |prefill_tps, decode_tps| Measurement {
+            prompt_tokens: 64,
+            completion_tokens: 16,
+            prefill_tps,
+            decode_tps,
+            prefill_duration_ms: 64_000.0 / prefill_tps,
+            decode_duration_ms: 16_000.0 / decode_tps,
+            ttft_ms: None,
+            wall_time_ms: 1_000.0,
+        };
+        let stable = [
+            measurement(100.0, 20.0),
+            measurement(101.0, 20.1),
+            measurement(99.0, 19.9),
+        ];
+        assert!(validate_measurement_stability(&stable, 0.05).is_ok());
+        let unstable = [
+            measurement(100.0, 20.0),
+            measurement(140.0, 20.0),
+            measurement(80.0, 20.0),
+        ];
+        assert!(validate_measurement_stability(&unstable, 0.05).is_err());
+    }
+
+    #[test]
+    fn requires_immutable_hugging_face_model_urls() {
+        assert!(
+            validate_https_url(
+                "model",
+                "https://huggingface.co/owner/model/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/model.gguf",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_https_url(
+                "model",
+                "https://huggingface.co/owner/model/resolve/main/model.gguf",
+            )
+            .is_err()
         );
     }
 }

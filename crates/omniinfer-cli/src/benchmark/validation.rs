@@ -4,12 +4,18 @@ pub(super) fn validate_metadata(args: &BenchRunArgs) -> Result<()> {
     for (label, value, max) in [
         ("--catalog-model-id", args.catalog_model_id.as_str(), 128),
         ("--quantization", args.quantization.as_str(), 256),
-        ("--device-name", args.device_name.as_str(), 256),
-        ("--soc", args.soc.as_str(), 256),
-        ("--backend-version", args.backend_version.as_str(), 256),
         ("--submitter-name", args.submitter_name.as_str(), 256),
     ] {
         validate_text(label, value, max)?;
+    }
+    for (label, value) in [
+        ("--device-name", args.device_name.as_deref()),
+        ("--soc", args.soc.as_deref()),
+        ("--backend-version", args.backend_version.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_text(label, value, 256)?;
+        }
     }
     if !MODEL_FORMATS.contains(&args.model_format.as_str()) {
         anyhow::bail!("--format must be one of: {}", MODEL_FORMATS.join(", "));
@@ -44,7 +50,9 @@ pub(super) fn validate_metadata(args: &BenchRunArgs) -> Result<()> {
             "generated protocol notes exceed 2048 characters after the --ignore-eos marker is appended. Shorten --notes."
         );
     }
-    validated_command("--build-command", &args.build_command)?;
+    if let Some(command) = args.build_command.as_deref() {
+        validated_command("--build-command", command)?;
+    }
     if !valid_catalog_id(&args.catalog_model_id) {
         anyhow::bail!("--catalog-model-id must be a 1-128 character catalog slug.");
     }
@@ -90,6 +98,35 @@ pub(super) fn validate_https_url(label: &str, value: &str) -> Result<()> {
         || parsed.fragment().is_some()
     {
         anyhow::bail!("{label} must be a public HTTPS URL without credentials or a fragment.");
+    }
+    let segments = parsed
+        .path_segments()
+        .map(|segments| segments.map(str::to_ascii_lowercase).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for pair in segments.windows(2) {
+        if matches!(
+            pair[0].as_str(),
+            "blob" | "resolve" | "revision" | "revisions" | "tree"
+        ) && matches!(
+            pair[1].as_str(),
+            "head" | "latest" | "main" | "master" | "stable"
+        ) {
+            anyhow::bail!("{label} must use an immutable model revision.");
+        }
+    }
+    if matches!(
+        parsed.host_str().map(str::to_ascii_lowercase).as_deref(),
+        Some("huggingface.co" | "www.huggingface.co" | "hf-mirror.com" | "www.hf-mirror.com")
+    ) {
+        let revision = segments
+            .iter()
+            .position(|segment| segment == "resolve")
+            .and_then(|index| segments.get(index + 1));
+        if !revision.is_some_and(|revision| {
+            revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            anyhow::bail!("{label} must use a Hugging Face /resolve/<40-character-commit>/ URL.");
+        }
     }
     Ok(())
 }

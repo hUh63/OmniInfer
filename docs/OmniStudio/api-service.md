@@ -274,10 +274,10 @@ curl -X POST http://127.0.0.1:9000/omni/cache/clear
 Response:
 
 ```json
-{"ok": true, "message": "KV cache cleared"}
+{"ok": true, "message": "KV cache cleared", "cache_policy": "cleared_each_run", "cleared_slots": [0, 1]}
 ```
 
-After clearing, the next request starts with a cold cache — equivalent to a fresh model load but without the weight-loading overhead.
+The gateway first reads the runtime slot count and erases every slot. If any slot cannot be erased, the request fails instead of reporting a partial clear. Cross-run RAM caches must still be disabled in the runtime launch arguments.
 
 ### Stop the Service
 

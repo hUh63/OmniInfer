@@ -274,10 +274,10 @@ curl -X POST http://127.0.0.1:9000/omni/cache/clear
 响应：
 
 ```json
-{"ok": true, "message": "KV cache cleared"}
+{"ok": true, "message": "KV cache cleared", "cache_policy": "cleared_each_run", "cleared_slots": [0, 1]}
 ```
 
-清除后，下一次请求将从空缓存开始——效果等同于刚加载模型，但无需重新加载模型权重。
+网关会先读取实际 slot 数量并逐个清除；任何一个 slot 清除失败，接口都会整体失败。跨轮 RAM 缓存仍需在 runtime 启动参数中显式关闭。
 
 ### 停止服务
 

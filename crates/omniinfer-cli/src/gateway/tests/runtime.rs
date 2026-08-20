@@ -141,6 +141,8 @@ async fn rust_gateway_loads_external_runtime_and_forwards_chat() {
     assert_eq!(cache_response.status().as_u16(), 200);
     let cache_body: Value = cache_response.into_body().read_json().unwrap();
     assert_eq!(cache_body["ok"], true);
+    assert_eq!(cache_body["cache_policy"], "cleared_each_run");
+    assert_eq!(cache_body["cleared_slots"], json!([0, 1]));
 
     let props_response = tokio::task::spawn_blocking(move || {
         ureq::get(format!("http://127.0.0.1:{port}/omni/backend/props"))
