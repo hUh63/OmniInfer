@@ -6,6 +6,12 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = REPOSITORY_ROOT / "README.md"
+DEMO_ASSET_DIR = REPOSITORY_ROOT / "docs" / "assets" / "demo"
+DEMO_POSTER_MAX_BYTES = 400 * 1024
+DEMO_ANIMATION_MAX_BYTES = 1_100 * 1024
+DEMO_POSTER_TOTAL_MAX_BYTES = 2 * 1024 * 1024
+DEMO_ANIMATION_TOTAL_MAX_BYTES = 2 * 1024 * 1024
+RETIRED_DEMO_ATTACHMENT = "4ac5329e-8c54-4ea9-8a51-02306c0607e9"
 
 
 class RootReadmeTests(unittest.TestCase):
@@ -88,6 +94,91 @@ class RootReadmeTests(unittest.TestCase):
             "OmniInfer is ready for Qwen's latest 27B vision-language model "
             "from day one.",
             self.readme,
+        )
+
+    def test_demo_section_presents_three_focused_demos(self):
+        demos = (
+            (
+                "### Terminal UI — choose a backend, load a model, chat locally",
+                "docs/assets/demo/tui-chat.webp",
+            ),
+            (
+                "### Local API — OpenAI-compatible endpoint",
+                "docs/assets/demo/local-api.webp",
+            ),
+            (
+                "### Browser VLA demo — SmolVLA on LIBERO",
+                "docs/assets/demo/vla-libero.webp",
+            ),
+        )
+        for title, poster in demos:
+            with self.subTest(title=title):
+                self.assertIn(title, self.readme)
+                self.assertIn(f'href="{poster}"', self.readme)
+        self.assertNotIn("<video", self.readme)
+        self.assertEqual(self.readme.count('<img src="docs/assets/demo/'), 3)
+        self.assertEqual(self.readme.count('width="720" alt="'), 3)
+
+    def test_demo_animations_are_placeholder_free_and_described(self):
+        for placeholder in (
+            "OMNIINFER_DEMO_VIDEO_TUI",
+            "OMNIINFER_DEMO_VIDEO_API",
+            "OMNIINFER_DEMO_VIDEO_VLA",
+        ):
+            with self.subTest(placeholder=placeholder):
+                self.assertNotIn(placeholder, self.readme)
+        animations = (
+            ("docs/assets/demo/tui-chat.gif", "Terminal UI"),
+            ("docs/assets/demo/local-api.gif", "OpenAI-compatible"),
+            ("docs/assets/demo/vla-libero.gif", "SmolVLA LIBERO"),
+        )
+        for path, label in animations:
+            with self.subTest(path=path):
+                self.assertIn(f'src="{path}"', self.readme)
+                self.assertIn(f'alt="{label}', self.readme)
+
+    def test_old_provisional_demo_media_is_retired(self):
+        self.assertNotIn(RETIRED_DEMO_ATTACHMENT, self.readme)
+
+    def test_demo_posters_exist_within_size_budget(self):
+        posters = ("tui-chat.webp", "local-api.webp", "vla-libero.webp")
+        total = 0
+        for name in posters:
+            path = DEMO_ASSET_DIR / name
+            with self.subTest(poster=name):
+                self.assertTrue(path.is_file(), path)
+                size = path.stat().st_size
+                self.assertLessEqual(size, DEMO_POSTER_MAX_BYTES)
+                total += size
+        self.assertLessEqual(total, DEMO_POSTER_TOTAL_MAX_BYTES)
+
+    def test_demo_animations_exist_within_size_budget(self):
+        animations = ("tui-chat.gif", "local-api.gif", "vla-libero.gif")
+        total = 0
+        for name in animations:
+            path = DEMO_ASSET_DIR / name
+            with self.subTest(animation=name):
+                self.assertTrue(path.is_file(), path)
+                size = path.stat().st_size
+                self.assertLessEqual(size, DEMO_ANIMATION_MAX_BYTES)
+                total += size
+        self.assertLessEqual(total, DEMO_ANIMATION_TOTAL_MAX_BYTES)
+
+    def test_readme_has_no_local_machine_details(self):
+        leaks = (
+            "/home/",
+            ":\\Users",
+            "zhangguanhuai",
+            "zzw@",
+            "time-crystal",
+            "yutong",
+        )
+        for leak in leaks:
+            with self.subTest(leak=leak):
+                self.assertNotIn(leak, self.readme)
+        self.assertEqual(
+            re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", self.readme),
+            [],
         )
 
     def test_local_readme_links_resolve(self):
