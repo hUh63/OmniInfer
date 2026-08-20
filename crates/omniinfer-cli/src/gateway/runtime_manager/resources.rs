@@ -54,7 +54,8 @@ pub(super) fn build_runtime_resource_budget(
     let base = weights
         .checked_add(projector)
         .ok_or_else(|| anyhow::anyhow!("model artifact size overflow"))?;
-    let parameter_proxy = base.saturating_mul(2).max(GIB);
+    // Projector bytes affect framework/slack, not model KV or activation sizing.
+    let parameter_proxy = weights.saturating_mul(2).max(GIB);
     let ctx = u64::from(ctx_size.max(1));
     let kv_cache = checked_scaled(parameter_proxy, 3, 100)?
         .checked_mul(ctx)
