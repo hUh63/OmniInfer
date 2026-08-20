@@ -29,6 +29,7 @@ pub(crate) fn load_model(args: &ModelLoadArgs) -> Result<()> {
     let request = model_load::ModelLoadRequest {
         model: args.model.clone(),
         mmproj: args.mmproj.clone(),
+        no_mmproj: args.no_mmproj,
         ctx_size: args.ctx_size,
         backend_port: None,
         resource_budget_bytes: args.resource_budget_bytes,

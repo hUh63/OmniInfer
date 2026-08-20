@@ -12,6 +12,7 @@ pub const DEFAULT_LOAD_CONTEXT_SIZE: u32 = 8192;
 pub struct ModelLoadRequest {
     pub model: String,
     pub mmproj: Option<String>,
+    pub no_mmproj: bool,
     pub ctx_size: Option<u32>,
     pub backend_port: Option<u16>,
     pub resource_budget_bytes: Option<u64>,
@@ -50,6 +51,8 @@ pub enum ModelLoadError {
     VlaModelMustBeFile(String),
     #[error("mmproj file does not exist: {0}")]
     MmprojMissing(String),
+    #[error("--no-mmproj cannot be combined with --mmproj")]
+    MmprojConflict,
     #[error("--ctx-size must be a positive integer")]
     InvalidCtxSize,
     #[error(
@@ -107,6 +110,10 @@ pub fn build_model_load_payload(
     load_tokens.extend(request.backend_extra_args.clone());
     let load_args = parse_backend_load_extra_args(&backend_id, family, &load_tokens)?;
 
+    if request.no_mmproj && request.mmproj.is_some() {
+        return Err(ModelLoadError::MmprojConflict);
+    }
+
     let model = resolve_model_reference(&request.model, family, cwd)?;
     if family == "vla.cpp" && Path::new(&model).is_dir() {
         return Err(ModelLoadError::VlaModelMustBeFile(model));
@@ -125,6 +132,7 @@ pub fn build_model_load_payload(
 
     let mut payload = Map::new();
     payload.insert("model".to_string(), Value::String(model));
+    payload.insert("no_mmproj".to_string(), Value::Bool(request.no_mmproj));
     if let Some(mmproj) = mmproj {
         payload.insert("mmproj".to_string(), Value::String(mmproj));
     }
@@ -446,6 +454,49 @@ mod tests {
             plan.payload["request_defaults"]["temperature"],
             serde_json::json!(0.2)
         );
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn no_mmproj_payload_disables_projector_and_conflicts_with_explicit_path() {
+        let cwd = temp_dir("no-mmproj");
+        let model = cwd.join("model.gguf");
+        let mmproj = cwd.join("mmproj.gguf");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(&model, "").unwrap();
+        std::fs::write(&mmproj, "").unwrap();
+
+        let plan = build_model_load_payload(
+            &ModelLoadRequest {
+                model: model.display().to_string(),
+                no_mmproj: true,
+                ..ModelLoadRequest::default()
+            },
+            &[backend("llama.cpp-linux-cuda", "llama.cpp", true)],
+            None,
+            Some("llama.cpp-linux-cuda"),
+            None,
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(plan.payload["no_mmproj"], true);
+        assert!(plan.payload.get("mmproj").is_none());
+
+        let error = build_model_load_payload(
+            &ModelLoadRequest {
+                model: model.display().to_string(),
+                mmproj: Some(mmproj.display().to_string()),
+                no_mmproj: true,
+                ..ModelLoadRequest::default()
+            },
+            &[backend("llama.cpp-linux-cuda", "llama.cpp", true)],
+            None,
+            Some("llama.cpp-linux-cuda"),
+            None,
+            &cwd,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ModelLoadError::MmprojConflict));
         std::fs::remove_dir_all(cwd).ok();
     }
 

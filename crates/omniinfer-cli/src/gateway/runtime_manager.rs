@@ -221,6 +221,7 @@ impl RustRuntimeManager {
             .map(str::to_string);
         let requested_model_key = public_model_id.clone().unwrap_or_else(|| model.clone());
         let requested_backend = self.resolve_requested_backend(&payload)?;
+        let no_mmproj = no_mmproj_from_payload(&payload)?;
         let registry = BackendRegistry::load_current();
         let backend = registry
             .get(&requested_backend)
@@ -238,15 +239,21 @@ impl RustRuntimeManager {
             );
         }
         let resolved_model = resolve_model_for_backend(&model, backend)?;
+        if no_mmproj && payload.get("mmproj").is_some_and(|value| !value.is_null()) {
+            anyhow::bail!("no_mmproj cannot be combined with mmproj");
+        }
         let explicit_mmproj = payload
             .get("mmproj")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(|value| resolve_path_for_backend(value, backend, "mmproj file"))
             .transpose()?;
-        let mmproj_path = explicit_mmproj.or(resolved_model.mmproj_path).or_else(|| {
-            maybe_auto_mmproj(backend.models_dir.as_deref(), &resolved_model.model_path)
-        });
+        let mmproj_path = select_mmproj_path(
+            no_mmproj,
+            explicit_mmproj,
+            resolved_model.mmproj_path,
+            maybe_auto_mmproj(backend.models_dir.as_deref(), &resolved_model.model_path),
+        );
         if mmproj_path.is_some() && !backend.supports_mmproj {
             anyhow::bail!("{} does not support mmproj inputs", backend.id);
         }
@@ -1021,6 +1028,27 @@ use model_config::*;
 pub(super) fn pick_runtime_port(host: &str) -> Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
     Ok(listener.local_addr()?.port())
+}
+
+fn no_mmproj_from_payload(payload: &Value) -> Result<bool> {
+    match payload.get("no_mmproj") {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => anyhow::bail!("no_mmproj must be a boolean"),
+        None => Ok(false),
+    }
+}
+
+fn select_mmproj_path(
+    no_mmproj: bool,
+    explicit: Option<String>,
+    discovered: Option<String>,
+    automatic: Option<String>,
+) -> Option<String> {
+    if no_mmproj {
+        None
+    } else {
+        explicit.or(discovered).or(automatic)
+    }
 }
 
 #[cfg(test)]

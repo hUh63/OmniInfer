@@ -132,6 +132,8 @@ pub(crate) struct ModelLoadArgs {
     pub(crate) model: String,
     #[arg(long = "mmproj")]
     pub(crate) mmproj: Option<String>,
+    #[arg(long, conflicts_with = "mmproj")]
+    pub(crate) no_mmproj: bool,
     #[arg(long)]
     pub(crate) ctx_size: Option<u32>,
     /// Explicit runtime memory budget for remote model references whose size is unknown.
@@ -339,6 +341,8 @@ pub(crate) struct ServeArgs {
     pub(crate) model: Option<String>,
     #[arg(long = "mmproj")]
     pub(crate) mmproj: Option<String>,
+    #[arg(long, conflicts_with = "mmproj")]
+    pub(crate) no_mmproj: bool,
     #[arg(long)]
     pub(crate) ctx_size: Option<u32>,
     #[arg(long)]

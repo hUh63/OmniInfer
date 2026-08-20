@@ -33,6 +33,39 @@ fn detects_vllm_context_args() {
 }
 
 #[test]
+fn no_mmproj_disables_explicit_and_discovered_projector_selection() {
+    assert_eq!(
+        select_mmproj_path(
+            true,
+            Some("explicit.gguf".to_string()),
+            Some("discovered.gguf".to_string()),
+            Some("automatic.gguf".to_string()),
+        ),
+        None
+    );
+    assert_eq!(
+        select_mmproj_path(
+            false,
+            None,
+            Some("discovered.gguf".to_string()),
+            Some("automatic.gguf".to_string()),
+        ),
+        Some("discovered.gguf".to_string())
+    );
+    assert_eq!(
+        select_mmproj_path(false, None, None, Some("automatic.gguf".to_string())),
+        Some("automatic.gguf".to_string())
+    );
+}
+
+#[test]
+fn no_mmproj_gateway_payload_is_strictly_boolean() {
+    assert!(no_mmproj_from_payload(&json!({"no_mmproj": true})).unwrap());
+    assert!(!no_mmproj_from_payload(&json!({})).unwrap());
+    assert!(no_mmproj_from_payload(&json!({"no_mmproj": "true"})).is_err());
+}
+
+#[test]
 fn failed_load_transaction_rolls_back_reservation() {
     let mut manager = RustRuntimeManager {
         resource_ledger: Some(ResourceLedger::new(
