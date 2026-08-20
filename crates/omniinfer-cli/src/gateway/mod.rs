@@ -268,19 +268,54 @@ async fn clear_runtime_cache(
     client: &Client<HttpConnector, Full<HyperBytes>>,
     runtime_base: &str,
 ) -> Result<Response<Body>> {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(format!("{runtime_base}/slots/0?action=erase"))
+    let props_request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("{runtime_base}/props"))
         .body(Full::new(HyperBytes::new()))?;
-    let response = client.request(request).await?;
-    let status = response.status();
-    let body = response.into_body().collect().await?.to_bytes();
-    if status.is_success() {
-        return Ok(json_response(
-            StatusCode::OK,
-            json!({"ok": true, "message": "KV cache cleared"}),
-        ));
+    let props_response = client.request(props_request).await?;
+    let props_status = props_response.status();
+    let props_body = props_response.into_body().collect().await?.to_bytes();
+    if !props_status.is_success() {
+        return Ok(cache_clear_error_response(props_status, &props_body));
     }
+    let props = serde_json::from_slice::<Value>(&props_body).unwrap_or(Value::Null);
+    let slot_count = props
+        .get("total_slots")
+        .or_else(|| props.get("slots"))
+        .and_then(Value::as_u64)
+        .filter(|count| (1..=256).contains(count));
+    let Some(slot_count) = slot_count else {
+        return Ok(json_response(
+            StatusCode::CONFLICT,
+            json!({"error": {"message": "backend did not report a valid slot count; cache erasure cannot be proven"}}),
+        ));
+    };
+    let mut cleared_slots = Vec::with_capacity(slot_count as usize);
+    for slot_id in 0..slot_count {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{runtime_base}/slots/{slot_id}?action=erase"))
+            .body(Full::new(HyperBytes::new()))?;
+        let response = client.request(request).await?;
+        let status = response.status();
+        let body = response.into_body().collect().await?.to_bytes();
+        if !status.is_success() {
+            return Ok(cache_clear_error_response(status, &body));
+        }
+        cleared_slots.push(slot_id);
+    }
+    Ok(json_response(
+        StatusCode::OK,
+        json!({
+            "ok": true,
+            "message": "KV cache cleared",
+            "cache_policy": "cleared_each_run",
+            "cleared_slots": cleared_slots,
+        }),
+    ))
+}
+
+fn cache_clear_error_response(status: StatusCode, body: &[u8]) -> Response<Body> {
     let detail = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|value| {
@@ -302,10 +337,7 @@ async fn clear_runtime_cache(
             status.as_u16()
         )
     };
-    Ok(json_response(
-        StatusCode::CONFLICT,
-        json!({"error": {"message": message}}),
-    ))
+    json_response(StatusCode::CONFLICT, json!({"error": {"message": message}}))
 }
 
 async fn proxy_anthropic_to_runtime(
