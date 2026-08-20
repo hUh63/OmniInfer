@@ -2,31 +2,52 @@ use super::support::*;
 
 #[test]
 fn bench_archives_submission_compatible_json() {
-    let state = r#"{
+    let root = temp_repo_root("bench-run");
+    let runtime_dir = root.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    fs::write(
+        runtime_dir.join("prebuilt.json"),
+        r#"{"backend":"llama.cpp-linux-cuda","tag":"b10280"}"#,
+    )
+    .expect("write prebuilt manifest");
+    let state = serde_json::json!({
         "backend_ready": true,
         "model": "/models/qwen.gguf",
         "backend": "llama.cpp-linux-cuda",
         "ctx_size": 128,
+        "mmproj": null,
         "launch_command": [
             "llama-server", "-m", "/models/qwen.gguf", "-b", "64",
+            "--cache-ram", "0", "--no-cache-idle-slots", "--no-cache-prompt",
+            "--slot-prompt-similarity", "0", "--slot-save-path", "/tmp/benchmark-slots",
             "--api-key", "runtime-secret"
-        ]
-    }"#;
+        ],
+        "available_backends": {"data": [{
+            "id": "llama.cpp-linux-cuda",
+            "runtime_dir": runtime_dir,
+        }]},
+    })
+    .to_string();
     let measurement = r#"{
         "usage": {"prompt_tokens": 64, "completion_tokens": 16},
         "timings": {"prompt_ms": 400.0, "predicted_ms": 800.0}
     }"#;
     let gateway = TestGateway::start(vec![
         Response::new(r#"{"status":"ok"}"#),
-        Response::new(state),
+        Response::new(&state),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
         Response::new(r#"{"status":"ok"}"#),
         Response::new(measurement),
         Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
+        Response::new(r#"{"status":"ok"}"#),
         Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
         Response::new(r#"{"status":"ok"}"#),
         Response::new(measurement),
     ]);
-    let root = temp_repo_root("bench-run");
     fs::create_dir_all(root.join("config")).expect("create config dir");
     fs::write(
         root.join("config").join("omniinfer.json"),
@@ -56,10 +77,6 @@ fn bench_archives_submission_compatible_json() {
             "Test GPU",
             "--soc",
             "test-gpu",
-            "--backend-version",
-            "test-runtime-1",
-            "--build-command",
-            "bash scripts/build-test-runtime.sh",
             "--baseline",
             "--runs",
             "3",
@@ -72,7 +89,7 @@ fn bench_archives_submission_compatible_json() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Run 3/3"))
-        .stderr(predicate::str::contains("Schema: 1.2.0"));
+        .stderr(predicate::str::contains("Schema: 1.3.0"));
     let printed_payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
         .expect("--json stdout is one JSON value");
     assert_eq!(printed_payload["benchmark_id"], benchmark_id);
@@ -81,12 +98,19 @@ fn bench_archives_submission_compatible_json() {
     assert!(gateway.request().starts_with("GET /omni/state HTTP/1.1"));
     for _ in 0..3 {
         assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
+        assert!(
+            gateway
+                .request()
+                .starts_with("POST /omni/cache/clear HTTP/1.1")
+        );
+        assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
         let request = gateway.request();
         assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
         let body = request_body_json(&request);
         assert_eq!(body["stream"], false);
         assert_eq!(body["temperature"], 0);
         assert_eq!(body["max_tokens"], 128);
+        assert_eq!(body["cache_prompt"], false);
         assert!(body.get("ignore_eos").is_none());
     }
     gateway.join();
@@ -99,7 +123,15 @@ fn bench_archives_submission_compatible_json() {
     let payload: serde_json::Value =
         serde_json::from_slice(&fs::read(&result).expect("read benchmark result"))
             .expect("parse benchmark result");
-    assert_eq!(payload["schema_version"], "1.2.0");
+    assert_eq!(payload["schema_version"], "1.3.0");
+    assert_eq!(payload["producer"]["name"], "OmniInfer CLI");
+    assert_eq!(payload["backend"]["version"], "b10280");
+    assert_eq!(
+        payload["runtime"]["build_command"],
+        "omniinfer backend install llama.cpp-linux-cuda"
+    );
+    assert_eq!(payload["protocol"]["profile"], "text-pp-tg-standard-v1");
+    assert_eq!(payload["protocol"]["cache_policy"], "cleared_each_run");
     assert_eq!(payload["workload"]["pp"], 64);
     assert_eq!(payload["workload"]["tg"], 16);
     assert_eq!(payload["workload"]["batch_size"], 64);
@@ -139,7 +171,11 @@ fn bench_includes_ignore_eos_when_requested() {
         "model": "/models/qwen.gguf",
         "backend": "llama.cpp-linux-cuda",
         "ctx_size": 128,
-        "launch_command": ["llama-server", "-m", "/models/qwen.gguf", "-b", "64"]
+        "launch_command": [
+            "llama-server", "-m", "/models/qwen.gguf", "-b", "64",
+            "--cache-ram", "0", "--no-cache-idle-slots", "--no-cache-prompt",
+            "--slot-prompt-similarity", "0", "--slot-save-path", "/tmp/benchmark-slots"
+        ]
     }"#;
     let measurement = r#"{
         "usage": {"prompt_tokens": 64, "completion_tokens": 16},
@@ -149,9 +185,15 @@ fn bench_includes_ignore_eos_when_requested() {
         Response::new(r#"{"status":"ok"}"#),
         Response::new(state),
         Response::new(r#"{"status":"ok"}"#),
-        Response::new(measurement),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
         Response::new(r#"{"status":"ok"}"#),
         Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
         Response::new(r#"{"status":"ok"}"#),
         Response::new(measurement),
     ]);
@@ -208,6 +250,12 @@ fn bench_includes_ignore_eos_when_requested() {
     assert!(gateway.request().starts_with("GET /omni/state HTTP/1.1"));
     for _ in 0..3 {
         assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
+        assert!(
+            gateway
+                .request()
+                .starts_with("POST /omni/cache/clear HTTP/1.1")
+        );
+        assert!(gateway.request().starts_with("GET /health HTTP/1.1"));
         let request = gateway.request();
         assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
         let body = request_body_json(&request);
@@ -238,7 +286,11 @@ fn bench_ignore_eos_rejects_short_measured_response() {
         "model": "/models/qwen.gguf",
         "backend": "llama.cpp-linux-cuda",
         "ctx_size": 128,
-        "launch_command": ["llama-server", "-m", "/models/qwen.gguf", "-b", "64"]
+        "launch_command": [
+            "llama-server", "-m", "/models/qwen.gguf", "-b", "64",
+            "--cache-ram", "0", "--no-cache-idle-slots", "--no-cache-prompt",
+            "--slot-prompt-similarity", "0", "--slot-save-path", "/tmp/benchmark-slots"
+        ]
     }"#;
     let full_measurement = r#"{
         "usage": {"prompt_tokens": 64, "completion_tokens": 16},
@@ -252,7 +304,11 @@ fn bench_ignore_eos_rejects_short_measured_response() {
         Response::new(r#"{"status":"ok"}"#),
         Response::new(state),
         Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
+        Response::new(r#"{"status":"ok"}"#),
         Response::new(full_measurement),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(r#"{"ok":true,"cleared_slots":[0]}"#),
         Response::new(r#"{"status":"ok"}"#),
         Response::new(short_measurement),
     ]);

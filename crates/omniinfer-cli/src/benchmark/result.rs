@@ -116,15 +116,67 @@ pub(super) fn consistent_token_count(measurements: &[Measurement], prompt: bool)
     Ok(first)
 }
 
+pub(super) fn coefficient_of_variation(values: &[f64]) -> Result<f64> {
+    if values.is_empty() {
+        anyhow::bail!("cannot calculate variation for an empty measurement set");
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    if !mean.is_finite() || mean <= 0.0 {
+        anyhow::bail!("measurement mean must be positive and finite");
+    }
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
+    Ok(variance.sqrt() / mean)
+}
+
+pub(super) fn validate_measurement_stability(
+    measurements: &[Measurement],
+    maximum_cv: f64,
+) -> Result<()> {
+    for (label, values) in [
+        (
+            "Prefill",
+            measurements
+                .iter()
+                .map(|value| value.prefill_tps)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "Decode",
+            measurements
+                .iter()
+                .map(|value| value.decode_tps)
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        let cv = coefficient_of_variation(&values)?;
+        if cv > maximum_cv {
+            anyhow::bail!(
+                "{label} throughput CV is {:.2}%, exceeding the {:.0}% submission limit; stabilize the device and rerun",
+                cv * 100.0,
+                maximum_cv * 100.0,
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct BuildSubmission<'a> {
     pub(super) args: &'a BenchRunArgs,
     pub(super) benchmark_id: &'a str,
     pub(super) loaded_backend: &'a str,
+    pub(super) backend_version: &'a str,
+    pub(super) build_command: &'a str,
     pub(super) run_command: &'a str,
     pub(super) optimization_mode: &'a str,
     pub(super) optimizations: &'a [String],
     pub(super) context_size: u32,
     pub(super) batch_size: u32,
+    pub(super) device_name: &'a str,
+    pub(super) soc: &'a str,
     pub(super) prompt_source: &'a str,
     pub(super) prompt_sha256: &'a str,
     pub(super) started_at: OffsetDateTime,
@@ -145,14 +197,15 @@ pub(super) fn build_submission(input: BuildSubmission<'_>) -> Result<Value> {
     }
     let mut backend = json!({
         "catalog_backend_id": input.loaded_backend,
-        "version": input.args.backend_version,
+        "version": input.backend_version,
     });
     if let Some(name) = input.args.backend_name.as_deref() {
         backend["name"] = json!(name);
     }
     let mut protocol = json!({
         "run_mode": "steady_state",
-        "cache_policy": "reused_within_submission",
+        "profile": "text-pp-tg-standard-v1",
+        "cache_policy": "cleared_each_run",
         "timeout_seconds": input.args.timeout_seconds,
         "started_at": input.started_at.format(&Rfc3339)?,
     });
@@ -189,14 +242,19 @@ pub(super) fn build_submission(input: BuildSubmission<'_>) -> Result<Value> {
     Ok(json!({
         "schema_version": BENCHMARK_SCHEMA_VERSION,
         "benchmark_id": input.benchmark_id,
+        "producer": {
+            "name": "OmniInfer CLI",
+            "version": omniinfer_core::version::VERSION,
+            "source_url": "https://github.com/omnimind-ai/OmniInfer",
+        },
         "model": model,
         "device": {
-            "name": input.args.device_name,
-            "soc": input.args.soc,
+            "name": input.device_name,
+            "soc": input.soc,
         },
         "backend": backend,
         "runtime": {
-            "build_command": input.args.build_command.trim(),
+            "build_command": input.build_command,
             "run_command": input.run_command,
         },
         "optimization": {
