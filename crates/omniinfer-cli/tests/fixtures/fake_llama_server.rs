@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -12,6 +13,21 @@ fn main() {
     }
     let port = port.expect("--port is required");
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).expect("bind fake runtime");
+    if let Ok(path) = std::env::var("OMNIINFER_TEST_RUNTIME_STARTED_FILE") {
+        let mut marker = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open runtime started marker");
+        writeln!(marker, "{}", std::process::id()).expect("write runtime started marker");
+    }
+    if std::env::var_os("OMNIINFER_TEST_RUNTIME_EXIT_AFTER_BIND").is_some() {
+        if let Ok(path) = std::env::var("OMNIINFER_TEST_RUNTIME_EXITED_FILE") {
+            std::fs::write(path, std::process::id().to_string())
+                .expect("write runtime exit marker");
+        }
+        return;
+    }
     if let Ok(path) = std::env::var("OMNIINFER_TEST_RUNTIME_READY_FILE") {
         std::fs::write(path, "ready").expect("write runtime ready marker");
     }

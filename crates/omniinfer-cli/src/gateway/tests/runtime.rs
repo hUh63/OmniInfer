@@ -370,6 +370,78 @@ async fn runtime_request_defaults_merge_without_restarting_backend() {
 }
 
 #[tokio::test]
+async fn direct_gateway_no_mmproj_load_persists_and_reports_restore_choice() {
+    let _env_lock = TEST_ENV_LOCK.lock().await;
+    let temp = temp_root("runtime-no-mmproj-persistence");
+    let model = temp.join("model.gguf");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::write(&model, b"gguf").unwrap();
+    let backend_id = external_test_backend_id();
+    install_fake_llama_server(&temp, backend_id);
+    let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", temp.display().to_string());
+
+    let upstream = spawn_test_upstream().await;
+    let gateway = spawn_test_gateway(upstream.port, GatewayAccessPolicy::default()).await;
+    let port = gateway.port;
+    let backend_port = pick_runtime_port("127.0.0.1").unwrap();
+    let request = json!({
+        "backend": backend_id,
+        "model": model.display().to_string(),
+        "ctx_size": 512,
+        "backend_port": backend_port,
+        "no_mmproj": true,
+    });
+    let load = tokio::task::spawn_blocking({
+        let request = request.clone();
+        move || {
+            ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+                .send_json(request)
+                .unwrap()
+                .into_body()
+                .read_json::<Value>()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(load["selected_mmproj"], Value::Null);
+
+    let state = gateway_state(port).await;
+    assert_eq!(state["restore_selection"]["no_mmproj"], true);
+    assert_eq!(state["restore_selection"]["mmproj"], Value::Null);
+    let persisted = omniinfer_core::local_state::load_state().unwrap();
+    assert!(persisted.selected_model.unwrap().no_mmproj);
+
+    let repeat = tokio::task::spawn_blocking(move || {
+        ureq::post(format!("http://127.0.0.1:{port}/omni/model/select"))
+            .send_json(json!({
+                "backend": backend_id,
+                "model": model.display().to_string(),
+                "ctx_size": 512,
+                "no_mmproj": true,
+            }))
+            .unwrap()
+            .into_body()
+            .read_json::<Value>()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(repeat["already_loaded"], true);
+    assert!(
+        omniinfer_core::local_state::load_state()
+            .unwrap()
+            .selected_model
+            .unwrap()
+            .no_mmproj
+    );
+
+    gateway.stop().await;
+    upstream.stop().await;
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn runtime_load_rolls_back_when_local_state_commit_fails() {
     let _env_lock = TEST_ENV_LOCK.lock().await;
     let temp = temp_root("rust-gateway-state-rollback");

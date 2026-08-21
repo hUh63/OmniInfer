@@ -29,6 +29,7 @@ pub(crate) fn load_model(args: &ModelLoadArgs) -> Result<()> {
     let request = model_load::ModelLoadRequest {
         model: args.model.clone(),
         mmproj: args.mmproj.clone(),
+        no_mmproj: args.no_mmproj,
         ctx_size: args.ctx_size,
         backend_port: None,
         resource_budget_bytes: args.resource_budget_bytes,
@@ -116,9 +117,10 @@ pub(crate) fn load_model_with_request_for_config_and_autostart(
         .and_then(serde_json::Value::as_object)
         .cloned()
         .unwrap_or_default();
-    local_state::save_selected_model(
+    local_state::save_selected_model_with_no_mmproj(
         selected_model,
         selected_mmproj,
+        request.no_mmproj,
         selected_ctx_size,
         &selected_request_defaults,
     )?;

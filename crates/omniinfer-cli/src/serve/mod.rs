@@ -276,6 +276,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
             .map(|value| ServeModelRequest {
                 model: value.to_string(),
                 mmproj: args.mmproj.clone(),
+                no_mmproj: args.no_mmproj,
                 ctx_size: args.ctx_size,
                 backend_port: args.backend_port,
                 resource_budget_bytes: args.resource_budget_bytes,
@@ -290,6 +291,7 @@ pub(crate) fn serve_orchestrated(args: &ServeArgs) -> Result<()> {
             let request = model_load::ModelLoadRequest {
                 model: model.model,
                 mmproj: model.mmproj,
+                no_mmproj: model.no_mmproj,
                 ctx_size: model.ctx_size,
                 backend_port: model.backend_port,
                 resource_budget_bytes: model.resource_budget_bytes,

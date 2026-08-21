@@ -12,7 +12,7 @@ use omniinfer_core::model_artifacts::{discover_llama_cpp_model_artifacts, maybe_
 use omniinfer_core::model_load::DEFAULT_LOAD_CONTEXT_SIZE;
 use omniinfer_core::resource_ledger::{
     AllocationId, BudgetComponent, MemoryDomain, ReservationId, ResourceBudget, ResourceCapacity,
-    ResourceLedger,
+    ResourceLedger, ResourceLedgerError,
 };
 use omniinfer_core::runtime_plan::{
     ExternalRuntimeRequest, ExternalServerProtocol, build_external_runtime_plan,
@@ -25,10 +25,12 @@ use super::gpu_status::runtime_env_for_backend;
 const WSL_ROCM_COLD_START_RETRY_MINIMUM_BUDGET: Duration = Duration::from_secs(360);
 const WSL_ROCM_COLD_START_INITIAL_ATTEMPT: Duration = Duration::from_secs(120);
 const WSL_ROCM_COLD_START_RETRY_COOLDOWN: Duration = Duration::from_secs(90);
+const SPECULATIVE_ALLOCATOR_SLACK_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub(super) struct RustRuntimeManager {
     selected_backend: Option<String>,
     loaded: BTreeMap<String, LoadedRustRuntime>,
+    speculative_domains: BTreeMap<MemoryDomain, AllocationId>,
     default_model_key: Option<String>,
     resource_ledger: Option<ResourceLedger>,
     next_capacity_snapshot: u64,
@@ -40,6 +42,7 @@ impl Default for RustRuntimeManager {
         Self {
             selected_backend: None,
             loaded: BTreeMap::new(),
+            speculative_domains: BTreeMap::new(),
             default_model_key: None,
             resource_ledger: None,
             next_capacity_snapshot: 1,
@@ -88,6 +91,7 @@ struct LoadedRustRuntime {
     launch_args: Vec<String>,
     cuda_visible_devices: Option<String>,
     cuda_warning: Option<String>,
+    speculative_admission: Option<SpeculativeAdmission>,
     external_server_protocol: ExternalServerProtocol,
     client_endpoint: String,
     process: RuntimeProcess,
@@ -96,6 +100,28 @@ struct LoadedRustRuntime {
     route_state: RuntimeRouteState,
     allocation_id: AllocationId,
     resource_budget: ResourceBudget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpeculativeAdmission {
+    device: String,
+    estimated: u64,
+    exclusive: u64,
+    shortfall: u64,
+    waived_allocator_slack: u64,
+}
+
+fn speculative_admission_payload(admission: Option<&SpeculativeAdmission>) -> Value {
+    admission.map_or(Value::Null, |admission| {
+        json!({
+            "speculative": true,
+            "device": admission.device,
+            "estimated_cuda_bytes": admission.estimated,
+            "exclusive_reservation_bytes": admission.exclusive,
+            "shortfall_bytes": admission.shortfall,
+            "waived_allocator_slack_bytes": admission.waived_allocator_slack,
+        })
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +221,7 @@ impl RustRuntimeManager {
             .map(str::to_string);
         let requested_model_key = public_model_id.clone().unwrap_or_else(|| model.clone());
         let requested_backend = self.resolve_requested_backend(&payload)?;
+        let no_mmproj = no_mmproj_from_payload(&payload)?;
         let registry = BackendRegistry::load_current();
         let backend = registry
             .get(&requested_backend)
@@ -212,15 +239,21 @@ impl RustRuntimeManager {
             );
         }
         let resolved_model = resolve_model_for_backend(&model, backend)?;
+        if no_mmproj && payload.get("mmproj").is_some_and(|value| !value.is_null()) {
+            anyhow::bail!("no_mmproj cannot be combined with mmproj");
+        }
         let explicit_mmproj = payload
             .get("mmproj")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(|value| resolve_path_for_backend(value, backend, "mmproj file"))
             .transpose()?;
-        let mmproj_path = explicit_mmproj.or(resolved_model.mmproj_path).or_else(|| {
-            maybe_auto_mmproj(backend.models_dir.as_deref(), &resolved_model.model_path)
-        });
+        let mmproj_path = select_mmproj_path(
+            no_mmproj,
+            explicit_mmproj,
+            resolved_model.mmproj_path,
+            maybe_auto_mmproj(backend.models_dir.as_deref(), &resolved_model.model_path),
+        );
         if mmproj_path.is_some() && !backend.supports_mmproj {
             anyhow::bail!("{} does not support mmproj inputs", backend.id);
         }
@@ -272,9 +305,10 @@ impl RustRuntimeManager {
                 &effective_launch_args,
             ) {
                 local_state::save_selected_backend(&backend.id)?;
-                local_state::save_selected_model(
+                local_state::save_selected_model_with_no_mmproj(
                     &resolved_model.model_path,
                     mmproj_path.as_deref(),
+                    no_mmproj,
                     ctx_size,
                     &requested_request_defaults,
                 )?;
@@ -348,11 +382,46 @@ impl RustRuntimeManager {
             budget_cuda_devices.as_deref(),
             cuda_selection.is_none() && budget_cuda_devices.is_some(),
         )?;
-        let reservation_id = self.reserve_runtime_resources(
+        let (reservation_id, speculative) = match self.reserve_runtime_resources(
             &requested_model_key,
             &resource_budget,
             budget_cuda_devices.as_deref(),
-        )?;
+        ) {
+            Ok(reservation_id) => (reservation_id, None),
+            Err(error) if is_cuda_capacity_exhaustion(&error) => {
+                let decision = speculative_reservation(
+                    backend,
+                    &payload,
+                    &resource_budget,
+                    cuda_selection.is_none() && budget_cuda_devices.is_some(),
+                    self.resource_ledger
+                        .as_ref()
+                        .map(|ledger| ledger.snapshot()),
+                )?;
+                let Some(decision) = decision else {
+                    return Err(error);
+                };
+                let reservation_id = self
+                    .resource_ledger
+                    .as_mut()
+                    .expect("speculative admission requires a resource ledger")
+                    .reserve(&requested_model_key, decision.budget.clone())?;
+                (reservation_id, Some(decision))
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(speculative) = speculative.as_ref() {
+            eprintln!(
+                "warning: speculative llama.cpp CUDA admission backend={} device={} estimated={} available={} shortfall={} waived_allocator_slack={} exclusive_reservation={}",
+                backend.id,
+                speculative.device,
+                speculative.estimated,
+                speculative.available,
+                speculative.shortfall,
+                speculative.waived_slack,
+                speculative.available,
+            );
+        }
         let transaction = self.with_reservation(reservation_id, |manager| {
             let process = start_runtime_with_cold_start_policy(
                 &backend.id,
@@ -366,9 +435,10 @@ impl RustRuntimeManager {
                 startup_cancelled,
             )?;
             local_state::save_selected_backend(&backend.id)?;
-            local_state::save_selected_model(
+            local_state::save_selected_model_with_no_mmproj(
                 &resolved_model.model_path,
                 mmproj_path.as_deref(),
+                no_mmproj,
                 plan.ctx_size,
                 &requested_request_defaults,
             )?;
@@ -381,6 +451,12 @@ impl RustRuntimeManager {
             Ok((process, generation, allocation_id))
         })?;
         let (process, generation, allocation_id) = transaction;
+        if let Some(speculative) = speculative.as_ref() {
+            self.speculative_domains.insert(
+                MemoryDomain::Cuda(speculative.device.clone()),
+                allocation_id,
+            );
+        }
         self.selected_backend = Some(backend.id.clone());
         self.loaded.insert(
             requested_model_key.clone(),
@@ -400,6 +476,13 @@ impl RustRuntimeManager {
                 cuda_warning: cuda_selection
                     .as_ref()
                     .and_then(|selection| selection.warning.clone()),
+                speculative_admission: speculative.map(|value| SpeculativeAdmission {
+                    device: value.device,
+                    estimated: value.estimated,
+                    exclusive: value.available,
+                    shortfall: value.shortfall,
+                    waived_allocator_slack: value.waived_slack,
+                }),
                 external_server_protocol: plan.protocol,
                 client_endpoint: plan.client_endpoint.clone(),
                 proxy_model_ref: plan.proxy_model_ref.clone(),
@@ -635,6 +718,9 @@ impl RustRuntimeManager {
                     "route_state": loaded.route_state.as_str(),
                     "allocation_id": loaded.allocation_id.get(),
                     "resource_budget": resource_budget_payload(&loaded.resource_budget),
+                    "speculative_admission": speculative_admission_payload(
+                        loaded.speculative_admission.as_ref(),
+                    ),
                     "launch_args": loaded.launch_args,
                     "cuda_visible_devices": loaded.cuda_visible_devices,
                     "warning": loaded.cuda_warning,
@@ -724,6 +810,14 @@ impl RustRuntimeManager {
         budget: &ResourceBudget,
         cuda_visible_devices: Option<&str>,
     ) -> Result<ReservationId> {
+        for domain in budget.domains().keys() {
+            if self.speculative_domains.contains_key(domain) {
+                anyhow::bail!(
+                    "CUDA device {} is exclusively held by a speculative runtime",
+                    domain.key(),
+                );
+            }
+        }
         let observed = detect_available_resources(cuda_visible_devices)?;
         let current_usage = self
             .resource_ledger
@@ -788,11 +882,17 @@ impl RustRuntimeManager {
     }
 
     fn remove_runtime_and_release(&mut self, key: &str) {
-        if let Some(loaded) = self.loaded.remove(key)
-            && let Some(ledger) = self.resource_ledger.as_mut()
-        {
-            ledger.release(loaded.allocation_id);
+        if let Some(loaded) = self.loaded.remove(key) {
+            self.clear_speculative_owner(loaded.allocation_id);
+            if let Some(ledger) = self.resource_ledger.as_mut() {
+                ledger.release(loaded.allocation_id);
+            }
         }
+    }
+
+    fn clear_speculative_owner(&mut self, allocation_id: AllocationId) {
+        self.speculative_domains
+            .retain(|_, current_owner| *current_owner != allocation_id);
     }
 
     fn select_fallback_default(&mut self) {
@@ -824,6 +924,97 @@ impl RustRuntimeManager {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpeculativeReservation {
+    budget: ResourceBudget,
+    device: String,
+    estimated: u64,
+    available: u64,
+    shortfall: u64,
+    waived_slack: u64,
+}
+
+fn is_cuda_capacity_exhaustion(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ResourceLedgerError>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                ResourceLedgerError::InsufficientCapacity { domain, .. }
+                    if domain.starts_with("cuda:")
+            )
+        })
+}
+
+fn speculative_reservation(
+    backend: &backend_registry::BackendSpec,
+    payload: &Value,
+    budget: &ResourceBudget,
+    replicate_across_domains: bool,
+    snapshot: Option<omniinfer_core::resource_ledger::ResourceLedgerSnapshot>,
+) -> Result<Option<SpeculativeReservation>> {
+    if backend.family != "llama.cpp"
+        || !backend.id.starts_with("llama.cpp-")
+        || !backend.capabilities.iter().any(|cap| cap == "cuda")
+        || replicate_across_domains
+        || payload
+            .get("resource_budget_bytes")
+            .and_then(Value::as_u64)
+            .is_some_and(|bytes| bytes > 0)
+    {
+        return Ok(None);
+    }
+    let cuda = budget
+        .domains()
+        .iter()
+        .filter(|(domain, _)| matches!(domain, MemoryDomain::Cuda(_)))
+        .collect::<Vec<_>>();
+    if cuda.len() != 1 {
+        return Ok(None);
+    }
+    let (domain, estimated) = cuda[0];
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
+    let reserved = snapshot.reserved.get(domain).copied().unwrap_or(0);
+    let committed = snapshot.committed.get(domain).copied().unwrap_or(0);
+    if reserved != 0 || committed != 0 {
+        return Ok(None);
+    }
+    let available = snapshot.available()?.get(domain).copied().unwrap_or(0);
+    if available >= *estimated {
+        return Ok(None);
+    }
+    let slack = budget
+        .components()
+        .iter()
+        .find(|component| component.domain == *domain && component.name == "allocator_slack")
+        .map(|component| component.bytes)
+        .unwrap_or(0);
+    let waiver_limit = slack.min(SPECULATIVE_ALLOCATOR_SLACK_LIMIT);
+    let shortfall = estimated.saturating_sub(available);
+    if estimated.saturating_sub(slack) > available || shortfall > waiver_limit {
+        return Ok(None);
+    }
+    let device = match domain {
+        MemoryDomain::Cuda(device) => device.clone(),
+        _ => unreachable!(),
+    };
+    let budget = ResourceBudget::from_components(vec![BudgetComponent {
+        name: "llama_cpp_speculative_cuda_exclusive".to_string(),
+        domain: domain.clone(),
+        bytes: available,
+    }])?;
+    Ok(Some(SpeculativeReservation {
+        budget,
+        device,
+        estimated: *estimated,
+        available,
+        shortfall,
+        waived_slack: shortfall,
+    }))
+}
+
 mod lifecycle;
 
 use lifecycle::*;
@@ -839,6 +1030,27 @@ use model_config::*;
 pub(super) fn pick_runtime_port(host: &str) -> Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
     Ok(listener.local_addr()?.port())
+}
+
+fn no_mmproj_from_payload(payload: &Value) -> Result<bool> {
+    match payload.get("no_mmproj") {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => anyhow::bail!("no_mmproj must be a boolean"),
+        None => Ok(false),
+    }
+}
+
+fn select_mmproj_path(
+    no_mmproj: bool,
+    explicit: Option<String>,
+    discovered: Option<String>,
+    automatic: Option<String>,
+) -> Option<String> {
+    if no_mmproj {
+        None
+    } else {
+        explicit.or(discovered).or(automatic)
+    }
 }
 
 #[cfg(test)]

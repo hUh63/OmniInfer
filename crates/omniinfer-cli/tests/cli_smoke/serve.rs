@@ -871,6 +871,68 @@ fn serve_detach_restores_last_model_without_python_upstream() {
 }
 
 #[test]
+fn serve_restore_preserves_persisted_no_mmproj_over_discoverable_sibling() {
+    let backend_id = test_external_backend_id();
+    let gateway = TestGateway::start(vec![
+        Response::new(r#"{"status":"starting"}"#),
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(&format!(
+            r#"{{"selected_backend":"{backend_id}","selected_model":"/tmp/model.gguf","selected_mmproj":null,"selected_ctx_size":512}}"#
+        )),
+        Response::new(
+            r#"{"omni":{"backend":"test","backend_ready":true,"model":"/tmp/model.gguf","ctx_size":512}}"#,
+        ),
+    ]);
+    let source_root = temp_repo_root("serve-no-mmproj-source");
+    let state_root = temp_repo_root("serve-no-mmproj-state");
+    fs::create_dir_all(&source_root).expect("source root");
+    fs::create_dir_all(state_root.join("config")).expect("config root");
+    fs::create_dir_all(state_root.join(".local").join("config")).expect("state config");
+    let port = gateway.port;
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{port},"startup_timeout":10}}"#),
+    )
+    .expect("config");
+    let model = state_root.join("model.gguf");
+    fs::write(&model, "gguf").expect("model");
+    fs::write(state_root.join("mmproj-F16.gguf"), "mmproj").expect("sibling mmproj");
+    fs::write(
+        state_root.join(".local").join("config").join("state.json"),
+        serde_json::to_string(&serde_json::json!({
+            "selected_backend": backend_id,
+            "selected_model": model.display().to_string(),
+            "selected_no_mmproj": true,
+            "selected_ctx_size": 512,
+        }))
+        .unwrap(),
+    )
+    .expect("state");
+    install_fake_backend(&state_root, backend_id);
+
+    let mut cmd = Command::cargo_bin("omniinfer").expect("binary exists");
+    cmd.env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_TEST_ALLOW_OCCUPIED_SERVE_PORT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .args(["serve", "--detach", "--port"])
+        .arg(port.to_string())
+        .assert()
+        .success();
+
+    let _ = gateway.request();
+    let _ = gateway.request();
+    let request = gateway.request();
+    assert!(request.starts_with("POST /omni/model/select HTTP/1.1"));
+    let body = request_body_json(&request);
+    assert_eq!(body["no_mmproj"], true);
+    assert!(body.get("mmproj").is_none());
+    gateway.join();
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+}
+
+#[test]
 fn serve_detach_runs_smoke_test() {
     let backend_id = test_external_backend_id();
     let gateway = TestGateway::start(vec![
@@ -1133,6 +1195,133 @@ fn failed_model_load_stops_gateway_and_releases_port_for_retry() {
     }
 
     fs::remove_dir_all(runtime_root).ok();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn speculative_load_failure_rolls_back_real_backend_and_cuda_reservation() {
+    let backend_id = "llama.cpp-linux-cuda";
+    let source_root = temp_repo_root("serve-speculative-failure-source");
+    let state_root = temp_repo_root("serve-speculative-failure-state");
+    let runtime_root = temp_repo_root("serve-speculative-failure-runtime");
+    let fake_bin_root = temp_repo_root("serve-speculative-failure-tools");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(state_root.join("config")).expect("create state config");
+    fs::write(
+        state_root.join("config").join("omniinfer.json"),
+        r#"{"host":"127.0.0.1","startup_timeout":3}"#,
+    )
+    .expect("write config");
+    install_fake_runtime_server_in_root(&runtime_root, backend_id);
+    let fake_nvidia_smi = install_fake_nvidia_smi(&fake_bin_root, 2900);
+    let model = state_root.join("model.gguf");
+    fs::File::create(&model)
+        .expect("create model")
+        .set_len(2 * 1024 * 1024 * 1024)
+        .expect("size model");
+    let gateway_port = free_port();
+    let backend_port = free_port();
+    let started_marker = state_root.join("backend-started");
+    let exited_marker = state_root.join("backend-exited");
+    let gateway_path = assert_cmd::cargo::cargo_bin("omniinfer");
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!(
+        "{}:{}",
+        fake_nvidia_smi.parent().unwrap().display(),
+        existing_path.to_string_lossy()
+    );
+    let mut gateway = StdCommand::new(gateway_path)
+        .env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &source_root)
+        .env("OMNIINFER_RUST_STATE_ROOT", &state_root)
+        .env("OMNIINFER_RUNTIME_ROOT", &runtime_root)
+        .env("OMNIINFER_CUDA_VISIBLE_DEVICES", "0")
+        .env("OMNIINFER_TEST_RUNTIME_STARTED_FILE", &started_marker)
+        .env("OMNIINFER_TEST_RUNTIME_EXITED_FILE", &exited_marker)
+        .env("OMNIINFER_TEST_RUNTIME_EXIT_AFTER_BIND", "1")
+        .env("PATH", path)
+        .args(["gateway", "--host", "127.0.0.1", "--port"])
+        .arg(gateway_port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start gateway");
+
+    let health = wait_for_http_json(gateway_port, "/health");
+    assert_eq!(health["status"], "ok");
+    let first = http_client::post_json(
+        &format!("http://127.0.0.1:{gateway_port}/omni/model/select"),
+        &serde_json::json!({
+            "backend": backend_id,
+            "model": model.display().to_string(),
+            "backend_port": backend_port,
+        }),
+        Duration::from_secs(5),
+    )
+    .expect("speculative model-select response");
+    assert_eq!(first.status, 502, "first response: {:?}", first.body);
+    assert!(
+        first.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("runtime exited before becoming ready")
+    );
+    let started = wait_for_file(started_marker);
+    let exited = wait_for_file(exited_marker);
+    assert!(!started.trim().is_empty());
+    assert!(!exited.trim().is_empty());
+    assert!(wait_for_port_closed(backend_port));
+
+    let state = http_client::get_json(
+        &format!("http://127.0.0.1:{gateway_port}/omni/state"),
+        Duration::from_secs(5),
+    )
+    .expect("state after failed speculative load");
+    assert_eq!(state.status, 200);
+    assert!(!state.body["backend_ready"].as_bool().unwrap_or(false));
+    assert!(state.body["model"].is_null());
+    assert_eq!(
+        state.body["resource_ledger"]["reserved_bytes"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        state.body["resource_ledger"]["committed_bytes"],
+        serde_json::json!({})
+    );
+
+    let second = http_client::post_json(
+        &format!("http://127.0.0.1:{gateway_port}/omni/model/select"),
+        &serde_json::json!({
+            "backend": backend_id,
+            "model": model.display().to_string(),
+            "backend_port": backend_port,
+        }),
+        Duration::from_secs(5),
+    )
+    .expect("follow-on model-select response");
+    assert_eq!(second.status, 502, "second response: {:?}", second.body);
+    assert!(
+        !second.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exclusively held by a speculative runtime")
+    );
+    assert!(wait_for_port_closed(backend_port));
+
+    let shutdown = http_client::post_json(
+        &format!("http://127.0.0.1:{gateway_port}/omni/shutdown"),
+        &serde_json::json!({}),
+        Duration::from_secs(5),
+    )
+    .expect("gateway shutdown response");
+    assert_eq!(shutdown.status, 200);
+    let status = gateway.wait().expect("wait gateway");
+    assert!(status.success());
+    assert!(wait_for_port_closed(gateway_port));
+    fs::remove_dir_all(source_root).ok();
+    fs::remove_dir_all(state_root).ok();
+    fs::remove_dir_all(runtime_root).ok();
+    fs::remove_dir_all(fake_bin_root).ok();
 }
 
 #[cfg(windows)]

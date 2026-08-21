@@ -658,6 +658,33 @@ pub(super) fn wait_for_file(path: std::path::PathBuf) -> String {
     panic!("timed out waiting for {}", path.display());
 }
 
+#[cfg(unix)]
+pub(super) fn install_fake_nvidia_smi(root: &std::path::Path, free_mib: u64) -> std::path::PathBuf {
+    let executable = root.join("nvidia-smi");
+    fs::create_dir_all(root).expect("create fake nvidia-smi directory");
+    fs::write(
+        &executable,
+        format!(
+            r#"#!/usr/bin/env bash
+case "$*" in
+  *"--query-gpu=index,uuid,memory.free"*) printf '0, GPU-TEST, {free_mib}\n' ;;
+  *"--query-gpu=index,uuid,memory.used"*) printf '0, GPU-TEST, 0\n' ;;
+  *"--query-gpu=index"*) printf '0\n' ;;
+  *"--query-compute-apps="*) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+        ),
+    )
+    .expect("write fake nvidia-smi");
+    let mut permissions = fs::metadata(&executable)
+        .expect("fake nvidia-smi metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).expect("chmod fake nvidia-smi");
+    executable
+}
+
 pub(super) fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
     listener.local_addr().expect("local addr").port()

@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct ServeModelRequest {
     pub(super) model: String,
     pub(super) mmproj: Option<String>,
+    pub(super) no_mmproj: bool,
     pub(super) ctx_size: Option<u32>,
     pub(super) backend_port: Option<u16>,
     pub(super) resource_budget_bytes: Option<u64>,
@@ -48,7 +49,10 @@ pub(super) fn resolve_serve_restore_model(args: &ServeArgs) -> Option<ServeModel
     }
     Some(ServeModelRequest {
         model: selected.model,
-        mmproj: selected.mmproj,
+        mmproj: (!args.no_mmproj && !selected.no_mmproj)
+            .then_some(selected.mmproj)
+            .flatten(),
+        no_mmproj: args.no_mmproj || selected.no_mmproj,
         ctx_size: selected.ctx_size,
         backend_port: args.backend_port,
         resource_budget_bytes: args.resource_budget_bytes,

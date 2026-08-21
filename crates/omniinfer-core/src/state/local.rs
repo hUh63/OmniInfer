@@ -38,6 +38,8 @@ pub enum StateError {
 pub struct SelectedModel {
     pub model: String,
     pub mmproj: Option<String>,
+    #[serde(default)]
+    pub no_mmproj: bool,
     pub ctx_size: Option<u32>,
     pub request_defaults: Map<String, Value>,
 }
@@ -80,6 +82,16 @@ pub fn save_selected_model(
     ctx_size: Option<u32>,
     request_defaults: &Map<String, Value>,
 ) -> Result<(), StateError> {
+    save_selected_model_with_no_mmproj(model, mmproj, false, ctx_size, request_defaults)
+}
+
+pub fn save_selected_model_with_no_mmproj(
+    model: &str,
+    mmproj: Option<&str>,
+    no_mmproj: bool,
+    ctx_size: Option<u32>,
+    request_defaults: &Map<String, Value>,
+) -> Result<(), StateError> {
     let model = model.trim();
     if model.is_empty() {
         return Ok(());
@@ -106,6 +118,7 @@ pub fn save_selected_model(
             map.remove("selected_mmproj");
         }
     }
+    map.insert("selected_no_mmproj".to_string(), Value::Bool(no_mmproj));
     match ctx_size.filter(|value| *value > 0) {
         Some(ctx_size) => {
             map.insert(
@@ -133,6 +146,7 @@ pub fn clear_selected_model() -> Result<bool, StateError> {
     for key in [
         "selected_model",
         "selected_mmproj",
+        "selected_no_mmproj",
         "selected_ctx_size",
         "selected_request_defaults",
     ] {
@@ -225,6 +239,7 @@ fn parse_state_value(value: &Value) -> LocalState {
     let selected_model = string_field(map.get("selected_model")).map(|model| SelectedModel {
         model,
         mmproj: string_field(map.get("selected_mmproj")),
+        no_mmproj: boolish_field(map.get("selected_no_mmproj")).unwrap_or(false),
         ctx_size: map
             .get("selected_ctx_size")
             .and_then(Value::as_u64)
@@ -280,6 +295,7 @@ mod tests {
             "selected_backend": "llama.cpp-linux-cuda",
             "selected_model": "/models/model.gguf",
             "selected_mmproj": "/models/mmproj.gguf",
+            "selected_no_mmproj": true,
             "selected_ctx_size": 8192,
             "default_thinking": "off",
             "tui_show_reasoning": "on"
@@ -295,6 +311,7 @@ mod tests {
             Some(SelectedModel {
                 model: "/models/model.gguf".to_string(),
                 mmproj: Some("/models/mmproj.gguf".to_string()),
+                no_mmproj: true,
                 ctx_size: Some(8192),
                 request_defaults: Map::new(),
             })
@@ -348,12 +365,60 @@ mod tests {
             Some(SelectedModel {
                 model: "/models/model.gguf".to_string(),
                 mmproj: Some("/models/mmproj.gguf".to_string()),
+                no_mmproj: false,
                 ctx_size: Some(8192),
                 request_defaults: serde_json::from_value(serde_json::json!({"max_tokens": 64}))
                     .unwrap(),
             })
         );
         assert_eq!(value["future"]["keep"], true);
+    }
+
+    #[test]
+    fn missing_no_mmproj_defaults_false_and_save_roundtrips_decision() {
+        let legacy = parse_state_value(&serde_json::json!({
+            "selected_model": "/models/model.gguf",
+            "selected_mmproj": "/models/mmproj.gguf",
+        }));
+        assert!(!legacy.selected_model.unwrap().no_mmproj);
+
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap();
+        let root = temp_root("no-mmproj-roundtrip");
+        let _guard = EnvGuard::set("OMNIINFER_RUST_STATE_ROOT", root.display().to_string());
+        save_selected_model_with_no_mmproj(
+            "/models/model.gguf",
+            None,
+            true,
+            Some(8192),
+            &Map::new(),
+        )
+        .expect("save no-mmproj model");
+        let state = load_state().expect("load no-mmproj model");
+        let selected = state.selected_model.expect("selected model");
+        assert!(selected.no_mmproj);
+        assert!(selected.mmproj.is_none());
+        let raw = std::fs::read_to_string(crate::paths::state_file()).expect("read state");
+        assert!(raw.contains(r#""selected_no_mmproj": true"#));
+
+        save_selected_model_with_no_mmproj(
+            "/models/model.gguf",
+            Some("/models/mmproj.gguf"),
+            false,
+            None,
+            &Map::new(),
+        )
+        .expect("save normal model");
+        assert!(
+            !load_state()
+                .expect("load normal model")
+                .selected_model
+                .expect("selected model")
+                .no_mmproj
+        );
+        assert!(clear_selected_model().expect("clear model"));
+        let raw = std::fs::read_to_string(crate::paths::state_file()).expect("read cleared state");
+        assert!(!raw.contains("selected_no_mmproj"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
