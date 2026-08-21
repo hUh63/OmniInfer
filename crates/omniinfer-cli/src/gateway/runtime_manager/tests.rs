@@ -280,10 +280,17 @@ fn visual_projector_does_not_change_model_context_components() {
             .bytes;
         assert!(visual_bytes > text_bytes, "component {name}");
     }
-    assert!(
-        visual.domains()[&MemoryDomain::Cuda("0".to_string())]
-            > text.domains()[&MemoryDomain::Cuda("0".to_string())]
+    assert_eq!(
+        visual.domains().keys().collect::<Vec<_>>(),
+        text.domains().keys().collect::<Vec<_>>()
     );
+    for domain in text.domains().keys() {
+        assert!(
+            visual.domains()[domain] > text.domains()[domain],
+            "domain {}",
+            domain.key()
+        );
+    }
     fs::remove_dir_all(root).ok();
 }
 

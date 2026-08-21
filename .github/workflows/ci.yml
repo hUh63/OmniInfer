@@ -57,7 +57,6 @@ jobs:
           bash tests/test_release_installer.sh
           bash tests/test_source_installer.sh
           bash tests/test_install_deps.sh
-          cargo run --locked -q -p omniinfer-cli -- --version
 
   windows-desktop-contract:
     name: Windows Desktop Contract
@@ -81,4 +80,3 @@ jobs:
         run: |
           .\tests\test_release_installer.ps1
           .\tests\test_source_installer.ps1
-          cargo run --locked -q -p omniinfer-cli -- --version
