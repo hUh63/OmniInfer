@@ -305,9 +305,10 @@ impl RustRuntimeManager {
                 &effective_launch_args,
             ) {
                 local_state::save_selected_backend(&backend.id)?;
-                local_state::save_selected_model(
+                local_state::save_selected_model_with_no_mmproj(
                     &resolved_model.model_path,
                     mmproj_path.as_deref(),
+                    no_mmproj,
                     ctx_size,
                     &requested_request_defaults,
                 )?;
@@ -434,9 +435,10 @@ impl RustRuntimeManager {
                 startup_cancelled,
             )?;
             local_state::save_selected_backend(&backend.id)?;
-            local_state::save_selected_model(
+            local_state::save_selected_model_with_no_mmproj(
                 &resolved_model.model_path,
                 mmproj_path.as_deref(),
+                no_mmproj,
                 plan.ctx_size,
                 &requested_request_defaults,
             )?;

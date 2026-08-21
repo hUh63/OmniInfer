@@ -117,9 +117,10 @@ pub(crate) fn load_model_with_request_for_config_and_autostart(
         .and_then(serde_json::Value::as_object)
         .cloned()
         .unwrap_or_default();
-    local_state::save_selected_model(
+    local_state::save_selected_model_with_no_mmproj(
         selected_model,
         selected_mmproj,
+        request.no_mmproj,
         selected_ctx_size,
         &selected_request_defaults,
     )?;

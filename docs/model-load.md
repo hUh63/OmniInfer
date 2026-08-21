@@ -10,6 +10,7 @@ This document defines the stable gateway contract for loading a model through
   "model": "<relative-or-absolute-model-path>",
   "backend": "<optional-backend-id>",
   "mmproj": "<optional-mmproj-path>",
+  "no_mmproj": false,
   "ctx_size": 4096,
   "resource_budget_bytes": 7516192768,
   "launch_args": ["-ngl", "999"],
@@ -29,6 +30,7 @@ This document defines the stable gateway contract for loading a model through
 | `model` | string | load | yes | Required. Relative paths resolve under the selected backend model root for file/directory backends. Reference backends such as `vllm-linux-cuda`, `vllm-wsl2-cuda`, and `vllm-wsl2-rocm` pass model references directly to the backend. |
 | `backend` | string | load | maybe | Optional. If omitted, OmniInfer uses selected or automatic backend logic. |
 | `mmproj` | string | load | yes | Optional multimodal projector override. |
+| `no_mmproj` | boolean | load | yes | Defaults to `false`. Conflicts with `mmproj`; when `true`, disables explicit and automatic projector selection. |
 | `ctx_size` / `ctx-size` | integer | load | yes | Optional context length override. |
 | `resource_budget_bytes` | positive integer | admission | yes | Optional explicit runtime memory budget. It is required when a reference backend cannot resolve the model to a local file or directory, and it cannot be lower than OmniInfer's local estimate when one is available. |
 | `launch_args` | string array or shell string | load | yes | Optional backend-native launch arguments for external server backends. |
@@ -40,6 +42,19 @@ The CLI exposes the same admission field as
 `serve --resource-budget-bytes <bytes>`. Supply it when a backend receives a
 remote model reference, such as a Hugging Face repository ID, and OmniInfer
 cannot inspect the artifact size locally.
+
+The public CLI options `omniinfer model load --no-mmproj` and
+`omniinfer serve --no-mmproj` disable both explicit and automatic visual
+projector loading. `--no-mmproj` conflicts with `--mmproj`; use one or the
+other. Without `--no-mmproj`, an ordinary model load retains automatic
+discovery of an available projector.
+The selection is saved with the model and honored by automatic restore during a
+later ordinary `omniinfer serve` startup.
+
+```sh
+omniinfer model load -m /path/to/model-directory --no-mmproj
+omniinfer serve -m /path/to/model-directory --no-mmproj
+```
 
 `request_defaults` is not a model-load setting. It is a convenient way for a
 client to attach generation defaults to the loaded runtime. Changing only

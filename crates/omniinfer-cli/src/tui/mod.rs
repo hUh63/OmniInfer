@@ -245,6 +245,7 @@ mod backend_model_tests {
         let model = local_state::SelectedModel {
             model: "/models/model.gguf".to_string(),
             mmproj: None,
+            no_mmproj: false,
             ctx_size: Some(4096),
             request_defaults: serde_json::from_value(serde_json::json!({"max_tokens": 64}))
                 .unwrap(),

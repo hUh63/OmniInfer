@@ -100,6 +100,7 @@ pub(super) fn annotate_restore_state(
         "backend": persistent_state.selected_backend,
         "model": selected.model,
         "mmproj": selected.mmproj,
+        "no_mmproj": selected.no_mmproj,
         "ctx_size": selected.ctx_size,
         "request_defaults": selected.request_defaults,
     });

@@ -66,6 +66,39 @@ fn no_mmproj_gateway_payload_is_strictly_boolean() {
 }
 
 #[test]
+fn restore_selection_exposes_persisted_no_mmproj_and_legacy_default() {
+    let mut payload = json!({});
+    let selected = omniinfer_core::local_state::SelectedModel {
+        model: "/models/model.gguf".to_string(),
+        mmproj: None,
+        no_mmproj: true,
+        ctx_size: Some(4096),
+        request_defaults: Map::new(),
+    };
+    let state = omniinfer_core::local_state::LocalState {
+        selected_backend: Some("llama.cpp-linux".to_string()),
+        selected_model: Some(selected),
+        ..Default::default()
+    };
+    annotate_restore_state(&mut payload, &state, &BTreeMap::new());
+    assert_eq!(payload["restore_selection"]["no_mmproj"], true);
+
+    let mut legacy_payload = json!({});
+    let legacy_state = omniinfer_core::local_state::LocalState {
+        selected_model: Some(omniinfer_core::local_state::SelectedModel {
+            model: "/models/legacy.gguf".to_string(),
+            mmproj: Some("/models/mmproj.gguf".to_string()),
+            no_mmproj: false,
+            ctx_size: None,
+            request_defaults: Map::new(),
+        }),
+        ..Default::default()
+    };
+    annotate_restore_state(&mut legacy_payload, &legacy_state, &BTreeMap::new());
+    assert_eq!(legacy_payload["restore_selection"]["no_mmproj"], false);
+}
+
+#[test]
 fn failed_load_transaction_rolls_back_reservation() {
     let mut manager = RustRuntimeManager {
         resource_ledger: Some(ResourceLedger::new(

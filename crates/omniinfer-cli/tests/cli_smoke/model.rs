@@ -59,6 +59,55 @@ fn model_load_posts_payload_and_persists_state() {
 }
 
 #[test]
+fn model_load_no_mmproj_persists_projector_disable_decision() {
+    let backend_id = test_external_backend_id();
+    let load_response = format!(
+        r#"{{"selected_backend":"{backend_id}","selected_model":"/tmp/model.gguf","selected_mmproj":null,"selected_ctx_size":8192}}"#
+    );
+    let gateway = TestGateway::start(vec![
+        Response::new(r#"{"status":"ok"}"#),
+        Response::new(&load_response),
+    ]);
+    let root = temp_repo_root("model-load-no-mmproj");
+    fs::create_dir_all(root.join("config")).expect("create config dir");
+    fs::write(
+        root.join("config").join("omniinfer.json"),
+        format!(r#"{{"host":"127.0.0.1","port":{}}}"#, gateway.port),
+    )
+    .expect("write config");
+    install_fake_backend(&root, backend_id);
+    let model = root.join("model.gguf");
+    let sibling_mmproj = root.join("mmproj-F16.gguf");
+    fs::write(&model, "").expect("write model");
+    fs::write(&sibling_mmproj, "").expect("write sibling mmproj");
+
+    let mut cmd = Command::cargo_bin("omniinfer").expect("binary exists");
+    cmd.env("OMNIINFER_RUST_STRICT", "1")
+        .env("OMNIINFER_RUST_REPO_ROOT", &root)
+        .args(["model", "load", "-m"])
+        .arg(&model)
+        .arg("--no-mmproj")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Model loaded"));
+
+    let _ = gateway.request();
+    let request = gateway.request();
+    assert!(request.starts_with("POST /omni/model/select HTTP/1.1"));
+    let body = request_body_json(&request);
+    assert_eq!(body["no_mmproj"], true);
+    assert!(body.get("mmproj").is_none());
+    gateway.join();
+
+    let state_raw = fs::read_to_string(root.join(".local").join("config").join("state.json"))
+        .expect("state file");
+    let state: serde_json::Value = serde_json::from_str(&state_raw).expect("state json");
+    assert_eq!(state["selected_no_mmproj"], true);
+    assert!(state.get("selected_mmproj").is_none());
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn model_load_handles_sse_progress() {
     let backend_id = test_external_backend_id();
     let secondary_backend_id = test_secondary_backend_id();

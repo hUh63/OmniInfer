@@ -29,7 +29,7 @@ pub(super) fn load_remembered_model(
     let request = model_load::ModelLoadRequest {
         model: model.model.clone(),
         mmproj: model.mmproj.clone(),
-        no_mmproj: false,
+        no_mmproj: model.no_mmproj,
         ctx_size: model.ctx_size,
         backend_port: None,
         resource_budget_bytes: None,
