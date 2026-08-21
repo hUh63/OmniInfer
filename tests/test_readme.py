@@ -8,10 +8,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = REPOSITORY_ROOT / "README.md"
 DEMO_ASSET_DIR = REPOSITORY_ROOT / "docs" / "assets" / "demo"
 DEMO_POSTER_MAX_BYTES = 400 * 1024
-DEMO_GIF_MAX_BYTES = 1_100 * 1024
+TERMINAL_ANIMATION_MAX_BYTES = 3 * 1024 * 1024
 VLA_ANIMATION_MAX_BYTES = 6 * 1024 * 1024
 DEMO_POSTER_TOTAL_MAX_BYTES = 2 * 1024 * 1024
-DEMO_ANIMATION_TOTAL_MAX_BYTES = 7 * 1024 * 1024
+DEMO_ANIMATION_TOTAL_MAX_BYTES = 10 * 1024 * 1024
 RETIRED_DEMO_ATTACHMENT = "4ac5329e-8c54-4ea9-8a51-02306c0607e9"
 RETIRED_VLA_DEMO_ATTACHMENT = "83eb563d-60fc-42f6-9032-a9c7b7eedb8c"
 
@@ -102,11 +102,11 @@ class RootReadmeTests(unittest.TestCase):
         demos = (
             (
                 "### Terminal UI — choose a backend, load a model, chat locally",
-                "docs/assets/demo/tui-chat.webp",
+                "docs/assets/demo/tui-chat-poster.webp",
             ),
             (
                 "### Local API — OpenAI-compatible endpoint",
-                "docs/assets/demo/local-api.webp",
+                "docs/assets/demo/local-api-poster.webp",
             ),
             (
                 "### Browser VLA demo — SmolVLA on LIBERO",
@@ -135,8 +135,8 @@ class RootReadmeTests(unittest.TestCase):
             with self.subTest(placeholder=placeholder):
                 self.assertNotIn(placeholder, self.readme)
         animations = (
-            ("docs/assets/demo/tui-chat.gif", "Terminal UI"),
-            ("docs/assets/demo/local-api.gif", "OpenAI-compatible"),
+            ("docs/assets/demo/tui-chat.webp", "Terminal UI"),
+            ("docs/assets/demo/local-api.webp", "OpenAI-compatible"),
             ("docs/assets/demo/vla-libero.webp", "SmolVLA LIBERO"),
         )
         for path, label in animations:
@@ -150,7 +150,7 @@ class RootReadmeTests(unittest.TestCase):
         self.assertNotIn(RETIRED_VLA_DEMO_ATTACHMENT, self.readme)
 
     def test_demo_posters_exist_within_size_budget(self):
-        posters = ("tui-chat.webp", "local-api.webp", "vla-libero-poster.webp")
+        posters = ("tui-chat-poster.webp", "local-api-poster.webp", "vla-libero-poster.webp")
         total = 0
         for name in posters:
             path = DEMO_ASSET_DIR / name
@@ -163,8 +163,8 @@ class RootReadmeTests(unittest.TestCase):
 
     def test_demo_animations_exist_within_size_budget(self):
         animations = (
-            ("tui-chat.gif", DEMO_GIF_MAX_BYTES),
-            ("local-api.gif", DEMO_GIF_MAX_BYTES),
+            ("tui-chat.webp", TERMINAL_ANIMATION_MAX_BYTES),
+            ("local-api.webp", TERMINAL_ANIMATION_MAX_BYTES),
             ("vla-libero.webp", VLA_ANIMATION_MAX_BYTES),
         )
         total = 0

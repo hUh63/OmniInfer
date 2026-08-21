@@ -61,18 +61,18 @@ Short, focused recordings of the main entry points. Each demo covers one capabil
 Running `omniinfer` opens a terminal UI that recommends a compatible backend, loads a local model, and starts a fully local chat session.
 
 <p align="center">
-  <img src="docs/assets/demo/tui-chat.gif" width="720" alt="Terminal UI selecting a backend, loading a model, and chatting locally">
+  <img src="docs/assets/demo/tui-chat.webp" width="720" alt="Terminal UI selecting a backend, loading a model, and chatting locally">
 </p>
-<p align="center"><sub>Static preview: <a href="docs/assets/demo/tui-chat.webp">terminal UI screenshot</a></sub></p>
+<p align="center"><sub>Static preview: <a href="docs/assets/demo/tui-chat-poster.webp">terminal UI screenshot</a></sub></p>
 
 ### Local API — OpenAI-compatible endpoint
 
 `omniinfer serve` exposes an OpenAI-compatible HTTP API on localhost; any OpenAI SDK or client can stream chat completions from the same local model.
 
 <p align="center">
-  <img src="docs/assets/demo/local-api.gif" width="720" alt="OpenAI-compatible local API request and response">
+  <img src="docs/assets/demo/local-api.webp" width="720" alt="OpenAI-compatible local API request and response">
 </p>
-<p align="center"><sub>Static preview: <a href="docs/assets/demo/local-api.webp">API request and response screenshot</a></sub></p>
+<p align="center"><sub>Static preview: <a href="docs/assets/demo/local-api-poster.webp">API request and response screenshot</a></sub></p>
 
 ### Browser VLA demo — SmolVLA on LIBERO
 
