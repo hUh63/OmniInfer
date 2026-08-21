@@ -104,4 +104,8 @@ exit 7
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# The expected native failure above leaves PowerShell's process-wide status at
+# 7 even though every assertion passed. Do not leak that fixture status to the
+# caller or CI step.
+$global:LASTEXITCODE = 0
 Write-Host "source installer PowerShell tests passed"
