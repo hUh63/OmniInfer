@@ -11,6 +11,7 @@ use crossterm::{
 enum Tone {
     Brand,
     Accent,
+    Frame,
     Muted,
     Success,
     Warning,
@@ -26,6 +27,11 @@ impl Tone {
     fn color(self) -> Color {
         match self {
             Self::Brand | Self::Accent => Color::Cyan,
+            Self::Frame => Color::Rgb {
+                r: 139,
+                g: 92,
+                b: 246,
+            },
             Self::Muted | Self::Reasoning => Color::DarkGrey,
             Self::Success => Color::Green,
             Self::Warning => Color::Yellow,
@@ -609,7 +615,7 @@ fn accent_line(text: &str) -> String {
     text.lines()
         .map(|line| {
             if line.starts_with('┌') || line.starts_with('└') {
-                paint(line, Tone::Accent)
+                paint(line, Tone::Frame)
             } else if line.starts_with('│') && line.ends_with('│') {
                 let inner = line
                     .strip_prefix('│')
@@ -617,9 +623,9 @@ fn accent_line(text: &str) -> String {
                     .unwrap_or(line);
                 format!(
                     "{}{}{}",
-                    paint("│", Tone::Accent),
-                    inner,
-                    paint("│", Tone::Accent)
+                    paint("│", Tone::Frame),
+                    style_backend_status(inner),
+                    paint("│", Tone::Frame)
                 )
             } else {
                 line.to_string()
@@ -627,6 +633,16 @@ fn accent_line(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn style_backend_status(text: &str) -> String {
+    if !text.contains("Backend:") || text.contains("not installed") {
+        return text.to_string();
+    }
+    let Some((before, after)) = text.split_once("installed") else {
+        return text.to_string();
+    };
+    format!("{before}{}{after}", paint("installed", Tone::Success))
 }
 
 fn buffered_model_index(number_buffer: &str, item_count: usize) -> Option<usize> {
@@ -654,10 +670,13 @@ impl Drop for ModelPickerTerminalMode {
         let mut stdout = io::stdout();
         let _ = execute!(
             stdout,
+            cursor::Show,
+            LeaveAlternateScreen,
+            // Clear the primary terminal after leaving the picker. Clearing the
+            // alternate screen first can leave the primary cursor far below the
+            // visible viewport in some SSH terminal combinations.
             terminal::Clear(ClearType::All),
             cursor::MoveTo(0, 0),
-            cursor::Show,
-            LeaveAlternateScreen
         );
         let _ = terminal::disable_raw_mode();
     }
@@ -753,7 +772,18 @@ fn format_menu_item(index: usize, item: &MenuItem, width: usize) -> String {
     } else {
         label
     };
-    let details = paint(&detail, Tone::Muted);
+    let details = if item.details.len() == 1 && item.details[0] == "installed" {
+        format!(
+            "{}{}",
+            paint(" · ", Tone::Muted),
+            paint(
+                &truncate_text(&item.details[0], detail_limit.saturating_sub(3)),
+                Tone::Success
+            )
+        )
+    } else {
+        paint(&detail, Tone::Muted)
+    };
     format!("{prefix}{marker} {label}{details}")
 }
 

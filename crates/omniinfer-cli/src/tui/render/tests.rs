@@ -3,6 +3,14 @@ use super::*;
 #[test]
 fn visual_palette_preserves_legacy_tui_semantics() {
     assert_eq!(Tone::Brand.color(), Color::Cyan);
+    assert_eq!(
+        Tone::Frame.color(),
+        Color::Rgb {
+            r: 139,
+            g: 92,
+            b: 246,
+        }
+    );
     assert_eq!(Tone::Success.color(), Color::Green);
     assert_eq!(Tone::Warning.color(), Color::Yellow);
     assert_eq!(Tone::User.color(), Color::Magenta);
