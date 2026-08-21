@@ -23,7 +23,8 @@ fn main() {
     }
     if std::env::var_os("OMNIINFER_TEST_RUNTIME_EXIT_AFTER_BIND").is_some() {
         if let Ok(path) = std::env::var("OMNIINFER_TEST_RUNTIME_EXITED_FILE") {
-            std::fs::write(path, std::process::id().to_string()).expect("write runtime exit marker");
+            std::fs::write(path, std::process::id().to_string())
+                .expect("write runtime exit marker");
         }
         return;
     }
