@@ -33,6 +33,18 @@ fn detects_vllm_context_args() {
 }
 
 #[test]
+fn detects_freetoken_context_args() {
+    assert!(launch_args_have_ctx_size(
+        "freetoken",
+        &["--max-seq-len-override=8192".to_string()]
+    ));
+    assert!(!launch_args_have_ctx_size(
+        "freetoken",
+        &["--memory-ratio".to_string(), "0.8".to_string()]
+    ));
+}
+
+#[test]
 fn no_mmproj_disables_explicit_and_discovered_projector_selection() {
     assert_eq!(
         select_mmproj_path(
@@ -292,6 +304,87 @@ fn visual_projector_does_not_change_model_context_components() {
         );
     }
     fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn freetoken_reserves_host_model_and_elastic_cuda_pool() {
+    let root = std::env::temp_dir().join(format!(
+        "omniinfer-freetoken-budget-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let model = root.join("model.gguf");
+    fs::File::create(&model).unwrap().set_len(GIB).unwrap();
+    let backend = backend_registry::BackendSpec {
+        id: "freetoken-linux-cuda".to_string(),
+        label: "test".to_string(),
+        family: "freetoken".to_string(),
+        runtime_dir: root.display().to_string(),
+        launcher_path: None,
+        models_dir: None,
+        catalog_url: None,
+        description: "test".to_string(),
+        capabilities: vec!["cuda".to_string()],
+        default_args: Vec::new(),
+        runtime_mode: "external_server".to_string(),
+        model_artifact: "reference".to_string(),
+        supports_mmproj: false,
+        supports_ctx_size: true,
+        python_modules: Vec::new(),
+        external_server_protocol: Some("freetoken-openai-server".to_string()),
+        log_file_name: "freetoken.log".to_string(),
+    };
+    let budget = build_runtime_resource_budget(
+        &json!({"launch_args": ["--memory-ratio", "0.5"]}),
+        &backend,
+        model.to_str().unwrap(),
+        None,
+        8192,
+        Some("0"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(budget.domains()[&MemoryDomain::Host], GIB + 384 * MIB);
+    assert_eq!(
+        budget.domains()[&MemoryDomain::Cuda("0".to_string())],
+        512 * GIB
+    );
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn freetoken_remote_reference_requires_host_budget() {
+    let backend = backend_registry::BackendSpec {
+        id: "freetoken-linux-cuda".to_string(),
+        label: "test".to_string(),
+        family: "freetoken".to_string(),
+        runtime_dir: "runtime".to_string(),
+        launcher_path: None,
+        models_dir: None,
+        catalog_url: None,
+        description: "test".to_string(),
+        capabilities: vec!["cuda".to_string()],
+        default_args: Vec::new(),
+        runtime_mode: "external_server".to_string(),
+        model_artifact: "reference".to_string(),
+        supports_mmproj: false,
+        supports_ctx_size: true,
+        python_modules: Vec::new(),
+        external_server_protocol: Some("freetoken-openai-server".to_string()),
+        log_file_name: "freetoken.log".to_string(),
+    };
+    let error = build_runtime_resource_budget(
+        &json!({}),
+        &backend,
+        "Qwen/Qwen3.6-35B-A3B",
+        None,
+        8192,
+        Some("0"),
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("host-memory reservation"));
 }
 
 fn speculative_test_backend(id: &str, family: &str, cuda: bool) -> backend_registry::BackendSpec {

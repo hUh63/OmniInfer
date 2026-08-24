@@ -40,6 +40,7 @@ Additional framework notes:
 - `framework/vllm` pins the upstream vLLM source release used for provenance and future source-build work
 - `framework/vla.cpp` is required for `vla.cpp-linux` and `vla.cpp-linux-cuda` source builds
 - `vllm-linux-cuda` installs vLLM Python wheels into an OmniInfer-managed local venv by default, which matches vLLM's normal binary distribution path
+- `freetoken-linux-cuda` installs verified FreeToken release wheels into a versioned OmniInfer-managed environment; it does not add a source submodule
 - Windows `vllm-wsl2-cuda` and `vllm-wsl2-rocm` install pinned official Linux wheels into OmniInfer-managed WSL2 venvs; upstream vLLM has no native Windows runtime
 
 Submodule behavior:
@@ -136,6 +137,7 @@ Current desktop runtime directories:
 - Linux s390x CPU: `.local/runtime/linux/llama.cpp-linux-s390x`
 - Linux x64 OpenVINO: `.local/runtime/linux/llama.cpp-linux-openvino`
 - Linux x64 vLLM CUDA: `.local/runtime/linux/vllm-linux-cuda`
+- Linux x64 FreeToken CUDA: `.local/runtime/linux/freetoken-linux-cuda`
 - Linux x64 vla.cpp CPU: `.local/runtime/linux/vla.cpp-linux`
 - Linux x64 vla.cpp CUDA: `.local/runtime/linux/vla.cpp-linux-cuda`
 - macOS Apple Silicon Metal: `.local/runtime/macos/llama.cpp-mac`
@@ -293,6 +295,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\platforms\windows\
 - `scripts/platforms/linux/build-llama-s390x.sh`
 - `scripts/platforms/linux/build-llama-openvino.sh`
 - `scripts/platforms/linux/vllm-linux-cuda/build.sh`
+- `scripts/platforms/linux/freetoken-linux-cuda/build.sh`
 - `scripts/platforms/linux/build-release.sh`
 
 ### Backend Notes
@@ -308,6 +311,7 @@ Linux backend script behavior:
 | `llama.cpp-linux-openvino` | Downloads official `b10280` OpenVINO archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with OpenVINO settings |
 | `llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message because upstream `b10280` has no Linux CUDA archive | `--from-source` builds pinned `framework/llama.cpp` commit `9b05354ec` with CUDA settings |
 | `vllm-linux-cuda` | Creates an OmniInfer-managed venv and installs vLLM wheels | Not a C++ source build path |
+| `freetoken-linux-cuda` | Installs pinned FreeToken v0.1.2 CUDA 13 wheels | Not a C++ source build path |
 | `mnn-linux` | Creates an OmniInfer-managed venv and installs the official `MNN==3.5.0` wheel | `--from-source` builds PyMNN from `framework/mnn` |
 | `ik_llama.cpp-linux` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/ik_llama.cpp` CPU |
 | `ik_llama.cpp-linux-cuda` | Fails with a clear "no prebuilt configured" message | `--from-source` builds `framework/ik_llama.cpp` CUDA |
@@ -346,6 +350,15 @@ Linux backend script behavior:
 - Installs into `.local/runtime/linux/vllm-linux-cuda` without `sudo`
 - Requires a CUDA-capable NVIDIA GPU and a vLLM-compatible Python/PyTorch wheel stack
 - Accepts HuggingFace model IDs, local snapshot directories, or other model references that vLLM can load
+
+`freetoken-linux-cuda`:
+
+- Target: Linux x64 with an NVIDIA R580-or-newer driver
+- Uses FreeToken's OpenAI-compatible server through `ft serve`
+- Installs without `sudo`; the FreeToken, kernel-cache, and uv release assets are pinned by SHA256
+- Accepts local checkpoints and Hugging Face model IDs supported by FreeToken
+- Uses a log readiness marker because FreeToken's `/health` endpoint can respond before model loading is complete
+- Reserves local model bytes in host memory and FreeToken's configured GPU memory ratio; remote model IDs require an explicit `resource_budget_bytes` host reservation
 
 `mnn-linux`:
 
@@ -392,6 +405,12 @@ Linux x64 vLLM CUDA:
 bash ./scripts/platforms/linux/vllm-linux-cuda/build.sh --smoke-test
 ```
 
+Linux x64 FreeToken CUDA:
+
+```bash
+bash ./scripts/platforms/linux/freetoken-linux-cuda/build.sh --smoke-test
+```
+
 Pin a specific vLLM wheel when reproducibility matters:
 
 ```bash
@@ -413,6 +432,7 @@ bash ./scripts/platforms/linux/vllm-linux-cuda/build.sh --package 'vllm==0.9.2'
 - `vla.cpp-linux`
 - `vla.cpp-linux-cuda`
 - `vllm-linux-cuda`
+- `freetoken-linux-cuda`
 - `mnn-linux`
 
 Runtime discovery is driven by the Linux backend registry rather than a

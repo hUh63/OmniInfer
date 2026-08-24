@@ -37,6 +37,14 @@ pub(super) fn build_runtime_resource_budget(
         .transpose()?
         .flatten()
         .unwrap_or(0);
+    if backend.family == "freetoken" {
+        return build_freetoken_resource_budget(
+            payload,
+            weights,
+            explicit_total,
+            cuda_visible_devices,
+        );
+    }
     let Some(weights) = weights else {
         let total = explicit_total.ok_or_else(|| {
             anyhow::anyhow!(
@@ -117,6 +125,83 @@ pub(super) fn build_runtime_resource_budget(
         )?)?);
     }
     Ok(estimated)
+}
+
+fn build_freetoken_resource_budget(
+    payload: &Value,
+    weights: Option<u64>,
+    explicit_host_bytes: Option<u64>,
+    cuda_visible_devices: Option<&str>,
+) -> Result<ResourceBudget> {
+    let host_total = match (weights, explicit_host_bytes) {
+        (Some(weights), explicit) => {
+            let framework = checked_scaled(weights, 8, 100)?.max(384 * MIB);
+            let minimum = weights
+                .checked_add(framework)
+                .ok_or_else(|| anyhow::anyhow!("FreeToken host resource budget overflow"))?;
+            if let Some(explicit) = explicit
+                && explicit < minimum
+            {
+                anyhow::bail!(
+                    "resource_budget_bytes is below the estimated FreeToken host minimum of {minimum} bytes"
+                );
+            }
+            explicit.unwrap_or(minimum)
+        }
+        (None, Some(explicit)) => explicit,
+        (None, None) => {
+            anyhow::bail!(
+                "FreeToken model size is unknown; provide a non-zero resource_budget_bytes host-memory reservation"
+            );
+        }
+    };
+    let devices = cuda_visible_devices.ok_or_else(|| {
+        anyhow::anyhow!("FreeToken CUDA resource budgeting requires a selected device")
+    })?;
+    let available = cuda_available_bytes(devices)?;
+    let ratio = freetoken_memory_ratio_millionths(payload)?;
+    let mut components = vec![BudgetComponent {
+        name: "host_model_and_runtime".to_string(),
+        domain: MemoryDomain::Host,
+        bytes: host_total,
+    }];
+    for (domain, bytes) in available {
+        components.push(BudgetComponent {
+            name: "elastic_cuda_pool".to_string(),
+            domain,
+            bytes: checked_scaled(bytes, ratio, 1_000_000)?.max(1),
+        });
+    }
+    Ok(ResourceBudget::from_components(components)?)
+}
+
+fn freetoken_memory_ratio_millionths(payload: &Value) -> Result<u64> {
+    let args = payload
+        .get("launch_args")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let mut value = None;
+    let mut index = 0;
+    while index < args.len() {
+        let token = args[index];
+        if let Some(inline) = token.strip_prefix("--memory-ratio=") {
+            value = Some(inline);
+        } else if token == "--memory-ratio" {
+            value = args.get(index + 1).copied();
+            index += 1;
+        }
+        index += 1;
+    }
+    let ratio = value.unwrap_or("0.9").parse::<f64>().map_err(|_| {
+        anyhow::anyhow!("FreeToken --memory-ratio must be a number between 0 and 1")
+    })?;
+    if !ratio.is_finite() || ratio <= 0.0 || ratio > 1.0 {
+        anyhow::bail!("FreeToken --memory-ratio must be a number between 0 and 1");
+    }
+    Ok((ratio * 1_000_000.0).round() as u64)
 }
 
 pub(super) fn artifact_size_bytes(path: &PathBuf) -> Result<Option<u64>> {

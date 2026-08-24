@@ -115,6 +115,7 @@ pub(super) fn launch_args_have_ctx_size(family: &str, args: &[String]) -> bool {
         let flag = arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg);
         match family {
             "vllm" => flag == "--max-model-len",
+            "freetoken" => flag == "--max-seq-len-override",
             "llama.cpp" | "turboquant" => matches!(flag, "-c" | "--ctx-size"),
             _ => matches!(flag, "-c" | "--ctx-size" | "--max-model-len"),
         }

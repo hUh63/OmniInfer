@@ -199,6 +199,33 @@ const LINUX_TEMPLATES: &[BackendTemplate] = &[
         )
     },
     BackendTemplate {
+        model_artifact: "reference",
+        supports_mmproj: false,
+        external_server_protocol: Some("freetoken-openai-server"),
+        log_file_name: "freetoken-server.log",
+        ..template(
+            "freetoken-linux-cuda",
+            "FreeToken Linux CUDA",
+            "freetoken",
+            "freetoken-linux-cuda",
+            Some("ft"),
+            "FreeToken edge-native MoE server managed by OmniInfer on Linux CUDA",
+            &[
+                "chat",
+                "stream",
+                "gpu",
+                "cuda",
+                "cuda13",
+                "linux",
+                "x64",
+                "openai-compatible",
+                "anthropic-compatible",
+                "moe",
+            ],
+            "OMNIINFER_FREETOKEN_LINUX_CUDA",
+        )
+    },
+    BackendTemplate {
         model_artifact: "vla-artifact",
         supports_ctx_size: false,
         external_server_protocol: Some("vla.cpp-zmq-server"),

@@ -41,6 +41,7 @@ pub fn parse_backend_load_extra_args(
     match family {
         "llama.cpp" | "turboquant" => parse_llama_cpp_load_args(backend_id, tokens),
         "vllm" => parse_vllm_load_args(tokens),
+        "freetoken" => parse_freetoken_load_args(tokens),
         "vla.cpp" => parse_vla_cpp_load_args(tokens),
         "mlx-lm" => Err(BackendArgError::MlxLoadUnsupported),
         _ => Ok(ParsedLoadArgs {
@@ -140,6 +141,27 @@ fn parse_vllm_load_args(tokens: &[String]) -> Result<ParsedLoadArgs, BackendArgE
             return Err(BackendArgError::ReservedManaged(flag.to_string()));
         }
         if matches!(flag, "-c" | "--ctx-size" | "--max-model-len") {
+            let (value, consumed) = take_option_value(tokens, index, inline_value, flag)?;
+            parsed.ctx_size = Some(parse_u32(flag, value)?);
+            index += consumed;
+            continue;
+        }
+        parsed.launch_args.push(token.clone());
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn parse_freetoken_load_args(tokens: &[String]) -> Result<ParsedLoadArgs, BackendArgError> {
+    let mut parsed = ParsedLoadArgs::default();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let (flag, inline_value) = split_flag_value(token);
+        if matches!(flag, "--model" | "--model-path" | "--host" | "--port") {
+            return Err(BackendArgError::ReservedManaged(flag.to_string()));
+        }
+        if matches!(flag, "-c" | "--ctx-size" | "--max-seq-len-override") {
             let (value, consumed) = take_option_value(tokens, index, inline_value, flag)?;
             parsed.ctx_size = Some(parse_u32(flag, value)?);
             index += consumed;
@@ -613,6 +635,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.ctx_size, Some(2048));
+    }
+
+    #[test]
+    fn parses_freetoken_max_sequence_length() {
+        let parsed = parse_backend_load_extra_args(
+            "freetoken-linux-cuda",
+            "freetoken",
+            &args(&["--max-seq-len-override=4096", "--memory-ratio", "0.8"]),
+        )
+        .unwrap();
+        assert_eq!(parsed.ctx_size, Some(4096));
+        assert_eq!(parsed.launch_args, args(&["--memory-ratio", "0.8"]));
+    }
+
+    #[test]
+    fn rejects_freetoken_managed_model_arg() {
+        let error = parse_backend_load_extra_args(
+            "freetoken-linux-cuda",
+            "freetoken",
+            &args(&["--model", "Qwen/Qwen3.6-35B-A3B"]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            BackendArgError::ReservedManaged("--model".to_string())
+        );
     }
 
     #[test]
