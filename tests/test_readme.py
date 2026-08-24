@@ -24,8 +24,8 @@ class RootReadmeTests(unittest.TestCase):
     def test_product_sections_are_concise_and_ordered(self):
         sections = (
             "## Quick Start",
-            "## Demo",
             "## News",
+            "## Demo",
             "## About",
             "## Platform Support",
             "## Documentation",
@@ -98,15 +98,11 @@ class RootReadmeTests(unittest.TestCase):
             self.readme,
         )
 
-    def test_demo_section_presents_three_focused_demos(self):
+    def test_demo_section_presents_two_focused_demos(self):
         demos = (
             (
                 "### Terminal UI — choose a backend, load a model, chat locally",
                 "docs/assets/demo/tui-chat-poster.webp",
-            ),
-            (
-                "### Local API — OpenAI-compatible endpoint",
-                "docs/assets/demo/local-api-poster.webp",
             ),
             (
                 "### Browser VLA demo — SmolVLA on LIBERO",
@@ -123,20 +119,20 @@ class RootReadmeTests(unittest.TestCase):
             "SmolVLA LIBERO dashboard screenshot</a>",
             self.readme,
         )
-        self.assertEqual(self.readme.count('<img src="docs/assets/demo/'), 3)
-        self.assertEqual(self.readme.count('width="720" alt="'), 3)
+        self.assertEqual(self.readme.count('<img src="docs/assets/demo/'), 2)
+        self.assertEqual(self.readme.count('width="720" alt="'), 2)
+        self.assertNotIn("### Local API — OpenAI-compatible endpoint", self.readme)
+        self.assertNotIn("docs/assets/demo/local-api", self.readme)
 
     def test_demo_animations_are_placeholder_free_and_described(self):
         for placeholder in (
             "OMNIINFER_DEMO_VIDEO_TUI",
-            "OMNIINFER_DEMO_VIDEO_API",
             "OMNIINFER_DEMO_VIDEO_VLA",
         ):
             with self.subTest(placeholder=placeholder):
                 self.assertNotIn(placeholder, self.readme)
         animations = (
             ("docs/assets/demo/tui-chat.webp", "Terminal UI"),
-            ("docs/assets/demo/local-api.webp", "OpenAI-compatible"),
             ("docs/assets/demo/vla-libero.webp", "SmolVLA LIBERO"),
         )
         for path, label in animations:
@@ -150,7 +146,7 @@ class RootReadmeTests(unittest.TestCase):
         self.assertNotIn(RETIRED_VLA_DEMO_ATTACHMENT, self.readme)
 
     def test_demo_posters_exist_within_size_budget(self):
-        posters = ("tui-chat-poster.webp", "local-api-poster.webp", "vla-libero-poster.webp")
+        posters = ("tui-chat-poster.webp", "vla-libero-poster.webp")
         total = 0
         for name in posters:
             path = DEMO_ASSET_DIR / name
@@ -164,7 +160,6 @@ class RootReadmeTests(unittest.TestCase):
     def test_demo_animations_exist_within_size_budget(self):
         animations = (
             ("tui-chat.webp", TERMINAL_ANIMATION_MAX_BYTES),
-            ("local-api.webp", TERMINAL_ANIMATION_MAX_BYTES),
             ("vla-libero.webp", VLA_ANIMATION_MAX_BYTES),
         )
         total = 0

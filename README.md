@@ -52,6 +52,10 @@ The installers download the latest CLI-only GitHub Release, verify its SHA-256 c
 
 To run the local OpenAI- and Anthropic-compatible service, start `omniinfer serve` and follow the [CLI Guide](docs/CLI.md) or [API Reference](docs/API.md). Source builds and mobile embedding are documented separately.
 
+## News
+
+- **2026-08-14** — 🚀 **Day-0 support for Qwen3.8-27B.** OmniInfer is ready for Qwen's latest 27B vision-language model from day one.
+
 ## Demo
 
 Short, focused recordings of the main entry points. Each demo covers one capability.
@@ -65,15 +69,6 @@ Running `omniinfer` opens a terminal UI that recommends a compatible backend, lo
 </p>
 <p align="center"><sub>Static preview: <a href="docs/assets/demo/tui-chat-poster.webp">terminal UI screenshot</a></sub></p>
 
-### Local API — OpenAI-compatible endpoint
-
-`omniinfer serve` exposes an OpenAI-compatible HTTP API on localhost; any OpenAI SDK or client can stream chat completions from the same local model.
-
-<p align="center">
-  <img src="docs/assets/demo/local-api.webp" width="720" alt="OpenAI-compatible local API request and response">
-</p>
-<p align="center"><sub>Static preview: <a href="docs/assets/demo/local-api-poster.webp">API request and response screenshot</a></sub></p>
-
 ### Browser VLA demo — SmolVLA on LIBERO
 
 The optional [vla-libero example](examples/vla-libero/README.md) runs a SmolVLA policy through a managed vla.cpp runtime in the LIBERO simulator, showing live camera views, the predicted action, and latency in a browser dashboard.
@@ -82,10 +77,6 @@ The optional [vla-libero example](examples/vla-libero/README.md) runs a SmolVLA 
   <img src="docs/assets/demo/vla-libero.webp" width="720" alt="SmolVLA LIBERO browser dashboard showing camera views, predicted actions, latency, and a successful rollout">
 </p>
 <p align="center"><sub>Static preview: <a href="docs/assets/demo/vla-libero-poster.webp">SmolVLA LIBERO dashboard screenshot</a></sub></p>
-
-## News
-
-- **2026-08-14** — 🚀 **Day-0 support for Qwen3.8-27B.** OmniInfer is ready for Qwen's latest 27B vision-language model from day one.
 
 ## About
 
