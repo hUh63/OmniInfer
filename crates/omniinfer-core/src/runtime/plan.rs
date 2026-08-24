@@ -25,6 +25,7 @@ pub enum RuntimeReadinessProbe {
 pub enum ExternalServerProtocol {
     LlamaCppServer,
     VlaCppZmqServer,
+    FreeTokenOpenAiServer,
     VllmOpenAiServer,
     VllmWsl2OpenAiServer,
 }
@@ -34,6 +35,7 @@ impl ExternalServerProtocol {
         match value {
             "llama.cpp-server" => Some(Self::LlamaCppServer),
             "vla.cpp-zmq-server" => Some(Self::VlaCppZmqServer),
+            "freetoken-openai-server" => Some(Self::FreeTokenOpenAiServer),
             "vllm-openai-server" => Some(Self::VllmOpenAiServer),
             "vllm-wsl2-openai-server" => Some(Self::VllmWsl2OpenAiServer),
             _ => None,
@@ -44,6 +46,7 @@ impl ExternalServerProtocol {
         match self {
             Self::LlamaCppServer => "llama.cpp-server",
             Self::VlaCppZmqServer => "vla.cpp-zmq-server",
+            Self::FreeTokenOpenAiServer => "freetoken-openai-server",
             Self::VllmOpenAiServer => "vllm-openai-server",
             Self::VllmWsl2OpenAiServer => "vllm-wsl2-openai-server",
         }
@@ -166,6 +169,13 @@ pub fn build_external_runtime_plan(
             effective_ctx_size,
             log_file_name,
         ),
+        ExternalServerProtocol::FreeTokenOpenAiServer => build_freetoken_plan(
+            &launcher_path,
+            request,
+            server_args,
+            effective_ctx_size,
+            log_file_name,
+        ),
         ExternalServerProtocol::VllmOpenAiServer => build_vllm_plan(
             &launcher_path,
             request,
@@ -182,6 +192,54 @@ pub fn build_external_runtime_plan(
             log_file_name,
         ),
     }
+}
+
+fn build_freetoken_plan(
+    launcher_path: &Path,
+    request: &ExternalRuntimeRequest,
+    mut server_args: Vec<String>,
+    effective_ctx_size: Option<u32>,
+    log_file_name: String,
+) -> Result<ExternalRuntimePlan, RuntimePlanError> {
+    if extract_server_arg_value(&server_args, &["--served-model-name"]).is_none() {
+        server_args.splice(
+            0..0,
+            ["--served-model-name".to_string(), "local".to_string()],
+        );
+    }
+    let proxy_model_ref = extract_server_arg_value(&server_args, &["--served-model-name"]);
+    let mut command = vec![
+        launcher_path.display().to_string(),
+        "serve".to_string(),
+        "--model".to_string(),
+        request.model_path.clone(),
+        "--host".to_string(),
+        request.host.clone(),
+        "--port".to_string(),
+        request.port.to_string(),
+    ];
+    command.append(&mut server_args);
+    Ok(ExternalRuntimePlan {
+        command,
+        stop_command: None,
+        cwd: launcher_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        port: request.port,
+        ctx_size: effective_ctx_size,
+        log_file_name,
+        proxy_model_ref,
+        protocol: ExternalServerProtocol::FreeTokenOpenAiServer,
+        client_endpoint: ExternalServerProtocol::FreeTokenOpenAiServer
+            .client_endpoint(&request.host, request.port),
+        readiness_probe: RuntimeReadinessProbe::TcpConnectAndLog {
+            marker: format!(
+                "API server is ready to serve on {}:{}",
+                request.host, request.port
+            ),
+        },
+    })
 }
 
 fn build_llama_cpp_plan(
@@ -522,6 +580,7 @@ fn extract_server_arg_value(args: &[String], flags: &[&str]) -> Option<String> {
 
 fn ctx_size_flags(protocol: &str) -> [&'static str; 2] {
     match protocol {
+        "freetoken-openai-server" => ["--max-seq-len-override", ""],
         "vllm-openai-server" | "vllm-wsl2-openai-server" => ["--max-model-len", ""],
         "vla.cpp-zmq-server" => ["", ""],
         _ => ["-c", "--ctx-size"],

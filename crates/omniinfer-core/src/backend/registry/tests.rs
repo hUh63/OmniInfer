@@ -19,6 +19,13 @@ fn amd_gpu_output_detection_rejects_non_gpu_architecture_text() {
 }
 
 #[test]
+fn nvidia_driver_branch_parser_handles_release_versions() {
+    assert_eq!(parse_nvidia_driver_branch("595.84"), Some(595));
+    assert_eq!(parse_nvidia_driver_branch(" 580.105.08 "), Some(580));
+    assert_eq!(parse_nvidia_driver_branch("unknown"), None);
+}
+
+#[test]
 fn linux_registry_includes_primary_backends() {
     let registry = BackendRegistry::build(
         HostInfo {
@@ -30,6 +37,7 @@ fn linux_registry_includes_primary_backends() {
     );
     assert!(registry.get("llama.cpp-linux-cuda").is_some());
     assert!(registry.get("vllm-linux-cuda").is_some());
+    assert!(registry.get("freetoken-linux-cuda").is_some());
     assert!(registry.get("mnn-linux").is_some());
 }
 
@@ -104,6 +112,42 @@ fn vllm_uses_reference_artifact_without_mmproj() {
         backend.external_server_protocol.as_deref(),
         Some("vllm-openai-server")
     );
+}
+
+#[test]
+fn freetoken_uses_reference_artifact_and_cuda13_contract() {
+    let registry = BackendRegistry::build(
+        HostInfo {
+            system: HostSystem::Linux,
+            machine: "x86_64",
+        },
+        "runtime",
+        &Value::Null,
+    );
+    let backend = registry.get("freetoken-linux-cuda").unwrap();
+    assert_eq!(backend.family, "freetoken");
+    assert_eq!(backend.model_artifact, "reference");
+    assert!(!backend.supports_mmproj);
+    assert_eq!(
+        backend.external_server_protocol.as_deref(),
+        Some("freetoken-openai-server")
+    );
+    for capability in [
+        "gpu",
+        "cuda",
+        "cuda13",
+        "linux",
+        "x64",
+        "openai-compatible",
+        "anthropic-compatible",
+        "moe",
+    ] {
+        assert!(
+            backend.capabilities.iter().any(|value| value == capability),
+            "missing capability {capability}"
+        );
+    }
+    assert_eq!(backend_priority("freetoken-linux-cuda"), 3);
 }
 
 #[test]

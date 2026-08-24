@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::detection::{embedded_module_exists, is_hardware_compatible};
 #[cfg(test)]
-use super::detection::{gpu_backend_ids, output_mentions_amd_gpu};
+use super::detection::{gpu_backend_ids, output_mentions_amd_gpu, parse_nvidia_driver_branch};
 use super::templates::backend_templates;
 use crate::{config, local_state, paths};
 
@@ -263,6 +263,7 @@ pub fn backend_priority(backend_id: &str) -> i32 {
         "vla.cpp-linux-cuda" => 1,
         "vla.cpp-linux" => 2,
         "vllm-linux-cuda" => 2,
+        "freetoken-linux-cuda" => 3,
         "vllm-wsl2-cuda" => 2,
         "vllm-wsl2-rocm" => 2,
         "llama.cpp-cpu" => 1,

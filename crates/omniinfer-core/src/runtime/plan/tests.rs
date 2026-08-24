@@ -226,6 +226,58 @@ fn vllm_uses_openai_server_shape() {
 }
 
 #[test]
+fn freetoken_uses_managed_openai_server_shape_and_ready_marker() {
+    let backend = json!({
+        "id": "freetoken-linux-cuda",
+        "launcher_path": "/runtime/freetoken/bin/ft",
+        "runtime_dir": "/runtime/freetoken",
+        "default_args": ["--memory-ratio", "0.8"],
+        "external_server_protocol": "freetoken-openai-server",
+        "log_file_name": "freetoken-server.log"
+    });
+    let plan = build_external_runtime_plan(&ExternalRuntimeRequest {
+        backend,
+        model_path: "Qwen/Qwen3.6-35B-A3B".to_string(),
+        mmproj_path: None,
+        host: "127.0.0.1".to_string(),
+        port: 19190,
+        ctx_size: Some(8192),
+        launch_args: None,
+    })
+    .unwrap();
+    assert_eq!(plan.ctx_size, Some(8192));
+    assert_eq!(plan.proxy_model_ref.as_deref(), Some("local"));
+    assert_eq!(plan.protocol, ExternalServerProtocol::FreeTokenOpenAiServer);
+    assert_eq!(plan.client_endpoint, "http://127.0.0.1:19190");
+    assert!(plan.protocol.is_openai_compatible());
+    assert_eq!(
+        plan.readiness_probe,
+        RuntimeReadinessProbe::TcpConnectAndLog {
+            marker: "API server is ready to serve on 127.0.0.1:19190".to_string(),
+        }
+    );
+    assert_eq!(
+        plan.command,
+        vec![
+            "/runtime/freetoken/bin/ft",
+            "serve",
+            "--model",
+            "Qwen/Qwen3.6-35B-A3B",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19190",
+            "--served-model-name",
+            "local",
+            "--memory-ratio",
+            "0.8",
+            "--max-seq-len-override",
+            "8192",
+        ]
+    );
+}
+
+#[test]
 fn wsl_vllm_uses_manifest_and_translates_windows_model_path() {
     let root = std::env::temp_dir().join(format!("omniinfer-wsl-plan-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

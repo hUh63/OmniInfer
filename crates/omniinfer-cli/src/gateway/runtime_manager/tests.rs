@@ -33,6 +33,18 @@ fn detects_vllm_context_args() {
 }
 
 #[test]
+fn detects_freetoken_context_args() {
+    assert!(launch_args_have_ctx_size(
+        "freetoken",
+        &["--max-seq-len-override=8192".to_string()]
+    ));
+    assert!(!launch_args_have_ctx_size(
+        "freetoken",
+        &["--memory-ratio".to_string(), "0.8".to_string()]
+    ));
+}
+
+#[test]
 fn no_mmproj_disables_explicit_and_discovered_projector_selection() {
     assert_eq!(
         select_mmproj_path(

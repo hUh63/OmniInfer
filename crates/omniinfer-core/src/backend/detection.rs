@@ -11,6 +11,7 @@ pub(super) fn gpu_backend_ids(host: HostInfo) -> &'static [&'static str] {
             "omniinfer-native-linux",
             "ik_llama.cpp-linux-cuda",
             "vllm-linux-cuda",
+            "freetoken-linux-cuda",
             "vla.cpp-linux-cuda",
         ],
         HostSystem::Windows => &[
@@ -48,7 +49,11 @@ pub(super) fn is_hardware_compatible(host: HostInfo, spec: &BackendSpec) -> bool
         return true;
     }
     if caps.contains(&"cuda") {
-        return cuda_detected();
+        return if caps.contains(&"cuda13") {
+            cuda13_driver_detected()
+        } else {
+            cuda_detected()
+        };
     }
     if caps.contains(&"rocm") || caps.contains(&"hip") {
         return rocm_detected(host);
@@ -76,6 +81,27 @@ fn cuda_detected() -> bool {
         .output()
         .map(|output| output.status.success() && !output.stdout.is_empty())
         .unwrap_or(false)
+}
+
+fn cuda13_driver_detected() -> bool {
+    std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=driver_version",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(parse_nvidia_driver_branch)
+                    .any(|branch| branch >= 580)
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn parse_nvidia_driver_branch(value: &str) -> Option<u32> {
+    value.trim().split('.').next()?.parse().ok()
 }
 
 fn rocm_detected(host: HostInfo) -> bool {

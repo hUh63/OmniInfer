@@ -275,7 +275,7 @@ fn resolve_model_reference(text: &str, family: &str, cwd: &Path) -> Result<Strin
         return Err(ModelLoadError::EmptyModel);
     }
     let path = absolute_path_from_text(&text, cwd);
-    if family == "vllm" && !path.exists() {
+    if matches!(family, "vllm" | "freetoken") && !path.exists() {
         return Ok(text);
     }
     if !path.exists() {
@@ -706,6 +706,28 @@ mod tests {
         .unwrap();
         assert_eq!(plan.payload["model"], "Qwen/Qwen3");
         assert_eq!(plan.payload["resource_budget_bytes"], 7_516_192_768_u64);
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn keeps_freetoken_model_reference_when_path_is_missing() {
+        let cwd = temp_dir("freetoken");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let request = ModelLoadRequest {
+            model: "Qwen/Qwen3.6-35B-A3B".to_string(),
+            ..ModelLoadRequest::default()
+        };
+        let plan = build_model_load_payload(
+            &request,
+            &[backend("freetoken-linux-cuda", "freetoken", true)],
+            None,
+            Some("freetoken-linux-cuda"),
+            None,
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(plan.payload["model"], "Qwen/Qwen3.6-35B-A3B");
+        assert_eq!(plan.payload["ctx_size"], DEFAULT_LOAD_CONTEXT_SIZE);
         std::fs::remove_dir_all(cwd).ok();
     }
 

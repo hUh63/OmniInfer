@@ -334,6 +334,7 @@ fn is_gpu_backend(backend_id: &str) -> bool {
             | "omniinfer-native-linux"
             | "ik_llama.cpp-linux-cuda"
             | "vllm-linux-cuda"
+            | "freetoken-linux-cuda"
             | "vllm-wsl2-cuda"
             | "vllm-wsl2-rocm"
             | "llama.cpp-cuda"
