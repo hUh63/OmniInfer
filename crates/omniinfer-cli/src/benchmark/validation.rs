@@ -1,5 +1,81 @@
 use super::*;
 
+pub(super) struct ExecutionPlacement {
+    pub(super) compute_mode: &'static str,
+    pub(super) prefill: BenchmarkAccelerator,
+    pub(super) decode: BenchmarkAccelerator,
+    pub(super) privilege: BenchmarkPrivilegeLevel,
+}
+
+pub(super) fn resolve_execution(
+    args: &BenchRunArgs,
+    backend: &str,
+    run_command: &str,
+) -> Result<ExecutionPlacement> {
+    let (prefill, decode) = match (args.prefill_accelerator, args.decode_accelerator) {
+        (Some(prefill), Some(decode)) => (prefill, decode),
+        (None, None) => {
+            let accelerator = infer_accelerator(backend).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Compute accelerator is ambiguous for backend {backend:?}. Pass both --prefill-accelerator and --decode-accelerator."
+                )
+            })?;
+            (accelerator, accelerator)
+        }
+        _ => anyhow::bail!(
+            "Pass both --prefill-accelerator and --decode-accelerator, or omit both for an unambiguous single-accelerator backend."
+        ),
+    };
+    let privilege_wrapper = run_command
+        .split_whitespace()
+        .next()
+        .map(|value| value.trim_matches(['\'', '"']).to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "su" | "sudo"));
+    match args.privilege_level {
+        BenchmarkPrivilegeLevel::Elevated if !privilege_wrapper => anyhow::bail!(
+            "--privilege-level elevated requires --run-command to retain its su or sudo wrapper."
+        ),
+        BenchmarkPrivilegeLevel::Standard if privilege_wrapper => anyhow::bail!(
+            "The runtime command uses a privilege wrapper. Pass --privilege-level elevated."
+        ),
+        _ => {}
+    }
+    Ok(ExecutionPlacement {
+        compute_mode: if prefill == decode { "single" } else { "mixed" },
+        prefill,
+        decode,
+        privilege: args.privilege_level,
+    })
+}
+
+pub(super) fn infer_accelerator(backend: &str) -> Option<BenchmarkAccelerator> {
+    let backend = backend.to_ascii_lowercase();
+    if backend.contains("htp") {
+        Some(BenchmarkAccelerator::Htp)
+    } else if backend.contains("npu") || backend.contains("qnn") {
+        Some(BenchmarkAccelerator::Npu)
+    } else if backend.contains("ane") {
+        Some(BenchmarkAccelerator::Ane)
+    } else if [
+        "cuda",
+        "rocm",
+        "hip",
+        "vulkan",
+        "mlx",
+        "metal",
+        "turboquant",
+    ]
+    .iter()
+    .any(|marker| backend.contains(marker))
+    {
+        Some(BenchmarkAccelerator::Gpu)
+    } else if backend.contains("cpu") || matches!(backend.as_str(), "llama.cpp-linux") {
+        Some(BenchmarkAccelerator::Cpu)
+    } else {
+        None
+    }
+}
+
 pub(super) fn validate_metadata(args: &BenchRunArgs) -> Result<()> {
     for (label, value, max) in [
         ("--catalog-model-id", args.catalog_model_id.as_str(), 128),

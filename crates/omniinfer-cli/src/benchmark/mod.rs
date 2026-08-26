@@ -13,10 +13,11 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::Url;
 
 use crate::{
-    BenchRunArgs, get_local_json, json_bool, json_str, json_u64, post_local_json_for_config,
+    BenchRunArgs, BenchmarkAccelerator, BenchmarkPrivilegeLevel, get_local_json, json_bool,
+    json_str, json_u64, post_local_json_for_config,
 };
 
-const BENCHMARK_SCHEMA_VERSION: &str = "1.3.0";
+const BENCHMARK_SCHEMA_VERSION: &str = "1.4.0";
 const MAX_MEASUREMENT_CV: f64 = 0.05;
 const IGNORE_EOS_PROTOCOL_NOTE: &str =
     "fixed_length_generation=true; ignore_eos=true; completion_tokens=max_tokens";
@@ -88,6 +89,7 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
         )?
         .to_string(),
     };
+    let execution = resolve_execution(args, loaded_backend, &run_command)?;
 
     let context_size = args
         .context_size
@@ -202,6 +204,7 @@ pub(crate) fn run(args: &BenchRunArgs) -> Result<()> {
         backend_version: &backend_version,
         build_command: &build_command,
         run_command: &run_command,
+        execution: &execution,
         optimization_mode,
         optimizations: &optimizations,
         context_size,
@@ -333,6 +336,23 @@ mod tests {
             detected.into_iter().collect::<Vec<_>>(),
             vec!["dflash", "turboquant"]
         );
+    }
+
+    #[test]
+    fn infers_known_single_accelerator_backends() {
+        assert_eq!(
+            infer_accelerator("llama.cpp-linux-cuda"),
+            Some(BenchmarkAccelerator::Gpu)
+        );
+        assert_eq!(
+            infer_accelerator("llama.cpp-android-htp"),
+            Some(BenchmarkAccelerator::Htp)
+        );
+        assert_eq!(
+            infer_accelerator("llama.cpp-linux"),
+            Some(BenchmarkAccelerator::Cpu)
+        );
+        assert_eq!(infer_accelerator("third-party-runtime"), None);
     }
 
     #[test]

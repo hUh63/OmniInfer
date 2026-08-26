@@ -89,7 +89,7 @@ fn bench_archives_submission_compatible_json() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Run 3/3"))
-        .stderr(predicate::str::contains("Schema: 1.3.0"));
+        .stderr(predicate::str::contains("Schema: 1.4.0"));
     let printed_payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
         .expect("--json stdout is one JSON value");
     assert_eq!(printed_payload["benchmark_id"], benchmark_id);
@@ -123,7 +123,7 @@ fn bench_archives_submission_compatible_json() {
     let payload: serde_json::Value =
         serde_json::from_slice(&fs::read(&result).expect("read benchmark result"))
             .expect("parse benchmark result");
-    assert_eq!(payload["schema_version"], "1.3.0");
+    assert_eq!(payload["schema_version"], "1.4.0");
     assert_eq!(payload["producer"]["name"], "OmniInfer CLI");
     assert_eq!(payload["backend"]["version"], "b10280");
     assert_eq!(
@@ -134,6 +134,12 @@ fn bench_archives_submission_compatible_json() {
     assert_eq!(payload["protocol"]["cache_policy"], "cleared_each_run");
     assert_eq!(payload["workload"]["pp"], 64);
     assert_eq!(payload["workload"]["tg"], 16);
+    assert_eq!(payload["workload"]["scored_tokens"]["prefill"], 64);
+    assert_eq!(payload["workload"]["scored_tokens"]["decode"], 16);
+    assert_eq!(payload["execution"]["compute_mode"], "single");
+    assert_eq!(payload["execution"]["prefill_accelerator"], "gpu");
+    assert_eq!(payload["execution"]["decode_accelerator"], "gpu");
+    assert_eq!(payload["execution"]["privilege_level"], "standard");
     assert_eq!(payload["workload"]["batch_size"], 64);
     assert_eq!(
         payload["runs"]["prefill_tps"],
