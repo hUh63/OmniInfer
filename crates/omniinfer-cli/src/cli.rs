@@ -252,6 +252,15 @@ pub(crate) struct BenchRunArgs {
     /// Optional human-readable backend name.
     #[arg(long)]
     pub(crate) backend_name: Option<String>,
+    /// Accelerator used for Prefill. Set both phase accelerators for mixed execution.
+    #[arg(long, value_enum)]
+    pub(crate) prefill_accelerator: Option<BenchmarkAccelerator>,
+    /// Accelerator used for Decode. Set both phase accelerators for mixed execution.
+    #[arg(long, value_enum)]
+    pub(crate) decode_accelerator: Option<BenchmarkAccelerator>,
+    /// Privilege level of the measured runtime process.
+    #[arg(long, value_enum, default_value_t = BenchmarkPrivilegeLevel::Standard)]
+    pub(crate) privilege_level: BenchmarkPrivilegeLevel,
     /// Exact runtime/backend version; read from a managed prebuilt manifest when omitted.
     #[arg(long)]
     pub(crate) backend_version: Option<String>,
@@ -312,6 +321,45 @@ pub(crate) struct BenchRunArgs {
     /// Also print the complete result JSON to stdout.
     #[arg(long)]
     pub(crate) json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum BenchmarkAccelerator {
+    Cpu,
+    Gpu,
+    Npu,
+    Htp,
+    Ane,
+    Other,
+}
+
+impl BenchmarkAccelerator {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+            Self::Npu => "npu",
+            Self::Htp => "htp",
+            Self::Ane => "ane",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub(crate) enum BenchmarkPrivilegeLevel {
+    #[default]
+    Standard,
+    Elevated,
+}
+
+impl BenchmarkPrivilegeLevel {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Elevated => "elevated",
+        }
+    }
 }
 
 #[derive(Debug, Args)]

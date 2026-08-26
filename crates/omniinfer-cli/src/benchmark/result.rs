@@ -171,6 +171,7 @@ pub(super) struct BuildSubmission<'a> {
     pub(super) backend_version: &'a str,
     pub(super) build_command: &'a str,
     pub(super) run_command: &'a str,
+    pub(super) execution: &'a ExecutionPlacement,
     pub(super) optimization_mode: &'a str,
     pub(super) optimizations: &'a [String],
     pub(super) context_size: u32,
@@ -253,6 +254,12 @@ pub(super) fn build_submission(input: BuildSubmission<'_>) -> Result<Value> {
             "soc": input.soc,
         },
         "backend": backend,
+        "execution": {
+            "compute_mode": input.execution.compute_mode,
+            "prefill_accelerator": input.execution.prefill.as_str(),
+            "decode_accelerator": input.execution.decode.as_str(),
+            "privilege_level": input.execution.privilege.as_str(),
+        },
         "runtime": {
             "build_command": input.build_command,
             "run_command": input.run_command,
@@ -265,6 +272,10 @@ pub(super) fn build_submission(input: BuildSubmission<'_>) -> Result<Value> {
             "task": "text_generation",
             "pp": input.pp,
             "tg": input.tg,
+            "scored_tokens": {
+                "prefill": input.pp,
+                "decode": input.tg,
+            },
             "context_size": input.context_size,
             "batch_size": input.batch_size,
             "concurrency": 1,
