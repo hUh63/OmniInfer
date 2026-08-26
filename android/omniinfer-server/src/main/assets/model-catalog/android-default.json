@@ -198,6 +198,141 @@
       }
     },
     {
+      "id": "qwen35-9b-q4-0-gguf-llamacpp-htp",
+      "display_name": "Qwen3.5 9B Q4_0",
+      "family": "Qwen3.5",
+      "parameter_size": "9B",
+      "vendor": "Qwen",
+      "license": "Apache-2.0",
+      "modalities": ["text"],
+      "capabilities": ["chat", "reasoning"],
+      "backend": {
+        "framework": "llama.cpp",
+        "format": "gguf",
+        "quantization": "Q4_0"
+      },
+      "runtime": {
+        "accelerator": "htp",
+        "device": "HTP0",
+        "n_threads": 6,
+        "n_ctx": 8192,
+        "load_options": {
+          "accelerator": "htp",
+          "backend_type": "npu",
+          "llama_device": "HTP0",
+          "n_gpu_layers": "99",
+          "batch_size": "1024",
+          "ubatch_size": "1024",
+          "cpu_mask": "0xfc",
+          "cpu_strict": "true"
+        }
+      },
+      "sources": [
+        {
+          "provider": "HuggingFace",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_0.gguf",
+          "file_name": "Qwen3.5-9B-Q4_0.gguf",
+          "sha256": "17670346b4260ddcb0173965145155885024f3c9a4a24389a3370751edbcde24",
+          "size_bytes": 5379417312
+        }
+      ],
+      "validation": {
+        "status": "validated_on_sm8650_sm8750_sm8850",
+        "device": "SM8650 / SM8750 / SM8850",
+        "notes": "Qwen3.5-9B Q4_0 completed PP512/TG128 CPU and HTP validation on three Snapdragon generations."
+      }
+    },
+    {
+      "id": "qwen3-4b-q4-0-gguf-llamacpp-htp",
+      "display_name": "Qwen3 4B Q4_0",
+      "family": "Qwen3",
+      "parameter_size": "4B",
+      "vendor": "Qwen",
+      "license": "Apache-2.0",
+      "modalities": ["text"],
+      "capabilities": ["chat", "reasoning"],
+      "backend": {
+        "framework": "llama.cpp",
+        "format": "gguf",
+        "quantization": "Q4_0"
+      },
+      "runtime": {
+        "accelerator": "htp",
+        "device": "HTP0",
+        "n_threads": 6,
+        "n_ctx": 8192,
+        "load_options": {
+          "accelerator": "htp",
+          "backend_type": "npu",
+          "llama_device": "HTP0",
+          "n_gpu_layers": "99",
+          "batch_size": "1024",
+          "ubatch_size": "1024",
+          "cpu_mask": "0xfc",
+          "cpu_strict": "true"
+        }
+      },
+      "sources": [
+        {
+          "provider": "ModelScope",
+          "url": "https://modelscope.cn/models/unsloth/Qwen3-4B-GGUF/resolve/e203c6a745e2376a680765554c1ae470a01c0af4/Qwen3-4B-Q4_0.gguf",
+          "file_name": "Qwen3-4B-Q4_0.gguf",
+          "sha256": "92f4a83cdfe691b216a949f915e47f35f0ed85b833aa03490c719160ac5cdf7a",
+          "size_bytes": 2375773472
+        }
+      ],
+      "validation": {
+        "status": "validated_on_sm8650_sm8750_sm8850",
+        "device": "SM8650 / SM8750 / SM8850",
+        "notes": "Qwen3-4B Q4_0 completed PP512/TG128 CPU and HTP validation on three Snapdragon generations."
+      }
+    },
+    {
+      "id": "qwen3-8b-q4-0-gguf-llamacpp-htp",
+      "display_name": "Qwen3 8B Q4_0",
+      "family": "Qwen3",
+      "parameter_size": "8B",
+      "vendor": "Qwen",
+      "license": "Apache-2.0",
+      "modalities": ["text"],
+      "capabilities": ["chat", "reasoning"],
+      "backend": {
+        "framework": "llama.cpp",
+        "format": "gguf",
+        "quantization": "Q4_0"
+      },
+      "runtime": {
+        "accelerator": "htp",
+        "device": "HTP0",
+        "n_threads": 6,
+        "n_ctx": 8192,
+        "load_options": {
+          "accelerator": "htp",
+          "backend_type": "npu",
+          "llama_device": "HTP0",
+          "n_gpu_layers": "99",
+          "batch_size": "1024",
+          "ubatch_size": "1024",
+          "cpu_mask": "0xfc",
+          "cpu_strict": "true"
+        }
+      },
+      "sources": [
+        {
+          "provider": "ModelScope",
+          "url": "https://modelscope.cn/models/unsloth/Qwen3-8B-GGUF/resolve/07e499c78d5fe644eb2ae2efc8e77bff7f283d66/Qwen3-8B-Q4_0.gguf",
+          "file_name": "Qwen3-8B-Q4_0.gguf",
+          "sha256": "b27045487a02ba6e5c4f579f435caa1b7e678bd46dfe31cf006c6423bd797469",
+          "size_bytes": 4787332800
+        }
+      ],
+      "validation": {
+        "status": "validated_on_sm8650_sm8750_sm8850",
+        "device": "SM8650 / SM8750 / SM8850",
+        "notes": "Qwen3-8B Q4_0 completed PP512/TG128 CPU and HTP validation on three Snapdragon generations."
+      }
+    },
+    {
       "id": "gemma4-e2b-litertlm-gpu",
       "display_name": "Gemma4 E2B LiteRT-LM GPU",
       "family": "Gemma 4",
