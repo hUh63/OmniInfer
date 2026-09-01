@@ -1,0 +1,47 @@
+name: Build llama.cpp Snapdragon HTP runtime
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-htp:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/snapdragon-toolchain/arm64-android:v0.7
+      options: --user root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Init submodules (https URLs)
+        run: |
+          sed -i 's|git@github.com:|https://github.com/|g' .gitmodules
+          git config --global --add safe.directory '*'
+          git config --global http.postBuffer 524288000
+          git submodule update --init --recursive
+
+      - name: Configure (snapdragon preset)
+        working-directory: framework/llama.cpp
+        run: |
+          cp docs/backend/snapdragon/CMakeUserPresets.json .
+          cmake --preset arm64-android-snapdragon-release -B build-snapdragon
+
+      - name: Build
+        working-directory: framework/llama.cpp
+        run: cmake --build build-snapdragon -j $(nproc)
+
+      - name: Collect shared libraries
+        working-directory: framework/llama.cpp
+        run: |
+          mkdir -p htp-out
+          find build-snapdragon -name "*.so" -exec cp {} htp-out/ \; || true
+          ls -la htp-out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-cpp-htp-libs
+          path: framework/llama.cpp/htp-out
+          if-no-files-found: error
