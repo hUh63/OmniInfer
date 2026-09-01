@@ -20,7 +20,7 @@ jobs:
           sed -i 's|git@github.com:|https://github.com/|g' .gitmodules
           git config --global --add safe.directory '*'
           git config --global http.postBuffer 524288000
-          git submodule update --init --recursive
+          git submodule update --init framework/llama.cpp
 
       - name: Configure (snapdragon preset)
         working-directory: framework/llama.cpp
