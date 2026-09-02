@@ -3,6 +3,9 @@ name: Build llama.cpp Snapdragon HTP runtime
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-htp:
     runs-on: ubuntu-latest
@@ -38,6 +41,26 @@ jobs:
           mkdir -p htp-out
           find build-snapdragon -name "*.so" -exec cp {} htp-out/ \; || true
           ls -la htp-out
+
+      - name: Push libs via contents API
+        working-directory: framework/llama.cpp
+        shell: bash
+        run: |
+          set -e
+          for f in htp-out/*.so; do
+            B64=$(base64 -w0 "$f")
+            NAME=$(basename "$f")
+            printf '{"message":"add %s","content":"%s"}' "$NAME" "$B64" > /tmp/body.json
+            for try in 1 2 3; do
+              CODE=$(curl -sS -o /tmp/resp.json -w "%{http_code}" -X PUT \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/htp-libs/$NAME" \
+                -d @/tmp/body.json) && break
+              sleep 3
+            done
+            echo "$NAME -> $CODE"
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
